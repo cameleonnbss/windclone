@@ -1,0 +1,55 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  iso:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential nasm xorriso qemu-system-x86 ovmf
+
+      - name: Fetch Limine boot files
+        run: |
+          chmod +x tools/*.sh
+          ./tools/fetch-limine.sh
+
+      - name: Build kernel + ISO
+        run: make -j"$(nproc)"
+
+      - name: Boot smoke test (legacy BIOS)
+        run: |
+          set -e
+          timeout 60 qemu-system-x86_64 \
+            -cdrom windclone.iso -m 512 -display none \
+            -serial file:serial-bios.log || true
+          cat serial-bios.log
+          grep -a "WindClone serial console online" serial-bios.log
+          grep -a "RAM (usable)" serial-bios.log
+
+      - name: Boot smoke test (UEFI)
+        continue-on-error: true
+        run: |
+          set -e
+          OVMF=$(ls /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd 2>/dev/null | head -n1)
+          timeout 60 qemu-system-x86_64 \
+            -cdrom windclone.iso -m 512 -display none \
+            -bios "$OVMF" -serial file:serial-uefi.log || true
+          cat serial-uefi.log
+          grep -a "WindClone serial console online" serial-uefi.log
+
+      - name: Build educational MBR image
+        run: make mbr
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windclone-iso
+          path: windclone.iso

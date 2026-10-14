@@ -1,0 +1,19 @@
+# Build artifacts
+build/
+isodir/
+windclone.iso
+*.o
+*.elf
+*.img
+*.bin
+
+# Fetched third-party boot files (see tools/fetch-limine.sh)
+limine/
+
+# Serial / QEMU logs
+serial*.log
+
+# Editor noise
+.vscode/
+.idea/
+*.swp

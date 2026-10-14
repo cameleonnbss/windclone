@@ -1,0 +1,11 @@
+-xc
+--target=x86_64-none-elf
+-Ivendor
+-Isrc/kernel
+-ffreestanding
+-fno-pic
+-mno-red-zone
+-mcmodel=kernel
+-std=gnu11
+-Wall
+-Wextra

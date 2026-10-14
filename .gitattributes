@@ -1,0 +1,16 @@
+# Keep build scripts + makefiles LF everywhere (Windows dev hosts included)
+*.sh text eol=lf
+Makefile text eol=lf
+*.cfg text eol=lf
+*.ld text eol=lf
+*.yml text eol=lf
+
+*.c text
+*.h text
+*.asm text
+*.md text
+
+# Never diff/textify binary boot artifacts if someone force-adds them
+*.bin binary
+*.efi binary
+*.iso binary
