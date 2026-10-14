@@ -16,7 +16,11 @@ URL="https://github.com/limine-bootloader/limine/archive/refs/heads/${BRANCH}.ta
 curl -sSL "$URL" -o "$TMP_DIR/limine.tar.gz"
 tar -xzf "$TMP_DIR/limine.tar.gz" -C "$TMP_DIR"
 
-SRC="$(find "$TMP_DIR" -maxdepth 1 -type d -name 'limine-*' | head -n1)"
+SRC="$(find "$TMP_DIR" -maxdepth 1 -type d -iname 'limine*' | head -n1)"
+if [ -z "$SRC" ]; then
+    echo "[fetch-limine] ERROR: could not locate extracted archive directory" >&2
+    exit 1
+fi
 
 for f in limine-bios-cd.bin limine-uefi-cd.bin limine-bios.sys \
          BOOTX64.EFI BOOTIA32.EFI limine.h limine.c limine.exe; do

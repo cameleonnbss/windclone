@@ -20,7 +20,8 @@ Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $tar
 
 Write-Host "[fetch-limine] extracting"
 tar -xzf $tar -C $Tmp
-$src = Get-ChildItem $Tmp -Directory -Filter 'limine-*' | Select-Object -First 1
+$src = Get-ChildItem $Tmp -Directory -Filter 'Limine*' | Select-Object -First 1
+if (-not $src) { throw '[fetch-limine] could not locate extracted archive directory' }
 
 foreach ($f in @('limine-bios-cd.bin', 'limine-uefi-cd.bin', 'limine-bios.sys',
                  'BOOTX64.EFI', 'BOOTIA32.EFI', 'limine.h', 'limine.c', 'limine.exe')) {
