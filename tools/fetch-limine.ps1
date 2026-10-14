@@ -24,7 +24,8 @@ $src = Get-ChildItem $Tmp -Directory -Filter 'Limine*' | Select-Object -First 1
 if (-not $src) { throw '[fetch-limine] could not locate extracted archive directory' }
 
 foreach ($f in @('limine-bios-cd.bin', 'limine-uefi-cd.bin', 'limine-bios.sys',
-                 'BOOTX64.EFI', 'BOOTIA32.EFI', 'limine.h', 'limine.c', 'limine.exe')) {
+                 'BOOTX64.EFI', 'BOOTIA32.EFI', 'limine.h', 'limine.c', 'limine.exe',
+                 'limine-bios-hdd.h')) {
     Copy-Item (Join-Path $src.FullName $f) (Join-Path $OutDir $f) -Force
     Write-Host "[fetch-limine]   -> limine/$f"
 }

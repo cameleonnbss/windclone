@@ -33,18 +33,20 @@ jobs:
             -serial file:serial-bios.log || true
           cat serial-bios.log
           grep -a "WindClone serial console online" serial-bios.log
-          grep -a "RAM (usable)" serial-bios.log
+          grep -a "boot complete" serial-bios.log
 
       - name: Boot smoke test (UEFI)
-        continue-on-error: true
         run: |
           set -e
-          OVMF=$(ls /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd 2>/dev/null | head -n1)
+          cp /usr/share/OVMF/OVMF_VARS_4M.fd vars.fd
           timeout 60 qemu-system-x86_64 \
             -cdrom windclone.iso -m 512 -display none \
-            -bios "$OVMF" -serial file:serial-uefi.log || true
+            -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+            -drive if=pflash,format=raw,file=vars.fd \
+            -serial file:serial-uefi.log || true
           cat serial-uefi.log
           grep -a "WindClone serial console online" serial-uefi.log
+          grep -a "boot complete" serial-uefi.log
 
       - name: Build educational MBR image
         run: make mbr

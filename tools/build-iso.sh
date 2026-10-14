@@ -12,7 +12,7 @@ ISO="windclone.iso"
 KERNEL="build/kernel.elf"
 LIMINE_DIR="limine"
 
-for f in "$KERNEL" limine.cfg \
+for f in "$KERNEL" limine.conf \
          "$LIMINE_DIR/limine-bios-cd.bin" "$LIMINE_DIR/limine-uefi-cd.bin" \
          "$LIMINE_DIR/limine-bios.sys" "$LIMINE_DIR/BOOTX64.EFI" "$LIMINE_DIR/BOOTIA32.EFI"; do
     [ -e "$f" ] || { echo "[build-iso] missing $f - run ./tools/fetch-limine.sh first"; exit 1; }
@@ -21,10 +21,10 @@ done
 rm -rf isodir
 mkdir -p isodir/boot isodir/EFI/BOOT
 
-# Kernel + boot config (limine.cfg / limine-bios.sys must be in one of
+# Kernel + boot config (limine.conf / limine-bios.sys must be in one of
 # root, limine/, boot/, boot/limine/ — we use boot/)
 cp "$KERNEL"                         isodir/boot/kernel.elf
-cp limine.cfg                        isodir/boot/limine.cfg
+cp limine.conf                       isodir/boot/limine.conf
 cp "$LIMINE_DIR/limine-bios.sys"     isodir/boot/limine-bios.sys
 
 # UEFI fallback loaders (also what the UEFI firmware loads from ESP)

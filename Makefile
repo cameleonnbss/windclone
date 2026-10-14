@@ -46,7 +46,7 @@ kernel: build/kernel.elf
 
 iso: windclone.iso
 
-windclone.iso: build/kernel.elf limine.cfg \
+windclone.iso: build/kernel.elf limine.conf \
                limine/limine-bios-cd.bin limine/limine-uefi-cd.bin \
                limine/limine-bios.sys \
                limine/BOOTX64.EFI limine/BOOTIA32.EFI

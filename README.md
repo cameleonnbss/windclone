@@ -29,7 +29,8 @@ point — every OS starts exactly there.
 On boot the kernel:
 1. is loaded into 64-bit long mode by the [Limine](https://github.com/limine-bootloader/limine) bootloader,
 2. verifies the boot memory map and higher-half direct mapping,
-3. brings up the COM1 serial console and the classic 80×25 VGA text mode,
+3. brings up the COM1 serial console (the VGA text driver ships ready and
+   activates in Phase 2, once the kernel maps MMIO with its own page tables),
 4. prints firmware type + usable RAM, then parks the CPU.
 
 ## Quick start
@@ -65,7 +66,7 @@ src/boot/          hand-written NASM boot code (educational MBR)
 linkers/           ELF64 linker script (higher-half kernel)
 vendor/limine.h    vendored bootloader API header (BSD-0, upstream Limine)
 tools/             fetch-limine.{sh,ps1}, build-iso.sh
-limine.cfg         boot entries shipped inside the ISO
+limine.conf          boot entries shipped inside the ISO
 docs/              ROADMAP.md, CONTRIBUTING.md
 .github/workflows/ CI: build ISO + boot smoke tests in QEMU
 Makefile           kernel, ISO, MBR, run targets

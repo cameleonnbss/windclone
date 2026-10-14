@@ -97,19 +97,19 @@ void kmain(void)
     /* 2. Verify the bootloader understood the API revision we use. */
     if (!LIMINE_BASE_REVISION_SUPPORTED)
         panic("bootloader does not support Limine base revision 3");
+    serial_write("step: base revision ok\n");
 
     if (hhdm_request.response == NULL)
         panic("bootloader did not provide the higher-half direct map");
+    serial_write("step: hhdm ok\n");
 
-    /* 3. VGA text mode (classic 80x25 at physical 0xB8000).
-     *    We reach it through the HHDM offset provided by Limine. */
-    uint64_t hhdm_offset = hhdm_request.response->offset;
-    vga_init((void *)(hhdm_offset + 0xB8000));
-
-    if (vga_available()) {
-        kprint("WindClone 0.0.1 - an OS made from scratch");
-        kprint("==========================================");
-    }
+    /* 3. Console: serial only for now.
+     *    The VGA text buffer (0xB8000) is MMIO, and Limine's HHDM maps
+     *    only RAM — touching it here triple-faults. vga.c activates
+     *    itself as soon as the kernel maps it with its own page tables
+     *    (docs/ROADMAP.md phase 2). */
+    vga_init(NULL);
+    serial_write("step: console ready\n");
 
     /* 4. Report what the firmware and memory map told us. */
     const char *fw = "unknown";
@@ -123,6 +123,7 @@ void kmain(void)
 
     uint64_t ram = usable_ram_bytes();
     uint64_t ram_mb = ram / (1024 * 1024);
+    serial_write("step: memmap ok\n");
 
     serial_write("firmware: ");
     serial_write(fw);
@@ -130,10 +131,8 @@ void kmain(void)
     serial_write_dec(ram_mb);
     serial_write(" MiB\n");
 
-    if (vga_available()) {
-        kprint("boot complete - CPU is in long mode, paging active");
-        kprint("next milestone: GDT/IDT, physical page allocator (see docs/ROADMAP.md)");
-    }
+    serial_write("boot complete - CPU is in long mode, paging active\n");
+    serial_write("next milestone: GDT/IDT, physical page allocator (see docs/ROADMAP.md)\n");
 
     /* 5. Park the CPU forever. */
     for (;;)

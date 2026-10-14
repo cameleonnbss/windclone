@@ -13,7 +13,8 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
 - [x] Limine request-based boot (base revision 3)
 - [x] Higher-half kernel at `0xffffffff80100000`, `-mcmodel=kernel`
 - [x] COM1 serial console (works with no display → CI)
-- [x] VGA text-mode driver via HHDM (0xB8000)
+- [x] VGA text-mode driver written (activates in Phase 2: Limine's HHDM maps
+      only RAM, so MMIO at 0xB8000 needs our own page tables first)
 - [x] Memory map + firmware type report at boot
 - [x] Hybrid ISO (El Torito BIOS + UEFI, `bios-install` for dd-to-USB)
 - [x] Educational 512-byte NASM MBR (`make mbr`, `make run-mbr`)
