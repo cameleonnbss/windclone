@@ -23,7 +23,7 @@ if [ -z "$SRC" ]; then
 fi
 
 for f in limine-bios-cd.bin limine-uefi-cd.bin limine-bios.sys \
-         BOOTX64.EFI BOOTIA32.EFI limine.h limine.c limine.exe; do
+         BOOTX64.EFI BOOTIA32.EFI limine.h limine.c limine.exe limine-bios-hdd.h; do
     cp "$SRC/$f" "$OUT_DIR/$f"
     echo "[fetch-limine]   -> $OUT_DIR/$f"
 done
