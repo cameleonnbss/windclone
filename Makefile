@@ -29,6 +29,7 @@ CFLAGS  := -std=gnu11 -O2 -Wall -Wextra -Werror \
            -mno-red-zone -mcmodel=kernel \
            -mno-sse -mno-sse2 -mno-avx -mno-mmx -mno-80387 -msoft-float \
            -fno-stack-protector -fno-asynchronous-unwind-tables \
+           -fno-omit-frame-pointer \
            -fno-builtin -Ivendor -Isrc/kernel
 LDFLAGS := -T linkers/kernel.ld -nostdlib -static -no-pie \
            -z max-page-size=0x1000 -Wl,--build-id=none

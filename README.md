@@ -12,7 +12,8 @@ project matures. The long-term goal is a Linux-compatible system call layer
 so that existing Linux binaries can eventually run on top of it, wrapped in a
 desktop shell that feels familiar.
 
-⚠️ This is a learning project. Today it boots, handles hardware interrupts,
+⚠️ This is a learning project. Today it boots, manages its own memory
+(frame allocator, page tables, `kmalloc`), handles hardware interrupts,
 and ticks a timer — which is exactly where every real OS started.
 
 ## What boots today
@@ -29,16 +30,21 @@ and ticks a timer — which is exactly where every real OS started.
 On boot the kernel:
 1. is loaded into 64-bit long mode by the [Limine](https://github.com/limine-bootloader/limine) bootloader,
 2. verifies the boot memory map and higher-half direct mapping,
-3. brings up the COM1 serial console (the VGA text driver ships ready and
-   activates in Phase 2, once the kernel maps MMIO with its own page tables),
-4. prints firmware type + usable RAM,
-5. audits the GDT, loads a 256-entry IDT with NASM exception/IRQ stubs,
-   remaps the 8259 PIC and unmask IRQ0,
-6. takes the PIT timer at 100 Hz and prints a 1-second `uptime:` heartbeat
+3. builds its own physical frame allocator (bitmap over the Limine memmap)
+   and its own 4-level page tables — then maps the VGA text window (0xB8000,
+   MMIO: Limine's HHDM only covers RAM) and brings up the screen console
+   next to the COM1 serial one,
+4. starts the `kmalloc` heap (lazily-paged arena at `0x4000000000`) and
+   runs a heap self-test before anything is allowed to allocate,
+5. prints firmware type + usable RAM,
+6. audits the GDT, loads a 256-entry IDT with NASM exception/IRQ stubs,
+   remaps the 8259 PIC and unmasks IRQ0,
+7. takes the PIT timer at 100 Hz and prints a 1-second `uptime:` heartbeat
    from the interrupt-driven idle loop.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
-on the serial console instead of silently triple-faulting.
+plus a frame-pointer backtrace on the serial console instead of silently
+triple-faulting.
 
 ## Quick start
 
@@ -86,7 +92,7 @@ The full plan with checkboxes lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 1. ✅ Boot to long mode, serial + VGA console
 2. ✅ GDT audit, IDT + exceptions, PIC remap, PIT timer uptime
-3. ⏳ Physical + virtual memory managers (`kmalloc`)
+3. ✅ Physical + virtual memory managers (`pmm`, own page tables, `kmalloc`)
 4. ⏳ PS/2 keyboard, PCI enumeration
 5. ⏳ Initrd filesystem, ELF user processes, syscalls
 6. ⏳ Shell in C, drivers starting to move to Rust

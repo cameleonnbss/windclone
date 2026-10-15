@@ -34,6 +34,13 @@ jobs:
           cat serial-bios.log
           grep -a "WindClone serial console online" serial-bios.log
           grep -a "boot complete" serial-bios.log
+          # Phase 2: frame allocator, our own page tables, heap, text console
+          grep -a "step: pmm ok" serial-bios.log
+          grep -a "paging: self-checks passed" serial-bios.log
+          grep -a "step: paging ok" serial-bios.log
+          grep -a "vga: text console live" serial-bios.log
+          grep -a "kmalloc selftest ok" serial-bios.log
+          grep -a "step: heap ok" serial-bios.log
           # proves the IDT + PIC + PIT really work: timer IRQ fires
           grep -a "step: interrupts armed" serial-bios.log
           grep -a "irq0: timer interrupt firing" serial-bios.log
@@ -50,6 +57,12 @@ jobs:
             -serial file:serial-uefi.log || true
           cat serial-uefi.log
           grep -a "WindClone serial console online" serial-uefi.log
+          # Phase 2 memory stack must come up identically under UEFI
+          grep -a "step: pmm ok" serial-uefi.log
+          grep -a "step: paging ok" serial-uefi.log
+          grep -a "vga: text console live" serial-uefi.log
+          grep -a "kmalloc selftest ok" serial-uefi.log
+          grep -a "step: heap ok" serial-uefi.log
           grep -a "boot complete" serial-uefi.log
           grep -a "uptime: 1s" serial-uefi.log
 

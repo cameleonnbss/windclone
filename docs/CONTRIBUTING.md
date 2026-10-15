@@ -19,7 +19,8 @@ UEFI) and print the serial banner. That is the whole contract.
 ## Code style
 
 * Kernel is C11, compiled with `-Wall -Wextra -Werror` — warnings are bugs.
-* No allocations in boot path until `kmalloc` exists (Phase 2).
+* No allocations before `kmalloc_init()` has run — the Phase-2 self-test
+  (`kmalloc selftest ok`) must always come *before* any other user of the heap.
 * Assembly (NASM) uses `BITS 16/64` explicitly and is always commented like
   `src/boot/mbr.asm`.
 * Keep each driver in its own `*.c`/`*.h` pair with a one-paragraph header
@@ -41,6 +42,26 @@ UEFI) and print the serial banner. That is the whole contract.
 * **BIOS `int 13h`: set `ES`/`BX` before `AH`/`AL`.** `mov ax, 0x8000` after
   `mov ah, 0x02` silently destroys the function number — the disk "read
   failure" was us calling undefined function 0x80.
+* **Walk page tables down to level 1, then stop.** The last level is a *leaf
+  table*, not a page: descending "one more level like the others" makes the
+  walk dereference the PTE value as if it were an address — and when that
+  address is device MMIO outside the HHDM the fault triple-kills the kernel
+  before the IDT even exists. Read the leaf entry *after* the loop.
+* **Limine v9 has no `terminal:` boot option** (it is silently ignored). The
+  real knobs are global `graphics: no` and per-entry `textmode: yes`, and
+  even those are best-effort hints — Limine's GUI can hand off while the
+  CRTC is still scanning a graphical mode. The kernel re-forces VGA text mode
+  itself (`vga_text_mode_init()`), so don't "fix" this in the boot config.
+* **Bochs VBE dispi: `ENABLE` is index 4, not 7.** The register map is
+  0=ID, 1=XRES, 2=YRES, 3=BPP, 4=ENABLE, 5=BANK, 6=VIRT_WIDTH, 7=VIRT_HEIGHT.
+  Writing "ENABLE=0" to index 7 zeroes the virtual height and corrupts the
+  mode in a way that is painful to debug.
+* **After a graphical bootloader, trust the *guest*, not the QEMU monitor,
+  about MMIO.** A kernel-side write/read-back of a text cell at 0xB8000
+  round-trips even when QEMU's `xp` of the same physical address and
+  `screendump` disagree (the device model's display path lags the guest's
+  MMIO view). That is why the CI evidence for the VGA console is the serial
+  marker `vga: text console live (MMIO round-trip ok)`, not a screenshot.
 
 ## Good first issues
 

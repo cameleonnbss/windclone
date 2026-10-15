@@ -34,13 +34,24 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
 - [x] Educational MBR upgraded to a real two-stage loader: stage-0 reads
       stage-2 from LBA1 via int 13h (with retry + BIOS error-code report)
 
-## Phase 2 — Memory 🔄
+## Phase 2 — Memory ✅
 *Goal: real allocators.*
 
-- [ ] Physical frame allocator (bitmap over the Limine memmap)
-- [ ] Virtual page tables (4-level, map/unmap API)
-- [ ] `kmalloc` / `kfree` (buddy or slab-lite) + `kassert`
-- [ ] `panic()` prints a stack dump via frame pointers
+- [x] Physical frame allocator: bitmap over the Limine memmap (1 bit / 4 KiB
+      frame, allocates high→low to keep low memory free for future DMA;
+      reserves the low 1 MiB + our own kernel image via `__kernel_start`/`_end`)
+- [x] Virtual page tables: our own 4-level P4 that copies Limine's higher
+      half (kernel + HHDM live) and owns the lower half; `map`/`unmap`/`translate`
+      API; virtual page 0 left unmapped as a free NULL trap; huge pages and
+      missing-levels handled in `paging_translate`
+- [x] First self-mapped MMIO: the kernel pages in the VGA window at 0xB8000
+      (PCD/uncached) — Limine's HHDM covers RAM only, never device memory —
+      and a written text cell is read back to prove the path works
+- [x] `kmalloc`/`kfree`/`kcalloc`: first-fit + split + forward coalesce over
+      a lazily-grown heap arena at 0x4000000000 (pages backed on demand by
+      pmm + paging); `kassert` wired to `panic`
+- [x] `panic()` walks the stack for a backtrace (`-fno-omit-frame-pointer`),
+      guarded so the unwinder can never fault itself on unmapped frames
 
 ## Phase 3 — Input & devices ⏳
 - [ ] PS/2 keyboard driver (scancode set 2 → US layout)

@@ -23,6 +23,7 @@ PHDRS
 SECTIONS
 {
     . = KERNEL_VBASE;
+    __kernel_start = .;   /* pmm reserves our own physical pages from this */
 
     .text ALIGN(4K) : {
         *(.text .text.*)

@@ -19,6 +19,15 @@
 #include "gdt.h"
 #include "idt.h"
 #include "timer.h"
+#include "pmm.h"
+#include "paging.h"
+#include "kmalloc.h"
+#include "kassert.h"
+#include "string.h"
+
+/* Boundaries of our own image, straight from the linker script. */
+extern char __kernel_start[];
+extern char __kernel_end[];
 
 /* ------------------------------------------------------------------ */
 /* Limine boot requests — these are filled in by the bootloader       */
@@ -60,22 +69,77 @@ static volatile LIMINE_REQUESTS_END_MARKER;
 /* Kernel diagnostics                                                  */
 /* ------------------------------------------------------------------ */
 
+/* Once our own page tables are live we can at least check that a
+ * candidate rbp points at mapped memory before dereferencing it —
+ * a backtrace must never be the thing that crashes us further. */
+static int paging_is_live;
+
+static void backtrace(uint64_t rbp, uint64_t top_rip)
+{
+    serial_write("stack walk (rip first, decode with `nm build/kernel.elf`):\n  #0 rip=");
+    serial_write_hex(top_rip);
+    serial_write("\n");
+    for (int i = 1; i < 12; i++) {
+        /* SysV frame: [rbp] = saved rbp, [rbp+8] = return address.
+         * Require 8-alignment and ascending frames; stop at anything
+         * that smells like garbage or an unmapped page. */
+        if (rbp < 0x1000 || (rbp & 7) != 0)
+            break;
+        if (paging_is_live && paging_translate(rbp) == 0)
+            break;
+        uint64_t *frame = (uint64_t *)(uintptr_t)rbp;
+        uint64_t ret = frame[1];
+        uint64_t next = frame[0];
+        if (ret < 0x1000 || next <= rbp)
+            break;
+        serial_write("  #");
+        serial_write_dec((uint64_t)i);
+        serial_write(" rip=");
+        serial_write_hex(ret);
+        serial_write("\n");
+        rbp = next;
+    }
+}
+
 void panic(const char *why)
 {
     serial_write("\n[WINDCLONE] KERNEL PANIC: ");
     serial_write(why);
     serial_write("\n");
-    if (vga_available())
-        kprint("KERNEL PANIC — system halted.");
+    if (vga_available()) {
+        kprint("KERNEL PANIC: ");
+        kprint(why);
+        kprint("\n");
+    }
+    backtrace((uint64_t)(uintptr_t)__builtin_frame_address(0),
+              (uint64_t)(uintptr_t)&panic);
+    for (;;)
+        __asm__ volatile("cli; hlt");
+}
+
+void kassert_fail(const char *file, int line, const char *expr)
+{
+    serial_write("\n[WINDCLONE] ASSERT FAILED: ");
+    serial_write(expr);
+    serial_write("\n  at ");
+    serial_write(file);
+    serial_write(":");
+    serial_write_dec((uint64_t)line);
+    serial_write("\n");
+    if (vga_available()) {
+        kprint("ASSERT FAILED: ");
+        kprint(expr);
+        kprint("\n");
+    }
+    backtrace((uint64_t)(uintptr_t)__builtin_frame_address(0),
+              (uint64_t)(uintptr_t)&kassert_fail);
     for (;;)
         __asm__ volatile("cli; hlt");
 }
 
 /* Total usable RAM, reported by the boot memory map. */
-static uint64_t usable_ram_bytes(void)
+static uint64_t usable_ram_bytes(struct limine_memmap_response *m)
 {
-    struct limine_memmap_response *m =
-        (struct limine_memmap_response *)memmap_request.response;
     uint64_t total = 0;
     if (m == NULL)
         return 0;
@@ -85,6 +149,68 @@ static uint64_t usable_ram_bytes(void)
             total += e->length;
     }
     return total;
+}
+
+/* ------------------------------------------------------------------ */
+/* Phase 2 self-tests                                                  */
+/* ------------------------------------------------------------------ */
+
+/* VGA-side decimal printer (serial already has serial_write_dec). */
+static void kprint_dec(uint64_t v)
+{
+    char buf[24];
+    int n = 0;
+    if (v == 0)
+        buf[n++] = '0';
+    while (v != 0) {
+        buf[n++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    char out[24];
+    for (int i = 0; i < n; i++)
+        out[i] = buf[n - 1 - i];
+    out[n] = '\0';
+    kprint(out);
+}
+
+static void heap_selftest(void)
+{
+    /* allocate -> pattern -> verify -> free -> reuse */
+    uint8_t *a = kmalloc(100);
+    uint8_t *b = kmalloc(250);
+    uint8_t *c = kmalloc(4096);
+    kassert(a != NULL && b != NULL && c != NULL);
+    kassert(((uintptr_t)a & 7) == 0);           /* alignment sanity */
+
+    memset(a, 0xAA, 100);
+    memset(b, 0x55, 250);
+    memset(c, 0x33, 4096);
+    for (int i = 0; i < 100; i++) kassert(a[i] == 0xAA);
+    for (int i = 0; i < 250; i++) kassert(b[i] == 0x55);
+    for (int i = 0; i < 4096; i++) kassert(c[i] == 0x33);
+
+    /* blocks must not overlap: a's pattern would trash b if they did */
+    kassert(memset(b, 0x55, 250) == b);
+    kassert(a[99] == 0xAA);
+
+    void *d = kcalloc(64, 64);                    /* zero-filled */
+    kassert(d != NULL);
+    for (int i = 0; i < 64 * 64; i++)
+        kassert(((uint8_t *)d)[i] == 0);
+
+    kfree(b);
+    kfree(a);
+    void *e = kmalloc(300);   /* must reuse the coalesced a+b hole */
+    kassert(e != NULL);
+    kfree(e);
+    kfree(c);
+    kfree(d);
+
+    serial_write("kmalloc selftest ok (heap ");
+    serial_write_dec(heap_mapped_bytes() / 1024);
+    serial_write(" KiB mapped, free frames ");
+    serial_write_dec(pmm_free_frames());
+    serial_write(")\n");
 }
 
 /* ------------------------------------------------------------------ */
@@ -107,15 +233,34 @@ void kmain(void)
         panic("bootloader did not provide the higher-half direct map");
     serial_write("step: hhdm ok\n");
 
-    /* 3. Console: serial only for now.
-     *    The VGA text buffer (0xB8000) is MMIO, and Limine's HHDM maps
-     *    only RAM — touching it here triple-faults. vga.c activates
-     *    itself as soon as the kernel maps it with its own page tables
-     *    (docs/ROADMAP.md phase 2). */
-    vga_init(NULL);
+    struct limine_memmap_response *memmap =
+        (struct limine_memmap_response *)memmap_request.response;
+
+    /* 3. Phase 2 — memory: frame allocator first (everything else
+     *    needs frames), then OUR page tables, which finally make MMIO
+     *    reachable: the VGA text buffer is mapped and kprint wakes up. */
+    pmm_init(memmap, hhdm_request.response->offset,
+             (uint64_t)(uintptr_t)__kernel_start,
+             (uint64_t)(uintptr_t)__kernel_end);
+    serial_write("step: pmm ok\n");
+
+    paging_init();
+    paging_is_live = 1;
+    serial_write("step: paging ok\n");
+
+    /* 0xB8000 is now mapped by our own P4 — vga.c has waited for this
+     * since Phase 0 (Limine's HHDM covers RAM only, never MMIO). */
+    vga_init((void *)(uintptr_t)0xB8000);
+    kprint("WindClone: kernel owns its page tables now.\n");
+
+    kmalloc_init();
+    heap_selftest();
+    serial_write("step: heap ok\n");
+
+    /* 4. Console: serial is the ground truth, VGA the friendly face. */
     serial_write("step: console ready\n");
 
-    /* 4. Report what the firmware and memory map told us. */
+    /* 5. Report what the firmware and memory map told us. */
     const char *fw = "unknown";
     if (firmware_type_request.response != NULL) {
         switch (firmware_type_request.response->firmware_type) {
@@ -125,7 +270,7 @@ void kmain(void)
         }
     }
 
-    uint64_t ram = usable_ram_bytes();
+    uint64_t ram = usable_ram_bytes(memmap);
     uint64_t ram_mb = ram / (1024 * 1024);
     serial_write("step: memmap ok\n");
 
@@ -135,7 +280,13 @@ void kmain(void)
     serial_write_dec(ram_mb);
     serial_write(" MiB\n");
 
-    /* 5. CPU plumbing: audit the GDT Limine gave us, install our own
+    kprint("firmware: ");
+    kprint(fw);
+    kprint("\nusable RAM: ");
+    kprint_dec(ram_mb);
+    kprint(" MiB\n");
+
+    /* 6. CPU plumbing: audit the GDT Limine gave us, install our own
      *    IDT (exceptions -> readable serial dump, IRQs -> handlers),
      *    remap the PIC and start the PIT timer at 100 Hz. */
     gdt_report();
@@ -149,8 +300,9 @@ void kmain(void)
     serial_write("step: interrupts armed (PIT 100Hz)\n");
 
     serial_write("boot complete - CPU is in long mode, paging active\n");
+    kprint("\nboot complete: interrupts + timer + heap online.\n");
 
-    /* 6. Idle loop: hlt lets the CPU sleep until the next interrupt;
+    /* 7. Idle loop: hlt lets the CPU sleep until the next interrupt;
      *    every 100 ticks (1 second) we print a heartbeat so QEMU/CI
      *    can prove the timer interrupt really fires. */
     uint64_t last_second = 0;
