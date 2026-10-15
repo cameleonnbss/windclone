@@ -9,6 +9,8 @@ an OS before". The project exists to learn in public.
 ./tools/fetch-limine.sh   # once per machine
 make                      # kernel + ISO
 make run                  # QEMU with serial console (Ctrl+A, X to quit)
+
+./tools/local-test.sh     # run the same BIOS+UEFI+MBR smoke tests CI runs
 ```
 
 Every PR must keep CI green: the ISO must still boot in QEMU (BIOS and
