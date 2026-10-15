@@ -20,13 +20,19 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
 - [x] Educational 512-byte NASM MBR (`make mbr`, `make run-mbr`)
 - [x] GitHub Actions: build + BIOS/UEFI boot smoke tests
 
-## Phase 1 — CPU plumbing 🔄
+## Phase 1 — CPU plumbing ✅
 *Goal: react to the machine, not just read its boot data.*
 
-- [ ] GDT (already provided by Limine — audit + replace with ours)
-- [ ] IDT + exception handlers with a readable panic screen
-- [ ] PIC remap (8259) + IRQ scaffolding
-- [ ] PIT/APIC timer, kernel tick + uptime on the console
+- [x] GDT audit via `sgdt` (Limine's GDT stays live — we report its layout;
+      replacing it with our own comes when we add ring 3 in Phase 4)
+- [x] IDT + 32 exception stubs in NASM; panic prints the faulting vector,
+      a full register dump and CR2 for page faults
+- [x] PIC remap (8259 → vectors 32..47), masking, EOI, spurious-IRQ filter
+- [x] PIT timer at 100 Hz, kernel tick + `uptime: Ns` on the serial console
+- [x] Kernel built `-mno-sse -mno-mmx -mno-80387`: gcc's `-O2` vectoriser
+      emits SSE, which triple-faults before the IDT even exists
+- [x] Educational MBR upgraded to a real two-stage loader: stage-0 reads
+      stage-2 from LBA1 via int 13h (with retry + BIOS error-code report)
 
 ## Phase 2 — Memory 🔄
 *Goal: real allocators.*

@@ -15,6 +15,10 @@
 
 #include "serial.h"
 #include "vga.h"
+#include "io.h"
+#include "gdt.h"
+#include "idt.h"
+#include "timer.h"
 
 /* ------------------------------------------------------------------ */
 /* Limine boot requests — these are filled in by the bootloader       */
@@ -131,10 +135,35 @@ void kmain(void)
     serial_write_dec(ram_mb);
     serial_write(" MiB\n");
 
-    serial_write("boot complete - CPU is in long mode, paging active\n");
-    serial_write("next milestone: GDT/IDT, physical page allocator (see docs/ROADMAP.md)\n");
+    /* 5. CPU plumbing: audit the GDT Limine gave us, install our own
+     *    IDT (exceptions -> readable serial dump, IRQs -> handlers),
+     *    remap the PIC and start the PIT timer at 100 Hz. */
+    gdt_report();
+    serial_write("step: gdt audited\n");
 
-    /* 5. Park the CPU forever. */
-    for (;;)
-        __asm__ volatile("hlt");
+    idt_init();
+    serial_write("step: idt loaded, pic remapped\n");
+
+    timer_init(100);
+    sti();
+    serial_write("step: interrupts armed (PIT 100Hz)\n");
+
+    serial_write("boot complete - CPU is in long mode, paging active\n");
+
+    /* 6. Idle loop: hlt lets the CPU sleep until the next interrupt;
+     *    every 100 ticks (1 second) we print a heartbeat so QEMU/CI
+     *    can prove the timer interrupt really fires. */
+    uint64_t last_second = 0;
+    for (;;) {
+        hlt();
+        uint64_t ticks = timer_ticks();
+        if (ticks >= last_second + 100) {
+            last_second = ticks;
+            serial_write("uptime: ");
+            serial_write_dec(last_second / 100);
+            serial_write("s (ticks ");
+            serial_write_dec(last_second);
+            serial_write(")\n");
+        }
+    }
 }

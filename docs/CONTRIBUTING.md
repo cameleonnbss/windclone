@@ -23,6 +23,23 @@ UEFI) and print the serial banner. That is the whole contract.
 * Keep each driver in its own `*.c`/`*.h` pair with a one-paragraph header
   comment explaining *why* it exists.
 
+## Pitfalls we already fell into (so you don't have to)
+
+* **Never let SSE into early boot code.** gcc `-O2` happily vectorises loops
+  (`movdqa`, `shufps`…) — executing one before the IDT exists is a triple
+  fault. The kernel is compiled `-mno-sse -mno-sse2 -mno-avx -mno-mmx
+  -mno-80387 -msoft-float` for exactly this reason. If a mystery crash
+  disappears after adding a `serial_write()` inside a loop, that was it.
+* **Limine's kernel code selector is `0x28`, not the textbook `0x08`.** Read
+  CS at runtime (`mov %%cs, %0`) when building IDT gates or TSS entries.
+* **Interrupt-frame structs mirror push order, in reverse.** Our stubs push
+  the vector *after* the (dummy) error code, so `vector` sits at a lower
+  address than `error_code` in `struct regs`. Get it wrong and every IRQ
+  reports vector 224 like ours did.
+* **BIOS `int 13h`: set `ES`/`BX` before `AH`/`AL`.** `mov ax, 0x8000` after
+  `mov ah, 0x02` silently destroys the function number — the disk "read
+  failure" was us calling undefined function 0x80.
+
 ## Good first issues
 
 Look for the [`good first issue`](https://github.com/cameleonnbss/windclone/labels/good%20first%20issue)

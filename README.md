@@ -12,8 +12,8 @@ project matures. The long-term goal is a Linux-compatible system call layer
 so that existing Linux binaries can eventually run on top of it, wrapped in a
 desktop shell that feels familiar.
 
-⚠️ This is a learning project. v0.0.1 boots, prints, and halts. That is the
-point — every OS starts exactly there.
+⚠️ This is a learning project. Today it boots, handles hardware interrupts,
+and ticks a timer — which is exactly where every real OS started.
 
 ## What boots today
 
@@ -31,7 +31,14 @@ On boot the kernel:
 2. verifies the boot memory map and higher-half direct mapping,
 3. brings up the COM1 serial console (the VGA text driver ships ready and
    activates in Phase 2, once the kernel maps MMIO with its own page tables),
-4. prints firmware type + usable RAM, then parks the CPU.
+4. prints firmware type + usable RAM,
+5. audits the GDT, loads a 256-entry IDT with NASM exception/IRQ stubs,
+   remaps the 8259 PIC and unmask IRQ0,
+6. takes the PIT timer at 100 Hz and prints a 1-second `uptime:` heartbeat
+   from the interrupt-driven idle loop.
+
+An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
+on the serial console instead of silently triple-faulting.
 
 ## Quick start
 
@@ -48,7 +55,7 @@ make
 # 3. boot it in QEMU (serial console included)
 make run
 
-# bonus: watch the raw 512-byte MBR bootloader do almost nothing
+# bonus: watch the two-stage NASM bootloader: MBR loads stage-2 from disk
 make mbr && make run-mbr
 ```
 
@@ -61,8 +68,9 @@ cp windclone.iso /dev/sdX     # careful: this overwrites the whole device
 ## Repository layout
 
 ```
-src/kernel/        C kernel: entry (kmain), VGA + serial drivers
-src/boot/          hand-written NASM boot code (educational MBR)
+src/kernel/        C kernel: entry (kmain), console drivers, IDT/PIC/PIT,
+                   interrupt stubs (NASM), string + port-I/O helpers
+src/boot/          hand-written NASM boot code (two-stage educational MBR)
 linkers/           ELF64 linker script (higher-half kernel)
 vendor/limine.h    vendored bootloader API header (BSD-0, upstream Limine)
 tools/             fetch-limine.{sh,ps1}, build-iso.sh
@@ -77,7 +85,7 @@ Makefile           kernel, ISO, MBR, run targets
 The full plan with checkboxes lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 1. ✅ Boot to long mode, serial + VGA console
-2. ⏳ GDT / IDT, interrupts, timer
+2. ✅ GDT audit, IDT + exceptions, PIC remap, PIT timer uptime
 3. ⏳ Physical + virtual memory managers (`kmalloc`)
 4. ⏳ PS/2 keyboard, PCI enumeration
 5. ⏳ Initrd filesystem, ELF user processes, syscalls

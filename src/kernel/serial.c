@@ -2,20 +2,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "serial.h"
-
-/* --- minimal port I/O (x86 in/out instructions) -------------------- */
-
-static inline uint8_t inb(uint16_t port)
-{
-    uint8_t value;
-    __asm__ volatile("inb %1, %0" : "=a"(value) : "Nd"(port));
-    return value;
-}
-
-static inline void outb(uint16_t port, uint8_t value)
-{
-    __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port));
-}
+#include "io.h"
 
 /* --- 16550 UART registers ------------------------------------------ */
 
@@ -66,4 +53,20 @@ void serial_write_dec(uint64_t value)
     } while (value != 0);
     while (i > 0)
         serial_putc(buf[--i]);
+}
+
+static const char hex_digits[] = "0123456789abcdef";
+
+void serial_write_hex(uint64_t value)
+{
+    serial_write("0x");
+    /* print from the highest non-zero nibble */
+    int started = 0;
+    for (int shift = 60; shift >= 0; shift -= 4) {
+        uint8_t nibble = (uint8_t)((value >> shift) & 0xF);
+        if (!started && nibble == 0 && shift > 0)
+            continue;
+        started = 1;
+        serial_putc(hex_digits[nibble]);
+    }
 }

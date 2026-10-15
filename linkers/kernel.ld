@@ -18,7 +18,6 @@ PHDRS
     text    PT_LOAD FLAGS(5);   /* R+X */
     rodata  PT_LOAD FLAGS(4);   /* R   */
     data    PT_LOAD FLAGS(6);   /* R+W */
-    dynamic PT_DYNAMIC;
 }
 
 SECTIONS
@@ -46,15 +45,18 @@ SECTIONS
         KEEP(*(.limine_requests_end_marker))
     } :data
 
-    .dynamic ALIGN(4K) : {
-        *(.dynamic)
-    } :data :dynamic
-
     .bss ALIGN(4K) : {
         *(.bss .bss.*)
         *(.sbss .sbss.*)
         *(COMMON)
     } :data
+
+    /* End the image on a page boundary: guarantees the RW segment's
+     * p_memsz is page-exact, so the bootloader maps every .bss page.
+     * Without this, big .bss objects (like the 4 KiB IDT) can spill
+     * into an unmapped tail page -> #PF -> triple fault during init. */
+    . = ALIGN(4K);
+    __kernel_end = .;
 
     /DISCARD/ : {
         *(.eh_frame*)

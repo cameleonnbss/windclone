@@ -28,18 +28,22 @@ jobs:
       - name: Boot smoke test (legacy BIOS)
         run: |
           set -e
-          timeout 60 qemu-system-x86_64 \
+          timeout 25 qemu-system-x86_64 \
             -cdrom windclone.iso -m 512 -display none \
             -serial file:serial-bios.log || true
           cat serial-bios.log
           grep -a "WindClone serial console online" serial-bios.log
           grep -a "boot complete" serial-bios.log
+          # proves the IDT + PIC + PIT really work: timer IRQ fires
+          grep -a "step: interrupts armed" serial-bios.log
+          grep -a "irq0: timer interrupt firing" serial-bios.log
+          grep -a "uptime: 1s" serial-bios.log
 
       - name: Boot smoke test (UEFI)
         run: |
           set -e
           cp /usr/share/OVMF/OVMF_VARS_4M.fd vars.fd
-          timeout 60 qemu-system-x86_64 \
+          timeout 25 qemu-system-x86_64 \
             -cdrom windclone.iso -m 512 -display none \
             -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
             -drive if=pflash,format=raw,file=vars.fd \
@@ -47,6 +51,7 @@ jobs:
           cat serial-uefi.log
           grep -a "WindClone serial console online" serial-uefi.log
           grep -a "boot complete" serial-uefi.log
+          grep -a "uptime: 1s" serial-uefi.log
 
       - name: Build educational MBR image
         run: make mbr
