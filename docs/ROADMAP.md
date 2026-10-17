@@ -53,10 +53,20 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
 - [x] `panic()` walks the stack for a backtrace (`-fno-omit-frame-pointer`),
       guarded so the unwinder can never fault itself on unmapped frames
 
-## Phase 3 — Input & devices ⏳
-- [ ] PS/2 keyboard driver (scancode set 2 → US layout)
-- [ ] PCI configuration-space enumeration + BAR decoder
-- [ ] Boot messages ring buffer viewable later via a debug shell
+## Phase 3 — Input & devices ✅
+*Goal: talk to the machine's peripherals, and prove it headlessly.*
+
+- [x] PS/2 keyboard: 8042 driver that *keeps* the controller's AT
+      translation ON and decodes the resulting set-1 make/break stream
+      (US layout table + shift + caps); verified in CI by injecting a
+      real `sendkey` through the QEMU monitor and grepping the decoded
+      result — no human needed
+- [x] PCI: configuration-space enumeration via mechanism #1 (ports
+      0xCF8/0xCFC) over all 256 buses, with vendor/device/class report
+      and a BAR decoder (io vs mem32/64, 64-bit pairs combined)
+- [x] Boot messages ring buffer (`klog`): last 48 formatted messages
+      kept in RAM (IRQ-safe, tiny printf), replayed every 5 s on serial
+      and reserved for the Phase 5 debug shell
 
 ## Phase 4 — Userland v0 ⏳
 *Goal: the first program that isn't the kernel.*

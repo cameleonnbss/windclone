@@ -23,6 +23,9 @@
 #include "paging.h"
 #include "kmalloc.h"
 #include "kassert.h"
+#include "log.h"
+#include "pci.h"
+#include "keyboard.h"
 #include "string.h"
 
 /* Boundaries of our own image, straight from the linker script. */
@@ -223,6 +226,7 @@ void kmain(void)
      *    a log in QEMU / CI even without a display. */
     serial_init();
     serial_write("WindClone serial console online (COM1)\n");
+    log_init();   /* everything notable from here also lands in the ring */
 
     /* 2. Verify the bootloader understood the API revision we use. */
     if (!LIMINE_BASE_REVISION_SUPPORTED)
@@ -285,6 +289,7 @@ void kmain(void)
     kprint("\nusable RAM: ");
     kprint_dec(ram_mb);
     kprint(" MiB\n");
+    klog("boot: firmware %s, usable RAM %u MiB", fw, (unsigned)ram_mb);
 
     /* 6. CPU plumbing: audit the GDT Limine gave us, install our own
      *    IDT (exceptions -> readable serial dump, IRQs -> handlers),
@@ -296,16 +301,26 @@ void kmain(void)
     serial_write("step: idt loaded, pic remapped\n");
 
     timer_init(100);
+
+    /* 7. Phase 3 - input & devices. PCI first: pure port I/O, no
+     *    interrupts needed. Then the 8042 keyboard init arms IRQ1, and
+     *    the single sti below unleashes PIT *and* PS/2 together. */
+    pci_init();
+    keyboard_init();
+
     sti();
-    serial_write("step: interrupts armed (PIT 100Hz)\n");
+    serial_write("step: interrupts armed (PIT 100Hz + PS/2 keyboard)\n");
 
     serial_write("boot complete - CPU is in long mode, paging active\n");
-    kprint("\nboot complete: interrupts + timer + heap online.\n");
+    kprint("\nboot complete: interrupts + timer + heap + pci + kbd online.\n");
 
-    /* 7. Idle loop: hlt lets the CPU sleep until the next interrupt;
+    /* 8. Idle loop: hlt lets the CPU sleep until the next interrupt;
      *    every 100 ticks (1 second) we print a heartbeat so QEMU/CI
-     *    can prove the timer interrupt really fires. */
+     *    can prove the timer interrupt really fires. Every 5 seconds
+     *    we also replay the tail of the log ring — proof Phase 3's
+     *    buffered boot messages are readable long after they fired. */
     uint64_t last_second = 0;
+    int dump_at_second = 5;
     for (;;) {
         hlt();
         uint64_t ticks = timer_ticks();
@@ -316,6 +331,12 @@ void kmain(void)
             serial_write("s (ticks ");
             serial_write_dec(last_second);
             serial_write(")\n");
+            if ((int)(last_second / 100) >= dump_at_second) {
+                serial_write("log ring (most recent): ");
+                log_dump_tail(4);
+                serial_write("\n");
+                dump_at_second += 5;
+            }
         }
     }
 }

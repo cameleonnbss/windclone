@@ -16,6 +16,7 @@
 #include "serial.h"
 #include "string.h"
 #include "timer.h"
+#include "keyboard.h"
 
 /* --- IDT descriptor layout (AMD64 vol.2, "Interrupt Descriptor") ---- */
 
@@ -227,6 +228,8 @@ void irq_handler(struct regs *r)
 
     if (irq == 0)
         timer_tick();
+    else if (irq == 1)
+        keyboard_irq();
 
     pic_eoi(irq);
 }

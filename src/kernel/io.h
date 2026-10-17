@@ -32,6 +32,18 @@ static inline void outw(uint16_t port, uint16_t value)
     __asm__ volatile("outw %0, %1" : : "a"(value), "Nd"(port));
 }
 
+static inline uint32_t inl(uint16_t port)
+{
+    uint32_t value;
+    __asm__ volatile("inl %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
+static inline void outl(uint16_t port, uint32_t value)
+{
+    __asm__ volatile("outl %0, %1" : : "a"(value), "Nd"(port));
+}
+
 static inline void io_wait(void)
 {
     /* ISO trick: a write to an unused port costs ~1 microsecond. */

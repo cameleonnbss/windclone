@@ -28,9 +28,25 @@ jobs:
       - name: Boot smoke test (legacy BIOS)
         run: |
           set -e
+          # Monitor socket lets us inject a real keystroke once the
+          # kernel is up: sendkey -> emulated 8042 -> IRQ1 -> decode.
+          rm -f /tmp/wc-mon.sock
           timeout 25 qemu-system-x86_64 \
             -cdrom windclone.iso -m 512 -display none \
-            -serial file:serial-bios.log || true
+            -serial file:serial-bios.log \
+            -monitor unix:/tmp/wc-mon.sock,server,nowait &
+          QPID=$!
+          sleep 8
+          python3 - /tmp/wc-mon.sock <<'PYEOF'
+          import socket, sys, time
+          s = socket.socket(socket.AF_UNIX); s.settimeout(3)
+          s.connect(sys.argv[1])
+          time.sleep(0.2); s.recv(4096)
+          for k in ('a', 'b'):
+              s.sendall(('sendkey %s\n' % k).encode()); time.sleep(0.3)
+          s.close()
+          PYEOF
+          wait $QPID || true
           cat serial-bios.log
           grep -a "WindClone serial console online" serial-bios.log
           grep -a "boot complete" serial-bios.log
@@ -45,6 +61,13 @@ jobs:
           grep -a "step: interrupts armed" serial-bios.log
           grep -a "irq0: timer interrupt firing" serial-bios.log
           grep -a "uptime: 1s" serial-bios.log
+          # Phase 3: PCI enumeration, PS/2 keyboard, log ring replay
+          grep -a "step: log ring armed" serial-bios.log
+          grep -a "pci: enumeration done" serial-bios.log
+          grep -a "pci: host bridge" serial-bios.log
+          grep -a "step: keyboard live" serial-bios.log
+          grep -a "keyboard: key decoded end-to-end" serial-bios.log
+          grep -a "key: 'a' down" serial-bios.log
 
       - name: Boot smoke test (UEFI)
         run: |
@@ -63,6 +86,11 @@ jobs:
           grep -a "vga: text console live" serial-uefi.log
           grep -a "kmalloc selftest ok" serial-uefi.log
           grep -a "step: heap ok" serial-uefi.log
+          # Phase 3 stack too: OVMF never touches the 8042, which is
+          # exactly why keyboard_init configures translation explicitly.
+          grep -a "pci: enumeration done" serial-uefi.log
+          grep -a "step: keyboard live" serial-uefi.log
+          grep -a "log ring (most recent):" serial-uefi.log
           grep -a "boot complete" serial-uefi.log
           grep -a "uptime: 1s" serial-uefi.log
 

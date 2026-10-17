@@ -40,7 +40,10 @@ On boot the kernel:
 6. audits the GDT, loads a 256-entry IDT with NASM exception/IRQ stubs,
    remaps the 8259 PIC and unmasks IRQ0,
 7. takes the PIT timer at 100 Hz and prints a 1-second `uptime:` heartbeat
-   from the interrupt-driven idle loop.
+   from the interrupt-driven idle loop,
+8. enumerates the PCI bus (vendor/device/class + BAR decode), arms the PS/2
+   keyboard on IRQ1, and keeps a ring buffer of the last 48 boot messages —
+   replayed on the serial console every 5 seconds.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
@@ -74,8 +77,9 @@ cp windclone.iso /dev/sdX     # careful: this overwrites the whole device
 ## Repository layout
 
 ```
-src/kernel/        C kernel: entry (kmain), console drivers, IDT/PIC/PIT,
-                   interrupt stubs (NASM), string + port-I/O helpers
+src/kernel/        C kernel: entry (kmain), console + memory managers,
+                   IDT/PIC/PIT, PCI + PS/2 drivers, interrupt stubs (NASM),
+                   string + port-I/O helpers
 src/boot/          hand-written NASM boot code (two-stage educational MBR)
 linkers/           ELF64 linker script (higher-half kernel)
 vendor/limine.h    vendored bootloader API header (BSD-0, upstream Limine)
@@ -93,7 +97,7 @@ The full plan with checkboxes lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 1. ✅ Boot to long mode, serial + VGA console
 2. ✅ GDT audit, IDT + exceptions, PIC remap, PIT timer uptime
 3. ✅ Physical + virtual memory managers (`pmm`, own page tables, `kmalloc`)
-4. ⏳ PS/2 keyboard, PCI enumeration
+4. ✅ PS/2 keyboard, PCI enumeration
 5. ⏳ Initrd filesystem, ELF user processes, syscalls
 6. ⏳ Shell in C, drivers starting to move to Rust
 7. ⏳ POSIX/Linux compatibility layer (ELF loader + Linux syscall subset)

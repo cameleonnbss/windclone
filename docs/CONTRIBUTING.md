@@ -62,6 +62,22 @@ UEFI) and print the serial banner. That is the whole contract.
   `screendump` disagree (the device model's display path lags the guest's
   MMIO view). That is why the CI evidence for the VGA console is the serial
   marker `vga: text console live (MMIO round-trip ok)`, not a screenshot.
+* **8042 command-byte bits are a compatibility swamp — read before
+  writing.** QEMU models the *original Intel* layout (kbd IRQ enable =
+  0x01, disable interface = 0x10, translate = 0x40) while 90s PS/2
+  hardware uses the later one (translate = 0x01, kbd IRQ = 0x02...). A
+  mask that looked right silently killed IRQ1 in QEMU. We now READ the
+  live mode byte (command 0x20) and only OR safety bits onto it.
+* **Don't stack set-1 on top of AT translation.** While the controller's
+  translate filter is on it converts whatever the device emits at READ
+  time; switching the *device* to raw set 1 underneath it makes QEMU run
+  the set-1 codes through the translate table a second time ('a' arrives
+  as 0x03 — '2'). Pick one layer: we keep translation ON and never send
+  the F0 set-select command.
+* **Prove input headlessly with the QEMU monitor:** `-monitor
+  unix:/tmp/wc-mon.sock,server,nowait` plus `sendkey a` injected after
+  boot, then grep the serial log for the decoded character. That is how
+  CI tests a keyboard nobody is pressing.
 
 ## Good first issues
 

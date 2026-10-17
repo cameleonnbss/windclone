@@ -9,8 +9,23 @@ set -e
 cd "$(git rev-parse --show-toplevel 2>/dev/null || dirname "$(dirname "$0")")"
 
 Q="qemu-system-x86_64"
-TIMEOUT=${TIMEOUT:-10}
+TIMEOUT=${TIMEOUT:-14}
 fail() { echo "FAIL: $1" >&2; exit 1; }
+
+# Inject keystrokes through a QEMU monitor unix socket once the kernel
+# is up: `sendkey a` makes the emulated 8042 deliver a real IRQ1, so the
+# keyboard decode path is proven end-to-end, headless.
+send_keys() {
+    local sock=$1; shift
+    python3 - "$sock" "$@" <<'EOF'
+import socket, time, sys
+s = socket.socket(socket.AF_UNIX); s.settimeout(3); s.connect(sys.argv[1])
+time.sleep(0.2); s.recv(4096)
+for k in sys.argv[2:]:
+    s.sendall(('sendkey %s\n' % k).encode()); time.sleep(0.2)
+s.close()
+EOF
+}
 
 # Decode the VGA text buffer (0xB8000) through a QEMU monitor unix socket
 # and check that `want` appears somewhere on screen.
@@ -49,17 +64,27 @@ if objdump -d build/kernel.elf | grep -qE 'movdqa|shufps|punpck'; then
 fi
 echo '    ok: kernel is scalar (no SSE)'
 
-# 2) BIOS boot: serial must show the memory + interrupt + uptime markers
-rm -f /tmp/wc-bios.log
-timeout "$TIMEOUT" $Q -cdrom windclone.iso -m 512 -display none \
-    -no-reboot -serial file:/tmp/wc-bios.log || true
+# 2) BIOS boot: serial must show the memory + interrupt + PCI + keyboard
+#    + uptime markers; the injected `sendkey` must come back decoded.
+rm -f /tmp/wc-bios.log /tmp/wc-biosmon
+timeout "$TIMEOUT" $Q -cdrom windclone.iso -m 512 -display none -no-reboot \
+    -serial file:/tmp/wc-bios.log \
+    -monitor unix:/tmp/wc-biosmon,server,nowait &
+BIOPID=$!
+sleep 6
+send_keys /tmp/wc-biosmon a b
+wait $BIOPID 2>/dev/null || true
 for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "vga: text console live" "kmalloc selftest ok" "step: heap ok" \
             "boot complete" "step: interrupts armed" \
-            "irq0: timer interrupt firing" "uptime: 1s"; do
+            "irq0: timer interrupt firing" "uptime: 1s" \
+            "step: log ring armed" "pci: enumeration done" \
+            "pci: host bridge" "step: keyboard live" \
+            "keyboard: key decoded end-to-end" "key: 'a' down" \
+            "log ring (most recent):"; do
     grep -aq "$want" /tmp/wc-bios.log || fail "BIOS log missing: $want"
 done
-echo '    ok: BIOS boot — pmm, paging, heap selftests, timer interrupts'
+echo '    ok: BIOS boot — memory, interrupts, PCI, keyboard (sendkey), log ring'
 
 # 3) UEFI boot (OVMF), same contract minus the PIC-specific line
 rm -f /tmp/wc-uefi.log /tmp/wc-vars.fd
@@ -69,10 +94,12 @@ timeout "$TIMEOUT" $Q -cdrom windclone.iso -m 512 -display none -no-reboot \
     -drive if=pflash,format=raw,file=/tmp/wc-vars.fd \
     -serial file:/tmp/wc-uefi.log || true
 for want in "step: pmm ok" "step: paging ok" "vga: text console live" \
-            "kmalloc selftest ok" "step: heap ok" "boot complete" "uptime: 1s"; do
+            "kmalloc selftest ok" "step: heap ok" "boot complete" "uptime: 1s" \
+            "pci: enumeration done" "step: keyboard live" \
+            "log ring (most recent):"; do
     grep -aq "$want" /tmp/wc-uefi.log || fail "UEFI log missing: $want"
 done
-echo '    ok: UEFI boot'
+echo '    ok: UEFI boot — same memory + device stack comes up identically'
 
 # 4) two-stage MBR: decode the VGA text buffer through the QEMU monitor
 rm -f /tmp/wc-mbrmon
