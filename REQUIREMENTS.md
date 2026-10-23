@@ -23,6 +23,7 @@ sudo apt-get install -y \
   xorriso \           # hybrid ISO-9660 masterizer (El Torito BIOS+UEFI)
   qemu-system-x86 \   # local + CI boot testing
   ovmf \              # UEFI firmware for QEMU testing
+  tar \               # GNU tar, packs rootfs/ into the ustar initrd
   curl                # tools/fetch-limine.sh
 ```
 
@@ -80,3 +81,7 @@ GitHub Actions (`.github/workflows/build.yml`) does the full loop on every
 push: install toolchain → fetch Limine → `make` → boot the ISO headless in
 QEMU under **both BIOS and UEFI** and grep the serial log for the kernel's
 banner → upload `windclone.iso` as an artifact.
+
+`.github/workflows/release.yml` runs the same suite on every `v*` tag and
+attaches `windclone-<tag>.iso` + `SHA256SUMS` to the GitHub release — so the
+download is always an image that has been booted, never just built.

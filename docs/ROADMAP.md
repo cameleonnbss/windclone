@@ -68,10 +68,15 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       kept in RAM (IRQ-safe, tiny printf), replayed every 5 s on serial
       and reserved for the Phase 5 debug shell
 
-## Phase 4 — Userland v0 ⏳
+## Phase 4 — Userland v0 🔄
 *Goal: the first program that isn't the kernel.*
 
-- [ ] tar-based initrd from Limine modules
+- [x] tar-based initrd from Limine modules: `rootfs/` is packed into a
+      ustar archive by `tools/mkinitrd.sh`, Limine loads it with
+      `module_path:`, and the kernel walks it **in place** (header →
+      checksum → octal size → padded data → next block). Files are
+      slices of the module, so reading `/etc/motd` costs zero copies;
+      an absent path returns `NULL`, never a wild pointer
 - [ ] VFS layer (`open/read/write/close` in-kernel)
 - [ ] ELF64 process loader (ring 3), `syscall`/`sysret` ABI
 - [ ] Two syscalls first: `write(fd, buf, len)`, `exit(code)`
@@ -101,6 +106,7 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
 ## Phase 8 — The *Wind* in WindClone ⏳
 - [ ] Framebuffer graphics (Limine FB + simple compositor)
 - [ ] Window server: overlapping windows, title bar, close button
+- [ ] Taskbar + start menu, and a launcher that starts programs from the initrd
 - [ ] Mouse driver (PS/2 → later USB via xHCI)
 - [ ] A settings app that looks embarrassingly familiar
 
@@ -111,6 +117,13 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
 ---
 
 ## Definition of "1.0"
-Boots from ISO on BIOS+UEFI hardware, runs a Linux `busybox` binary, has a
-mouse-driven window shell, and every phase above is checked. Ambitious? Yes.
-That's why each phase ships a bootable ISO.
+
+A Windows-shaped desktop you download as an ISO from the GitHub Releases page,
+write to a USB stick, and boot on real BIOS *and* UEFI machines. On screen: a
+graphical shell with overlapping windows, a taskbar and a start menu. Behind
+it: a command line where the familiar commands run as real executables, and
+enough compatibility to run programs built for Linux. Every phase above is
+checked, and every `v*` tag publishes that ISO through
+`.github/workflows/release.yml`.
+
+Ambitious? Yes. That's why each phase ships a bootable ISO.

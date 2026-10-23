@@ -74,6 +74,14 @@ UEFI) and print the serial banner. That is the whole contract.
   the set-1 codes through the translate table a second time ('a' arrives
   as 0x03 — '2'). Pick one layer: we keep translation ON and never send
   the F0 set-select command.
+* **A tar is 512-byte blocks, not a stream of records.** The size field is
+  *octal ASCII*, the header checksum is the block's byte sum with the
+  checksum field counted as spaces, file data is padded to a 512-byte
+  multiple, and directories are entries too (typeflag `'5'`) that you must
+  step over even though you never want to read them. Forget the padding and
+  every entry after the first one is garbage. `initrd.c` also checks the
+  checksum: half-parsing a corrupt archive is how you get a wild pointer
+  instead of an error message.
 * **Prove input headlessly with the QEMU monitor:** `-monitor
   unix:/tmp/wc-mon.sock,server,nowait` plus `sendkey a` injected after
   boot, then grep the serial log for the decoded character. That is how

@@ -17,3 +17,7 @@ serial*.log
 .vscode/
 .idea/
 *.swp
+
+# Release packaging artifacts (see .github/workflows/release.yml)
+windclone-*.iso
+SHA256SUMS

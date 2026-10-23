@@ -1,0 +1,57 @@
+name: release
+
+# Publishes the bootable ISO on every version tag:
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# The image attached to the release is exactly the one the smoke tests just
+# booted on BIOS and UEFI — a release is never a build nobody ran. A
+# SHA256SUMS file travels with it so a download can be verified before it is
+# written to a USB stick.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  iso:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential nasm xorriso qemu-system-x86 ovmf
+
+      - name: Fetch Limine boot files
+        run: |
+          chmod +x tools/*.sh
+          ./tools/fetch-limine.sh
+
+      # Same contract as the build workflow, in one place: no-SSE check,
+      # BIOS boot, UEFI boot, two-stage MBR. Runners are slower than a dev
+      # box, hence the generous boot timeout.
+      - name: Build + boot smoke tests
+        env:
+          TIMEOUT: 30
+        run: ./tools/local-test.sh
+
+      - name: Package
+        run: |
+          cp windclone.iso "windclone-${GITHUB_REF_NAME}.iso"
+          sha256sum "windclone-${GITHUB_REF_NAME}.iso" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "windclone-${GITHUB_REF_NAME}.iso" SHA256SUMS \
+            --title "WindClone ${GITHUB_REF_NAME}" \
+            --generate-notes

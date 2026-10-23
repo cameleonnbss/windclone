@@ -8,9 +8,13 @@
 **WindClone** is a hobby operating system project. Nothing is copied from
 Linux or Windows: the kernel is written by us in C (with assembly for the
 earliest stages), and Rust / C++ are planned for drivers and userland as the
-project matures. The long-term goal is a Linux-compatible system call layer
-so that existing Linux binaries can eventually run on top of it, wrapped in a
-desktop shell that feels familiar.
+project matures.
+
+**The goal:** one ISO, downloadable from Releases, that boots into a system
+that behaves like Windows from the user's side — a graphical shell with
+windows, a taskbar and a start menu, a command line where the familiar
+commands and utilities work, and enough compatibility to run real programs —
+while the kernel underneath stays a Linux-style design we wrote ourselves.
 
 ⚠️ This is a learning project. Today it boots, manages its own memory
 (frame allocator, page tables, `kmalloc`), handles hardware interrupts,
@@ -43,7 +47,11 @@ On boot the kernel:
    from the interrupt-driven idle loop,
 8. enumerates the PCI bus (vendor/device/class + BAR decode), arms the PS/2
    keyboard on IRQ1, and keeps a ring buffer of the last 48 boot messages —
-   replayed on the serial console every 5 seconds.
+   replayed on the serial console every 5 seconds,
+9. parses the **initrd** the bootloader loaded as a module: `rootfs/` is
+   packed into a plain ustar tar by `tools/mkinitrd.sh`, and the kernel walks
+   it in place, lists its files and dumps `/etc/motd` — the first data in the
+   system that is not part of the kernel image.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
@@ -74,6 +82,16 @@ Write the ISO to a USB stick to boot it on real hardware:
 cp windclone.iso /dev/sdX     # careful: this overwrites the whole device
 ```
 
+## Releases
+
+Every `v*` tag runs the same smoke suite as CI and publishes the bootable ISO
+to [Releases](../../releases) — the image attached is the one that just booted
+on BIOS and UEFI, with a `SHA256SUMS` beside it:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
 ## Repository layout
 
 ```
@@ -81,9 +99,11 @@ src/kernel/        C kernel: entry (kmain), console + memory managers,
                    IDT/PIC/PIT, PCI + PS/2 drivers, interrupt stubs (NASM),
                    string + port-I/O helpers
 src/boot/          hand-written NASM boot code (two-stage educational MBR)
+rootfs/            what goes into the initrd: packed to a ustar tar, loaded
+                   by the bootloader as a module, read in place by the kernel
 linkers/           ELF64 linker script (higher-half kernel)
 vendor/limine.h    vendored bootloader API header (BSD-0, upstream Limine)
-tools/             fetch-limine.{sh,ps1}, build-iso.sh
+tools/             fetch-limine.{sh,ps1}, build-iso.sh, mkinitrd.sh
 limine.conf          boot entries shipped inside the ISO
 docs/              ROADMAP.md, CONTRIBUTING.md
 .github/workflows/ CI: build ISO + boot smoke tests in QEMU
@@ -98,7 +118,7 @@ The full plan with checkboxes lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 2. ✅ GDT audit, IDT + exceptions, PIC remap, PIT timer uptime
 3. ✅ Physical + virtual memory managers (`pmm`, own page tables, `kmalloc`)
 4. ✅ PS/2 keyboard, PCI enumeration
-5. ⏳ Initrd filesystem, ELF user processes, syscalls
+5. 🔄 Initrd ✅, VFS, ELF user processes, syscalls
 6. ⏳ Shell in C, drivers starting to move to Rust
 7. ⏳ POSIX/Linux compatibility layer (ELF loader + Linux syscall subset)
 8. ⏳ Graphical "windows" shell — earning the *Wind* in WindClone
