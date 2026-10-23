@@ -82,6 +82,22 @@ UEFI) and print the serial banner. That is the whole contract.
   every entry after the first one is garbage. `initrd.c` also checks the
   checksum: half-parsing a corrupt archive is how you get a wild pointer
   instead of an error message.
+* **A TSS descriptor must sit exactly where the GDTR limit says it does.**
+  Our GDT entries and the 16-byte TSS descriptor used to be two separate
+  statics; the linker is free to place those anywhere, so `ltr` read
+  whatever bytes happened to follow the table and #GP'd. Before the IDT
+  exists, a #GP is a triple fault with no message at all. They now live in
+  one packed struct: offset 40 is index 5, or it is a crash.
+* **`int 0x80` is an interrupt gate, so the CPU clears IF on entry.** Our
+  `exit` syscall does not `iretq` — it unwinds the stack back into the
+  kernel — so nothing restores the flags the kernel was running with. The
+  kernel resumed with interrupts disabled, `hlt` never woke up, and the
+  uptime heartbeat stopped dead. `user_exit_to_kernel` now does `sti`
+  before returning; if a manual context switch ever replaces iretq, that
+  flag is the first thing to check.
+* **The USER bit has to be on every level of the walk, not just the leaf.**
+  A ring-3 access to a page whose P4/P3/P2 entries lack it faults even
+  though the leaf looks correct.
 * **Prove input headlessly with the QEMU monitor:** `-monitor
   unix:/tmp/wc-mon.sock,server,nowait` plus `sendkey a` injected after
   boot, then grep the serial log for the decoded character. That is how

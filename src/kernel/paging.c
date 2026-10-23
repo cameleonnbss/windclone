@@ -18,12 +18,21 @@ static inline uint64_t idx(uint64_t virt, int level)
     return (virt >> (12 + 9 * (level - 1))) & 0x1FF;
 }
 
-/* Return a zeroed, freshly allocated table; hang it on `slot`. */
-static uint64_t *next_table(uint64_t *slot, int level)
+/* Return a zeroed, freshly allocated table; hang it on `slot`.
+ *
+ * `flags` is the leaf's flag set: the USER bit has to be set on every
+ * level of the walk, not just the leaf, or a ring-3 access to a mapping
+ * that looks perfectly valid faults anyway. Linux walks the same way and
+ * ORs the bit in for exactly this reason. */
+static uint64_t *next_table(uint64_t *slot, int level, uint64_t flags)
 {
+    uint64_t need_user = (flags & PTE_USER) ? PTE_USER : 0;
+
     if (*slot & PTE_PRESENT) {
         if (*slot & PTE_PS)
             panic("paging: a huge page blocks our 4 KiB mapping path");
+        if (need_user)
+            *slot |= PTE_USER;
         return pmm_phys_to_virt(*slot & PTE_ADDR_MASK);
     }
     uint64_t phys = pmm_alloc_frame();
@@ -31,7 +40,7 @@ static uint64_t *next_table(uint64_t *slot, int level)
         panic("paging: out of frames while building page tables");
     uint64_t *tbl = pmm_phys_to_virt(phys);
     memset(tbl, 0, FRAME_SIZE);
-    *slot = phys | PTE_PRESENT | PTE_WRITE;
+    *slot = phys | PTE_PRESENT | PTE_WRITE | need_user;
     (void)level;
     return tbl;
 }
@@ -42,9 +51,9 @@ void paging_map_page(uint64_t virt, uint64_t phys, uint64_t flags)
     phys &= PTE_ADDR_MASK;
 
     uint64_t *tbl = p4;
-    tbl = next_table(&tbl[idx(virt, 4)], 4);
-    tbl = next_table(&tbl[idx(virt, 3)], 3);
-    tbl = next_table(&tbl[idx(virt, 2)], 2);
+    tbl = next_table(&tbl[idx(virt, 4)], 4, flags);
+    tbl = next_table(&tbl[idx(virt, 3)], 3, flags);
+    tbl = next_table(&tbl[idx(virt, 2)], 2, flags);
     tbl[idx(virt, 1)] = phys | flags | PTE_PRESENT;
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
 }

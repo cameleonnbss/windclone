@@ -78,9 +78,18 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       slices of the module, so reading `/etc/motd` costs zero copies;
       an absent path returns `NULL`, never a wild pointer
 - [ ] VFS layer (`open/read/write/close` in-kernel)
-- [ ] ELF64 process loader (ring 3), `syscall`/`sysret` ABI
-- [ ] Two syscalls first: `write(fd, buf, len)`, `exit(code)`
-- [ ] `hello.elf` running on the console — release v0.1.0 milestone
+- [x] Ring 3: our own GDT with DPL-3 code/data selectors, a TSS so an
+      interrupt taken in userland lands on a kernel stack, `iretq` entry,
+      and a DPL-3 `int 0x80` gate — the first privilege boundary in the
+      system
+- [x] Two syscalls first: `write(fd, buf, len)` and `exit(code)`; exit
+      unwinds the syscall stack back into the kernel, so a program that
+      ends hands control back instead of wedging the CPU
+- [x] `/bin/hello` — a flat binary from the initrd (assembled at
+      `USER_BASE`, first 94 bytes of user code) that writes a line from
+      ring 3 and exits; CI greps the line it printed
+- [ ] ELF64 process loader: replace the flat-binary path in `usermode.c`
+      with real `PT_LOAD` segments — release v0.1.0 milestone
 
 ## Phase 5 — Shell & processes ⏳
 - [ ] `fork`-like process creation, scheduler (priority round-robin)

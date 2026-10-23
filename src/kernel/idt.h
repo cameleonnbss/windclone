@@ -23,6 +23,10 @@ struct regs {
 };
 
 void idt_init(void);          /* build + load the 256-entry IDT */
+
+/* Install one gate by hand (used by syscall.c for the DPL-3 int 0x80
+ * gate). Must run after idt_init(), which is what loads the table. */
+void idt_set_gate_dpl(uint8_t n, const void *handler, uint8_t dpl);
 void pic_remap(void);         /* IRQ 0..15 -> vectors 32..47    */
 void pic_mask(uint8_t irq);   /* silence one hardware line      */
 void pic_unmask(uint8_t irq); /* allow one hardware line again  */

@@ -27,6 +27,8 @@
 #include "pci.h"
 #include "keyboard.h"
 #include "initrd.h"
+#include "syscall.h"
+#include "usermode.h"
 #include "string.h"
 
 /* Boundaries of our own image, straight from the linker script. */
@@ -295,11 +297,19 @@ void kmain(void)
     /* 6. CPU plumbing: audit the GDT Limine gave us, install our own
      *    IDT (exceptions -> readable serial dump, IRQs -> handlers),
      *    remap the PIC and start the PIT timer at 100 Hz. */
+    /* Phase 4 needs what Phase 1 only audited: our own GDT (ring-3
+     * selectors) and a TSS (the kernel stack an interrupt uses when it
+     * arrives from CPL 3). Both must exist before the IDT is built, since
+     * every gate points at a code selector by number. */
+    gdt_init();
     gdt_report();
     serial_write("step: gdt audited\n");
 
     idt_init();
     serial_write("step: idt loaded, pic remapped\n");
+
+    /* The one gate ring 3 is allowed to call. */
+    syscall_init();
 
     timer_init(100);
 
@@ -366,6 +376,7 @@ void kmain(void)
      *    buffered boot messages are readable long after they fired. */
     uint64_t last_second = 0;
     int dump_at_second = 5;
+    int user_ran = 0;
     for (;;) {
         hlt();
         uint64_t ticks = timer_ticks();
@@ -376,6 +387,24 @@ void kmain(void)
             serial_write("s (ticks ");
             serial_write_dec(last_second);
             serial_write(")\n");
+
+            /* Run the first user program once the timer has proven the
+             * machine is fully up — a fault in ring 3 borrows the same
+             * exception path the boot used, so it is equally legible. */
+            if (!user_ran) {
+                user_ran = 1;
+                int code = -1;
+                serial_write("user: starting /bin/hello from the initrd\n");
+                if (usermode_run("/bin/hello", &code) == 0) {
+                    serial_write("user: program returned, exit code ");
+                    serial_write_dec((uint64_t)(code < 0 ? 0 : (unsigned)code));
+                    serial_write("\n");
+                    serial_write("step: userland ok (ring 3 round trip)\n");
+                    klog("user: ring 3 program exited with %d", code);
+                } else {
+                    serial_write("user: could not start /bin/hello\n");
+                }
+            }
             if ((int)(last_second / 100) >= dump_at_second) {
                 serial_write("log ring (most recent): ");
                 log_dump_tail(4);

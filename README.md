@@ -51,7 +51,11 @@ On boot the kernel:
 9. parses the **initrd** the bootloader loaded as a module: `rootfs/` is
    packed into a plain ustar tar by `tools/mkinitrd.sh`, and the kernel walks
    it in place, lists its files and dumps `/etc/motd` — the first data in the
-   system that is not part of the kernel image.
+   system that is not part of the kernel image,
+10. installs its own GDT (ring-3 selectors) and a TSS, then runs `/bin/hello`
+   from that initrd **in ring 3**: the program reaches the console only
+   through the `int 0x80` gate (`write`, `exit`), and `exit` unwinds back to
+   the kernel — the first privilege boundary in the system.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

@@ -27,6 +27,10 @@ KERNEL_ASM_OBJ := $(patsubst src/kernel/%.asm,build/%.asm.o,$(KERNEL_ASM))
 ROOTFS_FILES := $(shell find rootfs -type f 2>/dev/null)
 INITRD       := build/initrd.tar
 
+# Userland programs: flat binaries assembled at the address usermode.c
+# maps them to (USER_BASE in src/kernel/usermode.h).
+USER_BINS := build/hello
+
 # -mno-sse... : keep gcc from emitting SSE/AVX. At boot time CR4/XMM state
 # is not guaranteed, and -O2 happily vectorises loops (movdqa etc.) which
 # faults before we even have an IDT -> triple fault. Same flags Linux uses.
@@ -62,7 +66,11 @@ kernel: build/kernel.elf
 
 # ---- initrd (tar module, parsed in place by src/kernel/initrd.c) -----
 
-build/initrd.tar: tools/mkinitrd.sh $(ROOTFS_FILES)
+build/hello: src/user/hello.asm
+	@mkdir -p build
+	$(NASM) -f bin -o $@ $<
+
+build/initrd.tar: tools/mkinitrd.sh $(ROOTFS_FILES) $(USER_BINS)
 	@mkdir -p build
 	./tools/mkinitrd.sh $(INITRD)
 

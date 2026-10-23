@@ -76,16 +76,23 @@ static const void *const irq_stubs[16] = {
     irq_stub_12, irq_stub_13, irq_stub_14, irq_stub_15,
 };
 
-static void idt_set_gate(uint8_t n, const void *handler)
+void idt_set_gate_dpl(uint8_t n, const void *handler, uint8_t dpl)
 {
     uint64_t addr = (uint64_t)handler;
     idt_entries[n].base_low   = (uint16_t)(addr & 0xFFFF);
     idt_entries[n].selector   = kernel_cs;
     idt_entries[n].ist        = 0;
-    idt_entries[n].type_attr  = 0x8E;
+    /* 0x8E = present, DPL 0, 64-bit interrupt gate. A gate ring 3 must be
+     * able to invoke (int 0x80) carries its DPL in bits 5-6 instead. */
+    idt_entries[n].type_attr  = (uint8_t)(0x8E | (uint8_t)((dpl & 3) << 5));
     idt_entries[n].base_mid   = (uint16_t)((addr >> 16) & 0xFFFF);
     idt_entries[n].base_high  = (uint32_t)((addr >> 32) & 0xFFFFFFFF);
     idt_entries[n].zero       = 0;
+}
+
+static void idt_set_gate(uint8_t n, const void *handler)
+{
+    idt_set_gate_dpl(n, handler, 0);
 }
 
 /* --- 8259 PIC ----------------------------------------------------------
