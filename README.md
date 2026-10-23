@@ -5,6 +5,13 @@
 
 ![build status](https://github.com/cameleonnbss/windclone/actions/workflows/build.yml/badge.svg)
 
+![WindClone desktop: two overlapping windows, a taskbar with window
+buttons and desktop icons](docs/screenshots/desktop.png)
+
+*The desktop as it boots: an info window and a terminal overlapping, the
+terminal focused and running `/bin/hello` from the initrd in ring 3.
+Screenshot taken by the test suite itself (`tools/qemu-desktop.py`).*
+
 **WindClone** is a hobby operating system project. Nothing is copied from
 Linux or Windows: the kernel is written by us in C (with assembly for the
 earliest stages), and Rust / C++ are planned for drivers and userland as the
@@ -57,19 +64,24 @@ On boot the kernel:
    through the `int 0x80` gate (`write`, `exit`), and `exit` unwinds back to
    the kernel — the first privilege boundary in the system,
 11. maps the linear framebuffer the bootloader set up (device memory, so
-   uncached and outside the HHDM) and composites a first **desktop**: a
-   gradient wallpaper, desktop icons, a taskbar with a start button, and a
-   window with a title bar and a close button — all drawn by the kernel
-   with a 5x7 font it carries itself (no font files, no libc),
+   uncached and outside the HHDM) and composites the **desktop**: gradient
+   wallpaper, desktop icons, a taskbar with a start button, and three
+   overlapping windows — all drawn by the kernel with a 5x7 font it carries
+   itself (no font files, no libc),
 12. drives a **PS/2 mouse** on the 8042's aux channel (IRQ12, three-byte
-   packets, sign bits decoded) and draws a cursor: grab the title bar and
-   the window follows. Input is proven headlessly the same way the keyboard
-   is — the CI monitor injects `mouse_move` and greps the decoded packet,
-13. runs a **command prompt in a window**: two overlapping windows, one
-   of them a terminal with a line editor and a scrollback grid. `ls` reads
-   the initrd, `cat` prints a file, and `hello` really loads `/bin/hello`
-   and runs it in ring 3 before returning to the prompt. CI types the
-   command through the emulated keyboard and greps what it started.
+   packets, sign bits decoded) and draws a cursor. The **window manager**
+   answers it the way people expect: click a window to focus it, drag it by
+   the title bar, minimise / maximise / close from the title-bar buttons,
+   restore or raise it from a taskbar button, reopen a closed window from
+   its desktop icon. Hit testing runs front to back and stops at the first
+   window that owns the press. CI drives real PS/2 clicks through the QEMU
+   monitor and greps the kernel's `wm:` markers — a headless run therefore
+   proves the window manager, not just the mouse,
+13. runs a **command prompt in a window**: a terminal with a line editor and
+   a scrollback grid, focused by clicking it. `ls` reads the initrd, `cat`
+   prints a file, and `hello` really loads `/bin/hello` and runs it in ring 3
+   before returning to the prompt. CI types the command through the emulated
+   keyboard and greps what it started.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
@@ -121,9 +133,11 @@ rootfs/            what goes into the initrd: packed to a ustar tar, loaded
                    by the bootloader as a module, read in place by the kernel
 linkers/           ELF64 linker script (higher-half kernel)
 vendor/limine.h    vendored bootloader API header (BSD-0, upstream Limine)
-tools/             fetch-limine.{sh,ps1}, build-iso.sh, mkinitrd.sh
+tools/             fetch-limine.{sh,ps1}, build-iso.sh, mkinitrd.sh,
+                   local-test.sh (smoke suite, same one CI runs),
+                   qemu-desktop.py (drives the desktop with real PS/2 clicks)
 limine.conf          boot entries shipped inside the ISO
-docs/              ROADMAP.md, CONTRIBUTING.md
+docs/              ROADMAP.md, CONTRIBUTING.md, screenshots/
 .github/workflows/ CI: build ISO + boot smoke tests in QEMU
 Makefile           kernel, ISO, MBR, run targets
 ```

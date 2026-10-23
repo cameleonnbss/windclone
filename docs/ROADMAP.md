@@ -124,8 +124,16 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
 - [x] First composited frame: desktop icons, taskbar with a start button,
       one window with a title bar and a close button — drawn back to front,
       no double buffer yet (verified by a QEMU `screendump`)
-- [ ] Window server: overlapping windows, focus, damage tracking
-- [ ] Taskbar + start menu, and a launcher that starts programs from the initrd
+- [x] Window manager: three overlapping windows, focus by clicking anywhere
+      on one, title-bar buttons (minimise / maximise / close), taskbar
+      buttons that restore or raise, and desktop icons that reopen a window
+      that was closed. Hit testing runs front to back and stops at the first
+      window that owns the press — one rule, and it is what makes overlapping
+      windows behave the way people expect
+- [x] Headless proof: `tools/qemu-desktop.py` injects real PS/2 moves and
+      clicks through the QEMU monitor and greps the kernel's `wm:` markers
+- [ ] Damage tracking + double buffer (a mouse move still repaints everything)
+- [ ] Start menu, and a launcher that starts programs from the initrd
 - [x] Mouse driver: 8042 aux channel, IRQ12 (cascade unmasked), 3-byte
       packets with the sign bits in the flags byte — verified headlessly by
       injecting `mouse_move` through the QEMU monitor and grepping the

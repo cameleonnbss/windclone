@@ -1,20 +1,31 @@
 /* WindClone — the desktop shell (Phase 8).
  *
- * Two overlapping windows is the smallest arrangement that forces the two
- * ideas a window system actually needs: z-order (a click brings a window to
- * the front) and hit testing (only the title bar drags). There is still no
- * damage tracking and no double buffer — a mouse move repaints everything —
- * which is the next thing to fix, not the thing to hide.
+ * This is a window manager, not a drawing demo: three windows, a z-order
+ * you can change with the mouse, and title-bar buttons that actually do
+ * something. What a window needs to be a window:
  *
- * Windows are painted in `order[]`, so raising one is a swap in that array
- * rather than a sort. Content is drawn from the window's kind: one is a
- * status card, the other is the live command line in shell.c.
+ *   - focus    clicking anywhere on a window raises it (focus is the
+ *              position in `order[]`, so raising is an array rotation)
+ *   - minimize hidden but still open; the taskbar button brings it back
+ *   - maximize fill the desktop above the taskbar; geometry is saved so
+ *              restoring gives the exact window back
+ *   - close    gone until a desktop icon opens it again
+ *
+ * Hit testing runs front to back and stops at the first window that owns
+ * the click — that single rule is what makes overlapping windows behave
+ * the way people expect. There is still no damage tracking and no double
+ * buffer: a mouse move repaints everything, which is the next thing to
+ * fix, not the thing to hide.
+ *
+ * The font is uppercase A-Z 0-9 with ":-.!" only, so interface strings
+ * stay clear of apostrophes: an unknown glyph silently becomes a space.
  *
  * SPDX-License-Identifier: MIT
  */
 #include <stdint.h>
 #include "desktop.h"
 #include "gfx.h"
+#include "log.h"
 #include "mouse.h"
 #include "shell.h"
 
@@ -30,20 +41,35 @@
 #define C_MUTED       gfx_rgb(0x64, 0x74, 0x8B)
 #define C_WHITE       gfx_rgb(0xFF, 0xFF, 0xFF)
 
-#define TASKBAR_H 44
-#define TITLE_H   34
+#define TASKBAR_H   44
+#define TITLE_H     34
+#define BTN_W       26
+#define BTN_H       18
+#define BTN_DY      8          /* buttons inside the title bar */
+#define START_X     12
+#define START_W     110
+#define TASK_X      132        /* first taskbar window button */
+#define TASK_W      168
+#define TASK_GAP    6
 
-enum { WIN_STATUS, WIN_TERM };
+enum { WIN_STATUS, WIN_TRASH, WIN_TERM, WIN_COUNT };
+enum { BTN_MIN, BTN_MAX, BTN_CLOSE, BTN_NONE };
 
 struct window {
-    int x, y, w, h;
-    const char *title;
+    int x, y, w, h;            /* current geometry                     */
+    int rx, ry, rw, rh;        /* geometry to restore when un-maximising */
+    const char *title;         /* title bar                            */
+    const char *task;          /* taskbar button                       */
     int kind;
+    int open;                  /* closed windows leave until an icon reopens them */
+    int min;                   /* minimised: open, hidden, taskbar only */
+    int max;                   /* maximised: fills the desktop          */
 };
 
-static struct window wins[2];
-static int order[2] = { WIN_STATUS, WIN_TERM };   /* painted back to front */
+static struct window wins[WIN_COUNT];
+static int order[WIN_COUNT] = { WIN_STATUS, WIN_TERM, WIN_TRASH }; /* back -> front */
 static int dragging, grab_dx, grab_dy, drag_win;
+static int prev_left;
 static int laid_out;
 
 static const char *const cursor_shape[] = {
@@ -65,6 +91,52 @@ static const char *const cursor_shape[] = {
     "......##....",
 };
 
+/* --- window bookkeeping ------------------------------------------------ */
+
+/* Raising is a rotation: the focused window is always the last one drawn. */
+static void raise_window(int id)
+{
+    for (int i = 0; i < WIN_COUNT; i++) {
+        if (order[i] != id)
+            continue;
+        for (int j = i; j < WIN_COUNT - 1; j++)
+            order[j] = order[j + 1];
+        order[WIN_COUNT - 1] = id;
+        return;
+    }
+}
+
+static int focused(void)
+{
+    return order[WIN_COUNT - 1];
+}
+
+static void clamp_to_desktop(struct window *w, int W, int H)
+{
+    if (w->x < 0) w->x = 0;
+    if (w->y < 0) w->y = 0;
+    if (w->x + w->w > W) w->x = W - w->w;
+    if (w->y + w->h > H - TASKBAR_H) w->y = H - TASKBAR_H - w->h;
+}
+
+static void set_maximised(struct window *w, int on, int W, int H)
+{
+    if (on == w->max)
+        return;
+    if (on) {
+        w->rx = w->x; w->ry = w->y; w->rw = w->w; w->rh = w->h;
+        w->x = 0; w->y = 0; w->w = W; w->h = H - TASKBAR_H;
+        w->max = 1;
+        klog("wm: window maximised");
+    } else {
+        w->x = w->rx; w->y = w->ry; w->w = w->rw; w->h = w->rh;
+        w->max = 0;
+        klog("wm: window restored");
+    }
+}
+
+/* --- painting ---------------------------------------------------------- */
+
 static void draw_cursor(int x, int y)
 {
     for (int row = 0; row < 16; row++) {
@@ -78,13 +150,47 @@ static void draw_cursor(int x, int y)
     }
 }
 
-static void draw_close_button(int x, int y, int size)
+/* One title-bar button, painted from its index. BTN_CLOSE is red (and
+ * lighter on hover); the other two are neutral chrome. */
+static void draw_title_button(const struct window *w, int btn, int hover)
 {
-    gfx_fill(x, y, size, size, C_ACCENT);
-    for (int i = 0; i < size; i++) {
-        gfx_pixel(x + i, y + i, C_WHITE);
-        gfx_pixel(x + size - 1 - i, y + i, C_WHITE);
+    int bx = w->x + w->w - 4 - BTN_W * (btn + 1);
+    int by = w->y + BTN_DY;
+    uint32_t bg;
+
+    if (btn == BTN_CLOSE)
+        bg = hover ? gfx_rgb(0xF8, 0x71, 0x71) : C_ACCENT;
+    else
+        bg = hover ? gfx_rgb(0x33, 0x41, 0x55) : C_TITLE_HOT;
+
+    gfx_fill(bx, by, BTN_W, BTN_H, bg);
+
+    int cx = bx + BTN_W / 2;
+    int cy = by + BTN_H / 2;
+    if (btn == BTN_MIN) {
+        gfx_fill(cx - 5, cy + 4, 10, 2, C_WHITE);
+    } else if (btn == BTN_MAX) {
+        gfx_frame(cx - 5, cy - 5, 11, 11, C_WHITE);
+    } else {
+        for (int i = 0; i < 8; i++) {
+            gfx_pixel(cx - 4 + i, cy - 4 + i, C_WHITE);
+            gfx_pixel(cx + 4 - i, cy - 4 + i, C_WHITE);
+        }
     }
+}
+
+/* Which button of this window's title bar is under (mx,my), BTN_NONE if
+ * none. Layout is close, max, min packed to the right edge. */
+static int title_button_at(const struct window *w, int mx, int my)
+{
+    if (my < w->y + BTN_DY || my >= w->y + BTN_DY + BTN_H)
+        return BTN_NONE;
+    for (int i = 0; i < 3; i++) {
+        int bx = w->x + w->w - 4 - BTN_W * (i + 1);
+        if (mx >= bx && mx < bx + BTN_W)
+            return BTN_CLOSE - i;
+    }
+    return BTN_NONE;
 }
 
 static void draw_logo(int x, int y, int pane, int gap)
@@ -95,13 +201,28 @@ static void draw_logo(int x, int y, int pane, int gap)
     gfx_fill(x + pane + gap, y + pane + gap, pane, pane, C_WHITE);
 }
 
-static void draw_icon(int x, int y, const char *label)
+#define ICON_X   28
+#define ICON_W   52
+#define ICON_H   74            /* tile (44) + label underneath */
+#define ICON_DY  80
+
+static const struct {
+    int y;
+    const char *label;
+    int win;
+} icons[] = {
+    { 28,  "ORDINATEUR", WIN_STATUS },
+    { 108, "CORBEILLE",  WIN_TRASH  },
+};
+
+static void draw_icon(const char *label, int y)
 {
-    gfx_fill(x, y, 52, 44, gfx_rgb(0x14, 0x3A, 0x78));
-    gfx_frame(x, y, 52, 44, gfx_rgb(0xBF, 0xDB, 0xFF));
-    gfx_fill(x + 8, y + 10, 36, 4, C_WHITE);
-    gfx_fill(x + 8, y + 20, 24, 4, C_WHITE);
-    gfx_text(x + 26 - gfx_text_width(label, 1) / 2, y + 50, label, C_WHITE, 1);
+    gfx_fill(ICON_X, y, ICON_W, 44, gfx_rgb(0x14, 0x3A, 0x78));
+    gfx_frame(ICON_X, y, ICON_W, 44, gfx_rgb(0xBF, 0xDB, 0xFF));
+    gfx_fill(ICON_X + 8, y + 10, 36, 4, C_WHITE);
+    gfx_fill(ICON_X + 8, y + 20, 24, 4, C_WHITE);
+    gfx_text(ICON_X + ICON_W / 2 - gfx_text_width(label, 1) / 2,
+             y + 50, label, C_WHITE, 1);
 }
 
 static void draw_status_content(const struct window *w)
@@ -109,7 +230,7 @@ static void draw_status_content(const struct window *w)
     int tx = w->x + 24;
     int ty = w->y + TITLE_H + 22;
 
-    gfx_text(tx, ty, "WINDCLONE 0.0.4", C_INK, 2);
+    gfx_text(tx, ty, "WINDCLONE 0.1.0", C_INK, 2);
     ty += 34;
     gfx_text(tx, ty, "UN SYSTEME ECRIT DE ZERO", C_MUTED, 1);
     ty += 22;
@@ -117,59 +238,259 @@ static void draw_status_content(const struct window *w)
     ty += 13;
     gfx_text(tx, ty, "- INITRD TAR + SYSCALLS", C_INK, 1);
     ty += 13;
-    gfx_text(tx, ty, "- FRAMEBUFFER + SOURIS + FENETRES", C_INK, 1);
+    gfx_text(tx, ty, "- FRAMEBUFFER + SOURIS", C_INK, 1);
     ty += 13;
-    gfx_text(tx, ty, "- INVITE DE COMMANDES (FENETRE)", C_INK, 1);
-    ty += 24;
-    gfx_text(tx, ty, "CLIQUE UNE BARRE DE TITRE POUR METTRE", C_MUTED, 1);
+    gfx_text(tx, ty, "- FENETRES : REDUIRE, AGRANDIR,", C_INK, 1);
+    ty += 13;
+    gfx_text(tx, ty, "  FERMER", C_INK, 1);
+    ty += 20;
+    gfx_text(tx, ty, "LA BARRE DES TACHES REDUIT ET", C_MUTED, 1);
     ty += 12;
-    gfx_text(tx, ty, "UNE FENETRE AU PREMIER PLAN, PUIS", C_MUTED, 1);
+    gfx_text(tx, ty, "RESTAURE. LES ICONES OUVERT LES", C_MUTED, 1);
     ty += 12;
-    gfx_text(tx, ty, "DEPLACE-LA.", C_MUTED, 1);
+    gfx_text(tx, ty, "FENETRES FERMEES.", C_MUTED, 1);
 }
 
-static void draw_window(const struct window *w, int front)
+static void draw_trash_content(const struct window *w)
 {
-    /* Shadow, body, title bar. The front window gets a brighter title so
-     * focus is readable at a glance. */
-    gfx_fill(w->x + 6, w->y + 6, w->w, w->h, gfx_rgb(0x0A, 0x1E, 0x45));
+    int tx = w->x + 24;
+    int ty = w->y + TITLE_H + 22;
+
+    gfx_text(tx, ty, "CORBEILLE", C_INK, 2);
+    ty += 34;
+    gfx_text(tx, ty, "ELLE EST VIDE.", C_MUTED, 1);
+    ty += 22;
+    gfx_text(tx, ty, "- RIEN A SUPPRIMER.", C_INK, 1);
+    ty += 13;
+    gfx_text(tx, ty, "- RIEN A RESTAURER.", C_INK, 1);
+    ty += 13;
+    gfx_text(tx, ty, "- OUVERTE DEPUIS SON ICONE.", C_INK, 1);
+}
+
+static void draw_window(const struct window *w)
+{
+    int mx = mouse_x();
+    int my = mouse_y();
+    int front = (w == &wins[focused()]);
+    uint32_t border = w->kind == WIN_TERM ? gfx_rgb(0x2B, 0x36, 0x48)
+                                          : gfx_rgb(0xCE, 0xD5, 0xE0);
+
+    /* Shadow only when there is room behind the window: a maximised one
+     * has no behind, and the extra 6 px would poke into the taskbar. */
+    if (!w->max)
+        gfx_fill(w->x + 6, w->y + 6, w->w, w->h, gfx_rgb(0x0A, 0x1E, 0x45));
+
     gfx_fill(w->x, w->y, w->w, w->h, w->kind == WIN_TERM ? C_CONSOLE : C_BODY);
     gfx_fill(w->x, w->y, w->w, TITLE_H, front ? C_TITLE_HOT : C_TITLE);
     gfx_fill(w->x, w->y, 4, TITLE_H, front ? C_ACCENT : gfx_rgb(0x47, 0x55, 0x69));
 
     gfx_text(w->x + 16, w->y + 10, w->title, C_WHITE, 2);
-    draw_close_button(w->x + w->w - 34, w->y + 8, 18);
+    for (int btn = BTN_MIN; btn <= BTN_CLOSE; btn++)
+        draw_title_button(w, btn,
+                          title_button_at(w, mx, my) == btn && front);
 
     if (w->kind == WIN_STATUS)
         draw_status_content(w);
+    else if (w->kind == WIN_TRASH)
+        draw_trash_content(w);
     else
         shell_draw(w->x + 14, w->y + TITLE_H + 12, w->w - 28);
 
-    gfx_frame(w->x, w->y, w->w, w->h,
-              w->kind == WIN_TERM ? gfx_rgb(0x2B, 0x36, 0x48) : gfx_rgb(0xCE, 0xD5, 0xE0));
+    gfx_frame(w->x, w->y, w->w, w->h, border);
 }
+
+static void draw_taskbar(int W, int H)
+{
+    int y = H - TASKBAR_H;
+    int mx = mouse_x();
+    int my = mouse_y();
+
+    gfx_fill(0, y, W, TASKBAR_H, C_TASKBAR);
+    gfx_fill(0, y, W, 2, C_ACCENT);
+
+    int start_hot = mx >= START_X && mx < START_X + START_W && my >= y;
+    gfx_fill(START_X, y + 8, START_W, 28,
+             start_hot ? C_TITLE_HOT : gfx_rgb(0x16, 0x1B, 0x22));
+    draw_logo(START_X + 8, y + 14, 7, 3);
+    gfx_text(START_X + 34, y + 17, "DEMARRER", C_WHITE, 1);
+
+    int x = TASK_X;
+    for (int id = 0; id < WIN_COUNT; id++) {
+        struct window *w = &wins[id];
+        if (!w->open)
+            continue;
+        int active = !w->min && id == focused();
+        gfx_fill(x, y + 8, TASK_W, 28,
+                 active ? C_TITLE_HOT : gfx_rgb(0x13, 0x18, 0x20));
+        gfx_fill(x, y + 8, 3, 28, active ? C_ACCENT : gfx_rgb(0x2B, 0x36, 0x48));
+        gfx_text(x + 12, y + 17, w->task, w->min ? C_MUTED : C_WHITE, 1);
+        x += TASK_W + TASK_GAP;
+    }
+
+    gfx_text(W - 178, y + 17, "WINDCLONE 0.1.0", C_MUTED, 1);
+    gfx_text(W - 56, y + 17, "12:00", C_WHITE, 1);
+}
+
+/* --- input ------------------------------------------------------------- */
+
+static int task_button_at(int mx, int my, int H)
+{
+    if (my < H - TASKBAR_H || my >= H)
+        return -1;
+    int x = TASK_X;
+    for (int id = 0; id < WIN_COUNT; id++) {
+        if (!wins[id].open)
+            continue;
+        if (mx >= x && mx < x + TASK_W)
+            return id;
+        x += TASK_W + TASK_GAP;
+    }
+    return -2;               /* on the bar, but not on a button */
+}
+
+/* DEMARRER = show desktop: hide every window, or bring them all back. */
+static void toggle_show_desktop(void)
+{
+    int anything_shown = 0;
+    for (int i = 0; i < WIN_COUNT; i++)
+        if (wins[i].open && !wins[i].min)
+            anything_shown = 1;
+
+    for (int i = 0; i < WIN_COUNT; i++)
+        if (wins[i].open)
+            wins[i].min = anything_shown;
+
+    klog(anything_shown ? "wm: show desktop" : "wm: windows restored");
+}
+
+/* One mouse press, resolved in the order a desktop user means it:
+ * taskbar, then title bars, then window bodies, then icons. */
+static void handle_press(int mx, int my, int W, int H)
+{
+    if (my >= H - TASKBAR_H) {
+        if (mx >= START_X && mx < START_X + START_W) {
+            toggle_show_desktop();
+            return;
+        }
+        int id = task_button_at(mx, my, H);
+        if (id < 0)
+            return;
+        if (wins[id].min) {
+            wins[id].min = 0;
+            raise_window(id);
+            klog("wm: window restored from taskbar");
+        } else if (focused() == id) {
+            wins[id].min = 1;
+            klog("wm: window minimised");
+        } else {
+            raise_window(id);
+        }
+        return;
+    }
+
+    /* Title bars, front to back: the first one under the pointer owns the
+     * press, buttons included. That is the whole hit test. */
+    for (int i = WIN_COUNT - 1; i >= 0; i--) {
+        int id = order[i];
+        struct window *w = &wins[id];
+        if (!w->open || w->min)
+            continue;
+        if (mx < w->x || mx >= w->x + w->w ||
+            my < w->y || my >= w->y + TITLE_H)
+            continue;
+
+        raise_window(id);
+        switch (title_button_at(w, mx, my)) {
+        case BTN_CLOSE:
+            w->open = 0; w->min = 0; w->max = 0;
+            klog("wm: window closed");
+            return;
+        case BTN_MIN:
+            w->min = 1;
+            klog("wm: window minimised");
+            return;
+        case BTN_MAX:
+            set_maximised(w, !w->max, W, H);
+            return;
+        default:
+            break;
+        }
+        if (w->max)
+            return;                     /* a maximised window does not drag */
+        dragging = 1;
+        drag_win = id;
+        grab_dx = mx - w->x;
+        grab_dy = my - w->y;
+        return;
+    }
+
+    /* Window bodies: clicking one raises it. Focus without a drag, which
+     * is what makes two overlapping windows usable at all. */
+    for (int i = WIN_COUNT - 1; i >= 0; i--) {
+        int id = order[i];
+        struct window *w = &wins[id];
+        if (!w->open || w->min)
+            continue;
+        if (mx < w->x || mx >= w->x + w->w ||
+            my < w->y || my >= w->y + w->h)
+            continue;
+        raise_window(id);
+        return;
+    }
+
+    /* Desktop icons: reopen a window that was closed or minimise it back. */
+    for (int i = 0; i < (int)(sizeof icons / sizeof icons[0]); i++) {
+        if (mx < ICON_X || mx >= ICON_X + ICON_W ||
+            my < icons[i].y || my >= icons[i].y + ICON_H)
+            continue;
+        struct window *w = &wins[icons[i].win];
+        w->open = 1;
+        w->min = 0;
+        raise_window(icons[i].win);
+        klog("wm: window opened from icon");
+        return;
+    }
+}
+
+/* --- frame ------------------------------------------------------------- */
 
 static void layout(void)
 {
-    int w = gfx_width();
-    int h = gfx_height();
+    int W = gfx_width();
+    int H = gfx_height();
 
     /* Clear of the icon column: windows overlapping icons looks like a
      * bug, windows overlapping each other looks like a desktop. */
-    wins[WIN_STATUS].x = 116;
-    wins[WIN_STATUS].y = 88;
-    wins[WIN_STATUS].w = 400;
-    wins[WIN_STATUS].h = 300;
+    wins[WIN_STATUS].x = 116;  wins[WIN_STATUS].y = 88;
+    wins[WIN_STATUS].w = 400;  wins[WIN_STATUS].h = 300;
     wins[WIN_STATUS].title = "WINDCLONE";
-    wins[WIN_STATUS].kind = WIN_STATUS;
+    wins[WIN_STATUS].task  = "WINDCLONE";
+    wins[WIN_STATUS].kind  = WIN_STATUS;
+    wins[WIN_STATUS].open  = 1;
 
-    wins[WIN_TERM].w = 600;
-    wins[WIN_TERM].h = 380;
-    if (wins[WIN_TERM].w > w - 40) wins[WIN_TERM].w = w - 40;
-    wins[WIN_TERM].x = w - wins[WIN_TERM].w - 48;
-    wins[WIN_TERM].y = h - TASKBAR_H - wins[WIN_TERM].h - 60;
+    wins[WIN_TERM].w = 600;  wins[WIN_TERM].h = 380;
+    if (wins[WIN_TERM].w > W - 40) wins[WIN_TERM].w = W - 40;
+    wins[WIN_TERM].x = W - wins[WIN_TERM].w - 48;
+    wins[WIN_TERM].y = H - TASKBAR_H - wins[WIN_TERM].h - 60;
     wins[WIN_TERM].title = "INVITE DE COMMANDES";
-    wins[WIN_TERM].kind = WIN_TERM;
+    wins[WIN_TERM].task  = "INVITE DE COMMANDES";
+    wins[WIN_TERM].kind  = WIN_TERM;
+    wins[WIN_TERM].open  = 1;
+
+    /* Closed by default: it exists to prove a desktop icon can open a
+     * window, which is how a window comes back after being closed. */
+    wins[WIN_TRASH].w = 360;  wins[WIN_TRASH].h = 230;
+    wins[WIN_TRASH].x = (W - wins[WIN_TRASH].w) / 2;
+    wins[WIN_TRASH].y = H - TASKBAR_H - wins[WIN_TRASH].h - 90;
+    wins[WIN_TRASH].title = "CORBEILLE";
+    wins[WIN_TRASH].task  = "CORBEILLE";
+    wins[WIN_TRASH].kind  = WIN_TRASH;
+    wins[WIN_TRASH].open  = 0;
+
+    for (int i = 0; i < WIN_COUNT; i++) {
+        wins[i].rx = wins[i].x;  wins[i].ry = wins[i].y;
+        wins[i].rw = wins[i].w;  wins[i].rh = wins[i].h;
+    }
 
     laid_out = 1;
 }
@@ -179,60 +500,41 @@ void desktop_frame(void)
     if (!gfx_ready())
         return;
 
-    int w = gfx_width();
-    int h = gfx_height();
+    int W = gfx_width();
+    int H = gfx_height();
 
     if (!laid_out)
         layout();
 
     int mx = mouse_x();
     int my = mouse_y();
+    int left = mouse_left();
+    int press = left && !prev_left;     /* edge, not level: one action per click */
+    prev_left = left;
 
-    /* Hit test front to back: the first title bar under the pointer wins,
-     * and that window comes to the front (the swap is what "focus" is). */
-    if (mouse_left() && !dragging) {
-        for (int i = 1; i >= 0; i--) {
-            struct window *win = &wins[order[i]];
-            if (mx >= win->x && mx < win->x + win->w &&
-                my >= win->y && my < win->y + TITLE_H) {
-                drag_win = order[i];
-                if (i == 0) {
-                    order[0] = order[1];
-                    order[1] = drag_win;
-                }
-                dragging = 1;
-                grab_dx = mx - win->x;
-                grab_dy = my - win->y;
-                break;
-            }
-        }
-    }
-    if (!mouse_left())
+    if (!left)
         dragging = 0;
 
     if (dragging) {
-        struct window *win = &wins[drag_win];
-        win->x = mx - grab_dx;
-        win->y = my - grab_dy;
-        if (win->x < 0) win->x = 0;
-        if (win->y < 0) win->y = 0;
-        if (win->x + win->w > w) win->x = w - win->w;
-        if (win->y + win->h > h - TASKBAR_H) win->y = h - TASKBAR_H - win->h;
+        struct window *w = &wins[drag_win];
+        w->x = mx - grab_dx;
+        w->y = my - grab_dy;
+        clamp_to_desktop(w, W, H);
     }
 
-    gfx_gradient_v(0, 0, w, h, C_WALL_TOP, C_WALL_BOTTOM);
-    draw_icon(28, 28, "ORDINATEUR");
-    draw_icon(28, 108, "CORBEILLE");
+    if (press)
+        handle_press(mx, my, W, H);
 
-    for (int i = 0; i < 2; i++)
-        draw_window(&wins[order[i]], i == 1);
+    gfx_gradient_v(0, 0, W, H, C_WALL_TOP, C_WALL_BOTTOM);
+    for (int i = 0; i < (int)(sizeof icons / sizeof icons[0]); i++)
+        draw_icon(icons[i].label, icons[i].y);
 
-    gfx_fill(0, h - TASKBAR_H, w, TASKBAR_H, C_TASKBAR);
-    gfx_fill(0, h - TASKBAR_H, w, 2, C_ACCENT);
-    draw_logo(16, h - TASKBAR_H + 14, 7, 3);
-    gfx_text(44, h - TASKBAR_H + 18, "DEMARRER", C_WHITE, 1);
-    gfx_text(w - 170, h - TASKBAR_H + 18, "WINDCLONE 0.0.4", C_MUTED, 1);
-    gfx_text(w - 56, h - TASKBAR_H + 18, "12:00", C_WHITE, 1);
+    for (int i = 0; i < WIN_COUNT; i++) {
+        struct window *w = &wins[order[i]];
+        if (w->open && !w->min)
+            draw_window(w);
+    }
 
+    draw_taskbar(W, H);
     draw_cursor(mx, my);
 }

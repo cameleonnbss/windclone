@@ -96,22 +96,43 @@ for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
 done
 echo '    ok: BIOS boot — memory, interrupts, PCI, keyboard (sendkey), log ring'
 
-# 3) UEFI boot (OVMF), same contract minus the PIC-specific line
-rm -f /tmp/wc-uefi.log /tmp/wc-vars.fd
-cp /usr/share/OVMF/OVMF_VARS_4M.fd /tmp/wc-vars.fd
-timeout "$TIMEOUT" $Q -cdrom windclone.iso -m 512 -display none -no-reboot \
-    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
-    -drive if=pflash,format=raw,file=/tmp/wc-vars.fd \
-    -serial file:/tmp/wc-uefi.log || true
-for want in "step: pmm ok" "step: paging ok" "vga: text console live" \
-            "kmalloc selftest ok" "step: heap ok" "boot complete" "uptime: 1s" \
-            "pci: enumeration done" "step: keyboard live" \
-            "log ring (most recent):" "step: initrd ok" \
-            "initrd: /etc/motd" "step: userland ok (ring 3 round trip)" \
-            "gfx: framebuffer" "gfx: desktop composited"; do
-    grep -aq "$want" /tmp/wc-uefi.log || fail "UEFI log missing: $want"
+# 3) UEFI boot (OVMF), same contract minus the PIC-specific line.
+#    The firmware files are packaged differently per distro — and a rootless
+#    toolchain extract keeps them outside /usr — so look for them rather than
+#    assume a path. CI installs ovmf, so this branch always runs there.
+OVMF_CODE=
+OVMF_VARS=
+for d in /usr/share/OVMF /usr/share/ovmf /usr/share/qemu \
+         "${OVMF_DIR:-}" "$HOME/os-tools/root/usr/share/OVMF"; do
+    [ -d "$d" ] || continue
+    for c in "$d/OVMF_CODE_4M.fd" "$d/OVMF_CODE.fd"; do
+        v="${c/CODE/VARS}"
+        [ -f "$c" ] && [ -f "$v" ] || continue
+        OVMF_CODE=$c
+        OVMF_VARS=$v
+        break 2
+    done
 done
-echo '    ok: UEFI boot — same memory + device stack comes up identically'
+if [ -z "$OVMF_CODE" ]; then
+    echo '    skip: UEFI boot — no OVMF firmware found (install ovmf or set OVMF_DIR)'
+    echo '          CI still runs this check on ubuntu-latest'
+else
+    rm -f /tmp/wc-uefi.log /tmp/wc-vars.fd
+    cp "$OVMF_VARS" /tmp/wc-vars.fd
+    timeout "$TIMEOUT" $Q -cdrom windclone.iso -m 512 -display none -no-reboot \
+        -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
+        -drive if=pflash,format=raw,file=/tmp/wc-vars.fd \
+        -serial file:/tmp/wc-uefi.log || true
+    for want in "step: pmm ok" "step: paging ok" "vga: text console live" \
+                "kmalloc selftest ok" "step: heap ok" "boot complete" "uptime: 1s" \
+                "pci: enumeration done" "step: keyboard live" \
+                "log ring (most recent):" "step: initrd ok" \
+                "initrd: /etc/motd" "step: userland ok (ring 3 round trip)" \
+                "gfx: framebuffer" "gfx: desktop composited"; do
+        grep -aq "$want" /tmp/wc-uefi.log || fail "UEFI log missing: $want"
+    done
+    echo '    ok: UEFI boot — same memory + device stack comes up identically'
+fi
 
 # 4) two-stage MBR: decode the VGA text buffer through the QEMU monitor
 rm -f /tmp/wc-mbrmon
@@ -124,7 +145,17 @@ kill $MBRPID 2>/dev/null || true
 wait $MBRPID 2>/dev/null || true
 echo '    ok: two-stage MBR loaded stage-2'
 
-# 5) kernel text console: the "vga: text console live" marker (checked in
+# 5) window manager: real PS/2 clicks through the QEMU monitor socket. Each
+#    discrete window action is a kernel log line, so a headless run proves
+#    that minimise / restore / close / reopen really happened — no display,
+#    no screenshots, no eyeballs. tools/qemu-desktop.py does the driving.
+echo '==> window manager (mouse clicks)'
+python3 tools/qemu-desktop.py windclone.iso minimize
+python3 tools/qemu-desktop.py windclone.iso maxmax
+python3 tools/qemu-desktop.py windclone.iso close
+python3 tools/qemu-desktop.py windclone.iso start
+
+# 6) kernel text console: the "vga: text console live" marker (checked in
 #    the BIOS + UEFI logs above) proves the kernel mapped 0xB8000 through
 #    its OWN page tables and a text cell written there reads back intact.
 #    A composited GRAPHICAL terminal (Limine framebuffer + font) is tracked
