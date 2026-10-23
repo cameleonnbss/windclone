@@ -26,6 +26,7 @@
 #include "log.h"
 #include "pci.h"
 #include "keyboard.h"
+#include "initrd.h"
 #include "string.h"
 
 /* Boundaries of our own image, straight from the linker script. */
@@ -311,10 +312,54 @@ void kmain(void)
     sti();
     serial_write("step: interrupts armed (PIT 100Hz + PS/2 keyboard)\n");
 
+    /* 8. Phase 4 - initrd. Limine dropped a tar archive into RAM beside
+     *    us; we parse it where it lies and read /etc/motd back out. This
+     *    is the first data in the system that is *not* part of the kernel
+     *    image - the seam the ELF loader plugs into next. */
+    if (initrd_init() == 0) {
+        serial_write("initrd: ");
+        serial_write(initrd_module_path());
+        serial_write(" (");
+        serial_write_dec(initrd_module_size());
+        serial_write(" bytes), ");
+        serial_write_dec(initrd_count());
+        serial_write(" files\n");
+
+        for (unsigned i = 0; i < initrd_count(); i++) {
+            const struct initrd_file *f = initrd_at(i);
+            serial_write("initrd: /");
+            serial_write(f->name);
+            serial_write(" (");
+            serial_write_dec(f->size);
+            serial_write(" bytes)\n");
+        }
+
+        const struct initrd_file *motd = initrd_find("/etc/motd");
+        if (motd != NULL) {
+            serial_write("initrd: /etc/motd, straight out of the archive:\n");
+            serial_write("---8<---\n");
+            serial_write_len((const char *)motd->data, (size_t)motd->size);
+            serial_write("---8<---\n");
+        }
+
+        /* Negative lookup: a miss must be a NULL, never a wild pointer. */
+        kassert(initrd_find("/no/such/file") == NULL);
+        serial_write("initrd: missing path lookup returns NULL (ok)\n");
+
+        kprint("initrd: ");
+        kprint_dec(initrd_count());
+        kprint(" files read from the tar module.\n");
+        klog("initrd: %u files from %s", initrd_count(), initrd_module_path());
+        serial_write("step: initrd ok\n");
+    } else {
+        serial_write("initrd: no tar module found - ISO built without "
+                     "build/initrd.tar?\n");
+    }
+
     serial_write("boot complete - CPU is in long mode, paging active\n");
     kprint("\nboot complete: interrupts + timer + heap + pci + kbd online.\n");
 
-    /* 8. Idle loop: hlt lets the CPU sleep until the next interrupt;
+    /* 9. Idle loop: hlt lets the CPU sleep until the next interrupt;
      *    every 100 ticks (1 second) we print a heartbeat so QEMU/CI
      *    can prove the timer interrupt really fires. Every 5 seconds
      *    we also replay the tail of the log ring — proof Phase 3's

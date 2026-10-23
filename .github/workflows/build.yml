@@ -68,6 +68,10 @@ jobs:
           grep -a "step: keyboard live" serial-bios.log
           grep -a "keyboard: key decoded end-to-end" serial-bios.log
           grep -a "key: 'a' down" serial-bios.log
+          # Phase 4: the tar module is parsed in place and a file read out
+          grep -a "step: initrd ok" serial-bios.log
+          grep -a "initrd: /etc/motd" serial-bios.log
+          grep -a "initrd: missing path lookup returns NULL" serial-bios.log
 
       - name: Boot smoke test (UEFI)
         run: |
@@ -90,6 +94,7 @@ jobs:
           # exactly why keyboard_init configures translation explicitly.
           grep -a "pci: enumeration done" serial-uefi.log
           grep -a "step: keyboard live" serial-uefi.log
+          grep -a "step: initrd ok" serial-uefi.log
           grep -a "log ring (most recent):" serial-uefi.log
           grep -a "boot complete" serial-uefi.log
           grep -a "uptime: 1s" serial-uefi.log

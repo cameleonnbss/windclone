@@ -1,0 +1,9 @@
+Welcome to WindClone.
+
+This text is not compiled into the kernel. The bootloader loaded
+it as a module (a plain ustar tar archive), and the kernel parsed
+that archive in place and read this file out of it.
+
+That is the whole point of an initrd: userland data the kernel does
+not have to be rebuilt to change. Phase 4 grows this into a real
+filesystem, an ELF loader and the first ring-3 process.

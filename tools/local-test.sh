@@ -81,7 +81,9 @@ for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "step: log ring armed" "pci: enumeration done" \
             "pci: host bridge" "step: keyboard live" \
             "keyboard: key decoded end-to-end" "key: 'a' down" \
-            "log ring (most recent):"; do
+            "log ring (most recent):" \
+            "step: initrd ok" "initrd: /etc/motd" \
+            "initrd: missing path lookup returns NULL"; do
     grep -aq "$want" /tmp/wc-bios.log || fail "BIOS log missing: $want"
 done
 echo '    ok: BIOS boot — memory, interrupts, PCI, keyboard (sendkey), log ring'
@@ -96,7 +98,8 @@ timeout "$TIMEOUT" $Q -cdrom windclone.iso -m 512 -display none -no-reboot \
 for want in "step: pmm ok" "step: paging ok" "vga: text console live" \
             "kmalloc selftest ok" "step: heap ok" "boot complete" "uptime: 1s" \
             "pci: enumeration done" "step: keyboard live" \
-            "log ring (most recent):"; do
+            "log ring (most recent):" "step: initrd ok" \
+            "initrd: /etc/motd"; do
     grep -aq "$want" /tmp/wc-uefi.log || fail "UEFI log missing: $want"
 done
 echo '    ok: UEFI boot — same memory + device stack comes up identically'

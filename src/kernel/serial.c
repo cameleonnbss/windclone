@@ -43,6 +43,14 @@ void serial_write(const char *s)
         serial_putc(*s++);
 }
 
+/* Byte-counted write: initrd files are *not* NUL-terminated (they are
+ * slices of a tar archive), so they need the length, not a terminator. */
+void serial_write_len(const char *s, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        serial_putc(s[i]);
+}
+
 void serial_write_dec(uint64_t value)
 {
     char buf[21];

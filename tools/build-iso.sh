@@ -10,9 +10,10 @@ set -eu
 
 ISO="windclone.iso"
 KERNEL="build/kernel.elf"
+INITRD="build/initrd.tar"
 LIMINE_DIR="limine"
 
-for f in "$KERNEL" limine.conf \
+for f in "$KERNEL" "$INITRD" limine.conf \
          "$LIMINE_DIR/limine-bios-cd.bin" "$LIMINE_DIR/limine-uefi-cd.bin" \
          "$LIMINE_DIR/limine-bios.sys" "$LIMINE_DIR/BOOTX64.EFI" "$LIMINE_DIR/BOOTIA32.EFI"; do
     [ -e "$f" ] || { echo "[build-iso] missing $f - run ./tools/fetch-limine.sh first"; exit 1; }
@@ -24,6 +25,7 @@ mkdir -p isodir/boot isodir/EFI/BOOT
 # Kernel + boot config (limine.conf / limine-bios.sys must be in one of
 # root, limine/, boot/, boot/limine/ — we use boot/)
 cp "$KERNEL"                         isodir/boot/kernel.elf
+cp "$INITRD"                         isodir/boot/initrd.tar
 cp limine.conf                       isodir/boot/limine.conf
 cp "$LIMINE_DIR/limine-bios.sys"     isodir/boot/limine-bios.sys
 
