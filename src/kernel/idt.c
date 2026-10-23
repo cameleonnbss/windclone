@@ -17,6 +17,7 @@
 #include "string.h"
 #include "timer.h"
 #include "keyboard.h"
+#include "mouse.h"
 
 /* --- IDT descriptor layout (AMD64 vol.2, "Interrupt Descriptor") ---- */
 
@@ -237,6 +238,8 @@ void irq_handler(struct regs *r)
         timer_tick();
     else if (irq == 1)
         keyboard_irq();
+    else if (irq == 12)
+        mouse_irq();          /* PS/2 aux channel */
 
     pic_eoi(irq);
 }

@@ -121,7 +121,13 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       no double buffer yet (verified by a QEMU `screendump`)
 - [ ] Window server: overlapping windows, focus, damage tracking
 - [ ] Taskbar + start menu, and a launcher that starts programs from the initrd
-- [ ] Mouse driver (PS/2 → later USB via xHCI)
+- [x] Mouse driver: 8042 aux channel, IRQ12 (cascade unmasked), 3-byte
+      packets with the sign bits in the flags byte — verified headlessly by
+      injecting `mouse_move` through the QEMU monitor and grepping the
+      decoded packet
+- [x] Cursor + one draggable window: grab the title bar, the window follows,
+      clamped to the desktop (full-screen repaint — damage tracking is next)
+- [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
 
 ## Phase 9 — Beyond x86 ⏳

@@ -23,6 +23,8 @@ s = socket.socket(socket.AF_UNIX); s.settimeout(3); s.connect(sys.argv[1])
 time.sleep(0.2); s.recv(4096)
 for k in sys.argv[2:]:
     s.sendall(('sendkey %s\n' % k).encode()); time.sleep(0.2)
+# a real PS/2 packet through the emulated 8042, same idea as sendkey
+s.sendall(b'mouse_move 80 40\n'); time.sleep(0.3)
 s.close()
 EOF
 }
@@ -86,7 +88,8 @@ for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "initrd: missing path lookup returns NULL" \
             "gdt: our own table live" "syscall: int 0x80 gate installed" \
             "hello from ring 3" "step: userland ok (ring 3 round trip)" \
-            "gfx: framebuffer" "gfx: desktop composited"; do
+            "gfx: framebuffer" "gfx: desktop composited" \
+            "mouse: 8042 aux channel live" "mouse: first packet decoded"; do
     grep -aq "$want" /tmp/wc-bios.log || fail "BIOS log missing: $want"
 done
 echo '    ok: BIOS boot — memory, interrupts, PCI, keyboard (sendkey), log ring'

@@ -31,6 +31,7 @@
 #include "usermode.h"
 #include "gfx.h"
 #include "desktop.h"
+#include "mouse.h"
 #include "string.h"
 
 /* Boundaries of our own image, straight from the linker script. */
@@ -379,7 +380,10 @@ void kmain(void)
     /* Phase 8 - the screen. Painted once, right before we idle: the desktop
      * is a static frame until there is a mouse to move something. */
     if (gfx_up) {
-        desktop_draw();
+        /* The pointer starts centred, so the first frame already has a
+         * cursor in it even before a single packet arrives. */
+        mouse_init();
+        desktop_frame();
         serial_write("gfx: desktop composited ");
         serial_write_dec((uint64_t)gfx_width());
         serial_write("x");
@@ -400,6 +404,14 @@ void kmain(void)
     int user_ran = 0;
     for (;;) {
         hlt();
+
+        /* Input-driven redraw: the mouse driver only sets a flag, the
+         * idle loop decides when to repaint. It has to happen on every
+         * wake-up, not once a second — a cursor that updates at 1 Hz is
+         * worse than no cursor at all. */
+        if (gfx_up && mouse_take_dirty())
+            desktop_frame();
+
         uint64_t ticks = timer_ticks();
         if (ticks >= last_second + 100) {
             last_second = ticks;

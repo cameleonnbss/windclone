@@ -60,7 +60,11 @@ On boot the kernel:
    uncached and outside the HHDM) and composites a first **desktop**: a
    gradient wallpaper, desktop icons, a taskbar with a start button, and a
    window with a title bar and a close button — all drawn by the kernel
-   with a 5x7 font it carries itself (no font files, no libc).
+   with a 5x7 font it carries itself (no font files, no libc),
+12. drives a **PS/2 mouse** on the 8042's aux channel (IRQ12, three-byte
+   packets, sign bits decoded) and draws a cursor: grab the title bar and
+   the window follows. Input is proven headlessly the same way the keyboard
+   is — the CI monitor injects `mouse_move` and greps the decoded packet.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

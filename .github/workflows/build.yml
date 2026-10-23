@@ -44,6 +44,8 @@ jobs:
           time.sleep(0.2); s.recv(4096)
           for k in ('a', 'b'):
               s.sendall(('sendkey %s\n' % k).encode()); time.sleep(0.3)
+          # same trick for the mouse: a real packet through the emulated 8042
+          s.sendall(b'mouse_move 80 40\n'); time.sleep(0.4)
           s.close()
           PYEOF
           wait $QPID || true
@@ -81,6 +83,8 @@ jobs:
           # composited into it (wallpaper + taskbar + one window)
           grep -a "gfx: framebuffer 1024x768" serial-bios.log
           grep -a "gfx: desktop composited" serial-bios.log
+          grep -a "mouse: 8042 aux channel live" serial-bios.log
+          grep -a "mouse: first packet decoded" serial-bios.log
 
       - name: Boot smoke test (UEFI)
         run: |
