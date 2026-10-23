@@ -1,14 +1,14 @@
 /* WindClone — the desktop shell (Phase 8).
  *
- * A compositor in the only sense that matters right now: every frame is
- * painted back to front into the framebuffer — wallpaper, icons, window,
- * taskbar, cursor. There is no damage tracking and no double buffer, so a
- * mouse that moves repaints the whole screen. That is honest for a first
- * window server and it is the next thing to fix, not the thing to hide.
+ * Two overlapping windows is the smallest arrangement that forces the two
+ * ideas a window system actually needs: z-order (a click brings a window to
+ * the front) and hit testing (only the title bar drags). There is still no
+ * damage tracking and no double buffer — a mouse move repaints everything —
+ * which is the next thing to fix, not the thing to hide.
  *
- * The window is not a data structure yet (no list, no z-order, no focus) —
- * it is one window with a position, because one window that can be dragged
- * proves the input path end to end.
+ * Windows are painted in `order[]`, so raising one is a swap in that array
+ * rather than a sort. Content is drawn from the window's kind: one is a
+ * status card, the other is the live command line in shell.c.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -16,13 +16,16 @@
 #include "desktop.h"
 #include "gfx.h"
 #include "mouse.h"
+#include "shell.h"
 
 #define C_WALL_TOP    gfx_rgb(0x0B, 0x2A, 0x63)
 #define C_WALL_BOTTOM gfx_rgb(0x1F, 0x6B, 0xD8)
 #define C_TASKBAR     gfx_rgb(0x0D, 0x11, 0x17)
 #define C_ACCENT      gfx_rgb(0xEF, 0x44, 0x44)
 #define C_TITLE       gfx_rgb(0x10, 0x18, 0x27)
+#define C_TITLE_HOT   gfx_rgb(0x1E, 0x29, 0x3B)
 #define C_BODY        gfx_rgb(0xF8, 0xFA, 0xFC)
+#define C_CONSOLE     gfx_rgb(0x0B, 0x12, 0x1B)
 #define C_INK         gfx_rgb(0x0F, 0x17, 0x2A)
 #define C_MUTED       gfx_rgb(0x64, 0x74, 0x8B)
 #define C_WHITE       gfx_rgb(0xFF, 0xFF, 0xFF)
@@ -30,13 +33,19 @@
 #define TASKBAR_H 44
 #define TITLE_H   34
 
-/* Window geometry, kept in one place because dragging moves it. */
-static int win_x = -1, win_y = -1, win_w, win_h;
-static int dragging;
-static int grab_dx, grab_dy;
+enum { WIN_STATUS, WIN_TERM };
 
-/* 12x16 pointer: '#' outline, 'W' fill, '.' transparent. A filled arrow
- * without an outline disappears over the light window body. */
+struct window {
+    int x, y, w, h;
+    const char *title;
+    int kind;
+};
+
+static struct window wins[2];
+static int order[2] = { WIN_STATUS, WIN_TERM };   /* painted back to front */
+static int dragging, grab_dx, grab_dy, drag_win;
+static int laid_out;
+
 static const char *const cursor_shape[] = {
     "#...........",
     "##..........",
@@ -95,45 +104,74 @@ static void draw_icon(int x, int y, const char *label)
     gfx_text(x + 26 - gfx_text_width(label, 1) / 2, y + 50, label, C_WHITE, 1);
 }
 
-static void draw_window(void)
+static void draw_status_content(const struct window *w)
 {
-    int x = win_x, y = win_y, w = win_w, h = win_h;
+    int tx = w->x + 24;
+    int ty = w->y + TITLE_H + 22;
 
-    gfx_fill(x + 6, y + 6, w, h, gfx_rgb(0x0A, 0x1E, 0x45));
-    gfx_fill(x, y, w, h, C_BODY);
-    gfx_fill(x, y, w, TITLE_H, C_TITLE);
-    gfx_fill(x, y, 4, TITLE_H, C_ACCENT);
-
-    gfx_text(x + 16, y + 10, "WINDCLONE - BUREAU", C_WHITE, 2);
-    draw_close_button(x + w - 34, y + 8, 18);
-
-    int tx = x + 28;
-    int ty = y + 62;
-
-    gfx_text(tx, ty, "PREMIER BUREAU GRAPHIQUE", C_INK, 2);
+    gfx_text(tx, ty, "WINDCLONE 0.0.4", C_INK, 2);
     ty += 34;
-    gfx_text(tx, ty, "CE TEXTE EST DESSINE PAR LE KERNEL:", C_MUTED, 1);
-    ty += 14;
-    gfx_text(tx, ty, "PAS DE LIBRAIRIE, PAS DE FICHIER DE POLICE,", C_INK, 1);
+    gfx_text(tx, ty, "UN SYSTEME ECRIT DE ZERO", C_MUTED, 1);
+    ty += 22;
+    gfx_text(tx, ty, "- PAGES, GDT + TSS, RING 3", C_INK, 1);
+    ty += 13;
+    gfx_text(tx, ty, "- INITRD TAR + SYSCALLS", C_INK, 1);
+    ty += 13;
+    gfx_text(tx, ty, "- FRAMEBUFFER + SOURIS + FENETRES", C_INK, 1);
+    ty += 13;
+    gfx_text(tx, ty, "- INVITE DE COMMANDES (FENETRE)", C_INK, 1);
+    ty += 24;
+    gfx_text(tx, ty, "CLIQUE UNE BARRE DE TITRE POUR METTRE", C_MUTED, 1);
     ty += 12;
-    gfx_text(tx, ty, "UN FRAMEBUFFER LINEAIRE ET 40 GLYPHES 5X7.", C_INK, 1);
-    ty += 26;
-
-    gfx_text(tx, ty, "- PAGES, GDT + TSS, RING 3: OK", C_INK, 1);
+    gfx_text(tx, ty, "UNE FENETRE AU PREMIER PLAN, PUIS", C_MUTED, 1);
     ty += 12;
-    gfx_text(tx, ty, "- INITRD TAR + SYSCALLS: OK", C_INK, 1);
-    ty += 12;
-    gfx_text(tx, ty, "- SOURIS PS/2 + FENETRE DEPLACABLE: OK", C_INK, 1);
-    ty += 26;
+    gfx_text(tx, ty, "DEPLACE-LA.", C_MUTED, 1);
+}
 
-    gfx_text(tx, ty, "ATTRAPE LA BARRE DE TITRE ET DEPLACE.", C_MUTED, 1);
+static void draw_window(const struct window *w, int front)
+{
+    /* Shadow, body, title bar. The front window gets a brighter title so
+     * focus is readable at a glance. */
+    gfx_fill(w->x + 6, w->y + 6, w->w, w->h, gfx_rgb(0x0A, 0x1E, 0x45));
+    gfx_fill(w->x, w->y, w->w, w->h, w->kind == WIN_TERM ? C_CONSOLE : C_BODY);
+    gfx_fill(w->x, w->y, w->w, TITLE_H, front ? C_TITLE_HOT : C_TITLE);
+    gfx_fill(w->x, w->y, 4, TITLE_H, front ? C_ACCENT : gfx_rgb(0x47, 0x55, 0x69));
 
-    int fy = y + h - 26;
-    gfx_fill(x + 1, fy - 8, w - 2, 1, gfx_rgb(0xE2, 0xE8, 0xF0));
-    gfx_text(x + 28, fy, "RING 3 - INITRD - SOURIS", C_MUTED, 1);
-    gfx_text(x + w - 96, fy, "1024X768", C_ACCENT, 1);
+    gfx_text(w->x + 16, w->y + 10, w->title, C_WHITE, 2);
+    draw_close_button(w->x + w->w - 34, w->y + 8, 18);
 
-    gfx_frame(x, y, w, h, gfx_rgb(0xCE, 0xD5, 0xE0));
+    if (w->kind == WIN_STATUS)
+        draw_status_content(w);
+    else
+        shell_draw(w->x + 14, w->y + TITLE_H + 12, w->w - 28);
+
+    gfx_frame(w->x, w->y, w->w, w->h,
+              w->kind == WIN_TERM ? gfx_rgb(0x2B, 0x36, 0x48) : gfx_rgb(0xCE, 0xD5, 0xE0));
+}
+
+static void layout(void)
+{
+    int w = gfx_width();
+    int h = gfx_height();
+
+    /* Clear of the icon column: windows overlapping icons looks like a
+     * bug, windows overlapping each other looks like a desktop. */
+    wins[WIN_STATUS].x = 116;
+    wins[WIN_STATUS].y = 88;
+    wins[WIN_STATUS].w = 400;
+    wins[WIN_STATUS].h = 300;
+    wins[WIN_STATUS].title = "WINDCLONE";
+    wins[WIN_STATUS].kind = WIN_STATUS;
+
+    wins[WIN_TERM].w = 600;
+    wins[WIN_TERM].h = 380;
+    if (wins[WIN_TERM].w > w - 40) wins[WIN_TERM].w = w - 40;
+    wins[WIN_TERM].x = w - wins[WIN_TERM].w - 48;
+    wins[WIN_TERM].y = h - TASKBAR_H - wins[WIN_TERM].h - 60;
+    wins[WIN_TERM].title = "INVITE DE COMMANDES";
+    wins[WIN_TERM].kind = WIN_TERM;
+
+    laid_out = 1;
 }
 
 void desktop_frame(void)
@@ -144,45 +182,50 @@ void desktop_frame(void)
     int w = gfx_width();
     int h = gfx_height();
 
-    if (win_x < 0) {                       /* first frame: centre it */
-        win_w = w * 62 / 100;
-        win_h = h * 46 / 100;
-        if (win_w > 760) win_w = 760;
-        if (win_h > 420) win_h = 420;
-        win_x = (w - win_w) / 2;
-        win_y = (h - TASKBAR_H - win_h) / 2;
-    }
+    if (!laid_out)
+        layout();
 
-    /* Drag: grab the title bar, keep the offset under the pointer, and let
-     * the window follow. The clamp keeps the title bar reachable. */
     int mx = mouse_x();
     int my = mouse_y();
 
-    if (mouse_left()) {
-        if (!dragging &&
-            mx >= win_x && mx < win_x + win_w &&
-            my >= win_y && my < win_y + TITLE_H) {
-            dragging = 1;
-            grab_dx = mx - win_x;
-            grab_dy = my - win_y;
+    /* Hit test front to back: the first title bar under the pointer wins,
+     * and that window comes to the front (the swap is what "focus" is). */
+    if (mouse_left() && !dragging) {
+        for (int i = 1; i >= 0; i--) {
+            struct window *win = &wins[order[i]];
+            if (mx >= win->x && mx < win->x + win->w &&
+                my >= win->y && my < win->y + TITLE_H) {
+                drag_win = order[i];
+                if (i == 0) {
+                    order[0] = order[1];
+                    order[1] = drag_win;
+                }
+                dragging = 1;
+                grab_dx = mx - win->x;
+                grab_dy = my - win->y;
+                break;
+            }
         }
-        if (dragging) {
-            win_x = mx - grab_dx;
-            win_y = my - grab_dy;
-            if (win_x < 0) win_x = 0;
-            if (win_y < 0) win_y = 0;
-            if (win_x + win_w > w) win_x = w - win_w;
-            if (win_y + win_h > h - TASKBAR_H) win_y = h - TASKBAR_H - win_h;
-        }
-    } else {
+    }
+    if (!mouse_left())
         dragging = 0;
+
+    if (dragging) {
+        struct window *win = &wins[drag_win];
+        win->x = mx - grab_dx;
+        win->y = my - grab_dy;
+        if (win->x < 0) win->x = 0;
+        if (win->y < 0) win->y = 0;
+        if (win->x + win->w > w) win->x = w - win->w;
+        if (win->y + win->h > h - TASKBAR_H) win->y = h - TASKBAR_H - win->h;
     }
 
     gfx_gradient_v(0, 0, w, h, C_WALL_TOP, C_WALL_BOTTOM);
     draw_icon(28, 28, "ORDINATEUR");
     draw_icon(28, 108, "CORBEILLE");
 
-    draw_window();
+    for (int i = 0; i < 2; i++)
+        draw_window(&wins[order[i]], i == 1);
 
     gfx_fill(0, h - TASKBAR_H, w, TASKBAR_H, C_TASKBAR);
     gfx_fill(0, h - TASKBAR_H, w, 2, C_ACCENT);

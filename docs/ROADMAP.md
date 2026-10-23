@@ -91,10 +91,15 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
 - [ ] ELF64 process loader: replace the flat-binary path in `usermode.c`
       with real `PT_LOAD` segments — release v0.1.0 milestone
 
-## Phase 5 — Shell & processes ⏳
+## Phase 5 — Shell & processes 🔄
+- [x] Text shell with line editing (a 64-byte IRQ queue, Enter/Backspace),
+      built-ins and a scrollback grid that survives repaints: `help`, `ls`,
+      `cat <file>`, `about`, `clear`
+- [x] `hello` starts `/bin/hello` from the initrd in ring 3 and returns to
+      the prompt — a command that is a real program, not a built-in
+- [ ] More programs in the initrd (`cat`, `ls`, `echo` as ELF files rather
+      than built-ins), which needs the ELF loader
 - [ ] `fork`-like process creation, scheduler (priority round-robin)
-- [ ] Text shell with line editing, reading commands from initrd
-- [ ] `cat`, `ls`, `echo` — the classics, written for WindClone
 
 ## Phase 6 — Language expansion ⏳
 *Goal: use the right tool per layer (the "asm/C/C++/Rust" promise).*

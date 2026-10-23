@@ -42,7 +42,8 @@ jobs:
           s = socket.socket(socket.AF_UNIX); s.settimeout(3)
           s.connect(sys.argv[1])
           time.sleep(0.2); s.recv(4096)
-          for k in ('a', 'b'):
+          # a/b prove the decoder; then the shell runs `hello` in ring 3
+          for k in ('a', 'b', 'ret', 'h', 'e', 'l', 'l', 'o', 'ret'):
               s.sendall(('sendkey %s\n' % k).encode()); time.sleep(0.3)
           # same trick for the mouse: a real packet through the emulated 8042
           s.sendall(b'mouse_move 80 40\n'); time.sleep(0.4)
@@ -69,7 +70,7 @@ jobs:
           grep -a "pci: host bridge" serial-bios.log
           grep -a "step: keyboard live" serial-bios.log
           grep -a "keyboard: key decoded end-to-end" serial-bios.log
-          grep -a "key: 'a' down" serial-bios.log
+          grep -a "shell: running 'hello'" serial-bios.log
           # Phase 4: the tar module is parsed in place and a file read out
           grep -a "step: initrd ok" serial-bios.log
           grep -a "initrd: /etc/motd" serial-bios.log
@@ -85,6 +86,8 @@ jobs:
           grep -a "gfx: desktop composited" serial-bios.log
           grep -a "mouse: 8042 aux channel live" serial-bios.log
           grep -a "mouse: first packet decoded" serial-bios.log
+          # the window's command line really starts a ring-3 program
+          grep -a "shell: hello ran and returned" serial-bios.log
 
       - name: Boot smoke test (UEFI)
         run: |

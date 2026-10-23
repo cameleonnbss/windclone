@@ -64,7 +64,12 @@ On boot the kernel:
 12. drives a **PS/2 mouse** on the 8042's aux channel (IRQ12, three-byte
    packets, sign bits decoded) and draws a cursor: grab the title bar and
    the window follows. Input is proven headlessly the same way the keyboard
-   is — the CI monitor injects `mouse_move` and greps the decoded packet.
+   is — the CI monitor injects `mouse_move` and greps the decoded packet,
+13. runs a **command prompt in a window**: two overlapping windows, one
+   of them a terminal with a line editor and a scrollback grid. `ls` reads
+   the initrd, `cat` prints a file, and `hello` really loads `/bin/hello`
+   and runs it in ring 3 before returning to the prompt. CI types the
+   command through the emulated keyboard and greps what it started.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

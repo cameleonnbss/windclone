@@ -111,6 +111,34 @@ static int first_key_reported;
  * byte that follows so it is never mistaken for a make code. */
 enum { K_NORMAL, K_E0, K_E1 } kb_state;
 
+/* --- line-editor queue -------------------------------------------------
+ * The IRQ handler must not call into the shell (it runs in interrupt
+ * context and the shell allocates, prints and can even start a process),
+ * so the two are joined by this ring: IRQ writes, the idle loop drains.
+ * 64 bytes is far more than a human can type during one repaint.
+ */
+#define KB_QUEUE 64
+static volatile char kb_queue[KB_QUEUE];
+static volatile int  kb_head, kb_tail;
+
+static void kb_enqueue(char c)
+{
+    int next = (kb_head + 1) % KB_QUEUE;
+    if (next == kb_tail)
+        return;                 /* full: drop the newest, never overwrite */
+    kb_queue[kb_head] = c;
+    kb_head = next;
+}
+
+int keyboard_take_char(void)
+{
+    if (kb_tail == kb_head)
+        return -1;
+    char c = kb_queue[kb_tail];
+    kb_tail = (kb_tail + 1) % KB_QUEUE;
+    return (unsigned char)c;
+}
+
 static void keyboard_decode(uint8_t sc)
 {
     if (kb_state == K_E0) {
@@ -151,8 +179,12 @@ static void keyboard_decode(uint8_t sc)
     char c = shift_down ? map_shift[base] : map_plain[base];
     if (caps_lock && c >= 'a' && c <= 'z')
         c = (char)(c - 'a' + 'A');
-    if (c == 0 || (c < 32 && c != ' '))
+    /* Enter and Backspace are control characters but they are exactly what
+     * a line editor needs, so they pass the printable-only filter. */
+    if (c == 0 || (c < 32 && c != ' ' && c != '\n' && c != '\b'))
         return; /* modifiers and unknowns: counted, not printed */
+
+    kb_enqueue(c);
 
     if (!first_key_reported) {
         first_key_reported = 1;

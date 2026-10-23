@@ -74,7 +74,8 @@ timeout "$TIMEOUT" $Q -cdrom windclone.iso -m 512 -display none -no-reboot \
     -monitor unix:/tmp/wc-biosmon,server,nowait &
 BIOPID=$!
 sleep 6
-send_keys /tmp/wc-biosmon a b
+# a/b prove the decoder; the shell then really runs `hello` in ring 3
+send_keys /tmp/wc-biosmon a b ret h e l l o ret
 wait $BIOPID 2>/dev/null || true
 for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "vga: text console live" "kmalloc selftest ok" "step: heap ok" \
@@ -82,14 +83,15 @@ for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "irq0: timer interrupt firing" "uptime: 1s" \
             "step: log ring armed" "pci: enumeration done" \
             "pci: host bridge" "step: keyboard live" \
-            "keyboard: key decoded end-to-end" "key: 'a' down" \
+            "keyboard: key decoded end-to-end" "shell: running 'hello'" \
             "log ring (most recent):" \
             "step: initrd ok" "initrd: /etc/motd" \
             "initrd: missing path lookup returns NULL" \
             "gdt: our own table live" "syscall: int 0x80 gate installed" \
             "hello from ring 3" "step: userland ok (ring 3 round trip)" \
             "gfx: framebuffer" "gfx: desktop composited" \
-            "mouse: 8042 aux channel live" "mouse: first packet decoded"; do
+            "mouse: 8042 aux channel live" "mouse: first packet decoded" \
+            "shell: hello ran and returned"; do
     grep -aq "$want" /tmp/wc-bios.log || fail "BIOS log missing: $want"
 done
 echo '    ok: BIOS boot — memory, interrupts, PCI, keyboard (sendkey), log ring'
