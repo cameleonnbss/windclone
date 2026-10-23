@@ -9,7 +9,9 @@ set -e
 cd "$(git rev-parse --show-toplevel 2>/dev/null || dirname "$(dirname "$0")")"
 
 Q="qemu-system-x86_64"
-TIMEOUT=${TIMEOUT:-14}
+# A CI runner is slower than a laptop and the boot path is fixed work, so
+# the timeout is generous; override with e.g. TIMEOUT=10 locally.
+TIMEOUT=${TIMEOUT:-25}
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 # Inject keystrokes through a QEMU monitor unix socket once the kernel

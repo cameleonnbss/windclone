@@ -176,7 +176,9 @@ def main():
     mon = None
 
     try:
-        for _ in range(60):
+        # A CI runner boots this a lot slower than a laptop does, so the
+        # wait is generous; the desktop marker is what we wait for, not time.
+        for _ in range(120):
             time.sleep(0.5)
             if os.path.exists(LOG) and "gfx: desktop composited" in open(LOG).read():
                 break

@@ -25,97 +25,16 @@ jobs:
       - name: Build kernel + ISO
         run: make -j"$(nproc)"
 
-      - name: Boot smoke test (legacy BIOS)
-        run: |
-          set -e
-          # Monitor socket lets us inject a real keystroke once the
-          # kernel is up: sendkey -> emulated 8042 -> IRQ1 -> decode.
-          rm -f /tmp/wc-mon.sock
-          timeout 25 qemu-system-x86_64 \
-            -cdrom windclone.iso -m 512 -display none \
-            -serial file:serial-bios.log \
-            -monitor unix:/tmp/wc-mon.sock,server,nowait &
-          QPID=$!
-          sleep 8
-          python3 - /tmp/wc-mon.sock <<'PYEOF'
-          import socket, sys, time
-          s = socket.socket(socket.AF_UNIX); s.settimeout(3)
-          s.connect(sys.argv[1])
-          time.sleep(0.2); s.recv(4096)
-          # a/b prove the decoder; then the shell runs `hello` in ring 3
-          for k in ('a', 'b', 'ret', 'h', 'e', 'l', 'l', 'o', 'ret'):
-              s.sendall(('sendkey %s\n' % k).encode()); time.sleep(0.3)
-          # same trick for the mouse: a real packet through the emulated 8042
-          s.sendall(b'mouse_move 80 40\n'); time.sleep(0.4)
-          s.close()
-          PYEOF
-          wait $QPID || true
-          cat serial-bios.log
-          grep -a "WindClone serial console online" serial-bios.log
-          grep -a "boot complete" serial-bios.log
-          # Phase 2: frame allocator, our own page tables, heap, text console
-          grep -a "step: pmm ok" serial-bios.log
-          grep -a "paging: self-checks passed" serial-bios.log
-          grep -a "step: paging ok" serial-bios.log
-          grep -a "vga: text console live" serial-bios.log
-          grep -a "kmalloc selftest ok" serial-bios.log
-          grep -a "step: heap ok" serial-bios.log
-          # proves the IDT + PIC + PIT really work: timer IRQ fires
-          grep -a "step: interrupts armed" serial-bios.log
-          grep -a "irq0: timer interrupt firing" serial-bios.log
-          grep -a "uptime: 1s" serial-bios.log
-          # Phase 3: PCI enumeration, PS/2 keyboard, log ring replay
-          grep -a "step: log ring armed" serial-bios.log
-          grep -a "pci: enumeration done" serial-bios.log
-          grep -a "pci: host bridge" serial-bios.log
-          grep -a "step: keyboard live" serial-bios.log
-          grep -a "keyboard: key decoded end-to-end" serial-bios.log
-          grep -a "shell: running 'hello'" serial-bios.log
-          # Phase 4: the tar module is parsed in place and a file read out
-          grep -a "step: initrd ok" serial-bios.log
-          grep -a "initrd: /etc/motd" serial-bios.log
-          grep -a "initrd: missing path lookup returns NULL" serial-bios.log
-          # Phase 4: DPL-3 selectors + TSS, then a real ring-3 program
-          grep -a "gdt: our own table live" serial-bios.log
-          grep -a "syscall: int 0x80 gate installed" serial-bios.log
-          grep -a "hello from ring 3" serial-bios.log
-          grep -a "step: userland ok (ring 3 round trip)" serial-bios.log
-          # Phase 8: the framebuffer is ours to draw on and the desktop is
-          # composited into it (wallpaper + taskbar + one window)
-          grep -a "gfx: framebuffer 1024x768" serial-bios.log
-          grep -a "gfx: desktop composited" serial-bios.log
-          grep -a "mouse: 8042 aux channel live" serial-bios.log
-          grep -a "mouse: first packet decoded" serial-bios.log
-          # the window's command line really starts a ring-3 program
-          grep -a "shell: hello ran and returned" serial-bios.log
-
-      - name: Boot smoke test (UEFI)
-        run: |
-          set -e
-          cp /usr/share/OVMF/OVMF_VARS_4M.fd vars.fd
-          timeout 25 qemu-system-x86_64 \
-            -cdrom windclone.iso -m 512 -display none \
-            -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
-            -drive if=pflash,format=raw,file=vars.fd \
-            -serial file:serial-uefi.log || true
-          cat serial-uefi.log
-          grep -a "WindClone serial console online" serial-uefi.log
-          # Phase 2 memory stack must come up identically under UEFI
-          grep -a "step: pmm ok" serial-uefi.log
-          grep -a "step: paging ok" serial-uefi.log
-          grep -a "vga: text console live" serial-uefi.log
-          grep -a "kmalloc selftest ok" serial-uefi.log
-          grep -a "step: heap ok" serial-uefi.log
-          # Phase 3 stack too: OVMF never touches the 8042, which is
-          # exactly why keyboard_init configures translation explicitly.
-          grep -a "pci: enumeration done" serial-uefi.log
-          grep -a "step: keyboard live" serial-uefi.log
-          grep -a "step: initrd ok" serial-uefi.log
-          grep -a "step: userland ok (ring 3 round trip)" serial-uefi.log
-          grep -a "gfx: desktop composited" serial-uefi.log
-          grep -a "log ring (most recent):" serial-uefi.log
-          grep -a "boot complete" serial-uefi.log
-          grep -a "uptime: 1s" serial-uefi.log
+      # The whole suite lives in tools/local-test.sh — the same file a
+      # contributor runs on their laptop (see docs/CONTRIBUTING.md). CI used
+      # to carry its own copy of these greps, and the two lists drifted: the
+      # window-manager checks existed locally and not here. One list now.
+      #
+      # It covers, in order: no SSE in the kernel image, BIOS boot, UEFI
+      # boot under OVMF, the two-stage MBR, and the window manager driven by
+      # real PS/2 clicks injected through the QEMU monitor.
+      - name: Boot + window-manager smoke tests
+        run: ./tools/local-test.sh
 
       - name: Build educational MBR image
         run: make mbr
