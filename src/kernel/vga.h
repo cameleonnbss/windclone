@@ -7,8 +7,12 @@
 #include <stddef.h>
 
 /* Map the classic VGA text buffer. `hw` is the (HHDM-translated)
- * physical address 0xB8000; passing NULL disables kprint(). */
-void vga_init(void *hw);
+ * physical address 0xB8000; passing NULL disables kprint().
+ *
+ * force_text_mode is false when the kernel is driving a linear
+ * framebuffer (Phase 8): the legacy CRTC programming would disable the
+ * very LFB we draw into. */
+void vga_init(void *hw, int force_text_mode);
 int  vga_available(void);
 void kprint(const char *s);
 void kclear(void);

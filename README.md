@@ -55,7 +55,12 @@ On boot the kernel:
 10. installs its own GDT (ring-3 selectors) and a TSS, then runs `/bin/hello`
    from that initrd **in ring 3**: the program reaches the console only
    through the `int 0x80` gate (`write`, `exit`), and `exit` unwinds back to
-   the kernel — the first privilege boundary in the system.
+   the kernel — the first privilege boundary in the system,
+11. maps the linear framebuffer the bootloader set up (device memory, so
+   uncached and outside the HHDM) and composites a first **desktop**: a
+   gradient wallpaper, desktop icons, a taskbar with a start button, and a
+   window with a title bar and a close button — all drawn by the kernel
+   with a 5x7 font it carries itself (no font files, no libc).
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

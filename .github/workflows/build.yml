@@ -77,6 +77,10 @@ jobs:
           grep -a "syscall: int 0x80 gate installed" serial-bios.log
           grep -a "hello from ring 3" serial-bios.log
           grep -a "step: userland ok (ring 3 round trip)" serial-bios.log
+          # Phase 8: the framebuffer is ours to draw on and the desktop is
+          # composited into it (wallpaper + taskbar + one window)
+          grep -a "gfx: framebuffer 1024x768" serial-bios.log
+          grep -a "gfx: desktop composited" serial-bios.log
 
       - name: Boot smoke test (UEFI)
         run: |
@@ -101,6 +105,7 @@ jobs:
           grep -a "step: keyboard live" serial-uefi.log
           grep -a "step: initrd ok" serial-uefi.log
           grep -a "step: userland ok (ring 3 round trip)" serial-uefi.log
+          grep -a "gfx: desktop composited" serial-uefi.log
           grep -a "log ring (most recent):" serial-uefi.log
           grep -a "boot complete" serial-uefi.log
           grep -a "uptime: 1s" serial-uefi.log

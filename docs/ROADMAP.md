@@ -112,9 +112,14 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
 - [ ] `read/write/openat/close/br/mmap/munmap` subset
 - [ ] Run `busybox` static binary as the conformance test — release v0.2.0
 
-## Phase 8 — The *Wind* in WindClone ⏳
-- [ ] Framebuffer graphics (Limine FB + simple compositor)
-- [ ] Window server: overlapping windows, title bar, close button
+## Phase 8 — The *Wind* in WindClone 🔄
+- [x] Framebuffer graphics: Limine's linear buffer mapped uncached into a
+      low window of our own page tables, 32-bit pixels, pitch-correct
+      writes, a vertical-gradient wallpaper and a 5x7 font compiled in
+- [x] First composited frame: desktop icons, taskbar with a start button,
+      one window with a title bar and a close button — drawn back to front,
+      no double buffer yet (verified by a QEMU `screendump`)
+- [ ] Window server: overlapping windows, focus, damage tracking
 - [ ] Taskbar + start menu, and a launcher that starts programs from the initrd
 - [ ] Mouse driver (PS/2 → later USB via xHCI)
 - [ ] A settings app that looks embarrassingly familiar

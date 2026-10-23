@@ -29,6 +29,8 @@
 #include "initrd.h"
 #include "syscall.h"
 #include "usermode.h"
+#include "gfx.h"
+#include "desktop.h"
 #include "string.h"
 
 /* Boundaries of our own image, straight from the linker script. */
@@ -256,8 +258,13 @@ void kmain(void)
     serial_write("step: paging ok\n");
 
     /* 0xB8000 is now mapped by our own P4 — vga.c has waited for this
-     * since Phase 0 (Limine's HHDM covers RAM only, never MMIO). */
-    vga_init((void *)(uintptr_t)0xB8000);
+     * since Phase 0 (Limine's HHDM covers RAM only, never MMIO).
+     *
+     * Phase 8: if the bootloader handed us a linear framebuffer, that is
+     * what the screen is actually showing, so the text plane must NOT
+     * re-program the CRTC into text mode behind our back. */
+    int gfx_up = (gfx_init(hhdm_request.response->offset) == 0);
+    vga_init((void *)(uintptr_t)0xB8000, gfx_up ? 0 : 1);
     kprint("WindClone: kernel owns its page tables now.\n");
 
     kmalloc_init();
@@ -368,6 +375,20 @@ void kmain(void)
 
     serial_write("boot complete - CPU is in long mode, paging active\n");
     kprint("\nboot complete: interrupts + timer + heap + pci + kbd online.\n");
+
+    /* Phase 8 - the screen. Painted once, right before we idle: the desktop
+     * is a static frame until there is a mouse to move something. */
+    if (gfx_up) {
+        desktop_draw();
+        serial_write("gfx: desktop composited ");
+        serial_write_dec((uint64_t)gfx_width());
+        serial_write("x");
+        serial_write_dec((uint64_t)gfx_height());
+        serial_write(" (wallpaper, taskbar, one window)\n");
+        klog("gfx: desktop up");
+    } else {
+        serial_write("gfx: no framebuffer - text console only\n");
+    }
 
     /* 9. Idle loop: hlt lets the CPU sleep until the next interrupt;
      *    every 100 ticks (1 second) we print a heartbeat so QEMU/CI

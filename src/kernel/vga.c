@@ -131,9 +131,14 @@ static void vga_text_mode_init(void)
     outb(0x3C0, inb(0x3C1) & ~0x20);
 }
 
-void vga_init(void *hw)
+void vga_init(void *hw, int force_text_mode)
 {
-    vga_text_mode_init();
+    /* Phase 8 keeps the mode the bootloader chose when there is a linear
+     * framebuffer to draw on: forcing text mode here is what used to make
+     * 0xB8000 the only visible surface. The text plane is still mapped and
+     * kprint() still writes to it — it is simply not what the screen shows. */
+    if (force_text_mode)
+        vga_text_mode_init();
     buffer = (uint16_t *)hw;
     column = 0;
     row = 0;
