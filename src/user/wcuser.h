@@ -83,6 +83,29 @@ static inline long wc_getdirent(unsigned long index, struct wc_dirent *out)
     return wc_call2(SYS_GETDIRENT, (long)index, (long)out);
 }
 
+/* The calling process's id — the one thing a program cannot read from its own
+ * address space and has to ask the kernel for. */
+static inline long wc_getpid(void)
+{
+    return wc_call1(SYS_GETPID, 0);
+}
+
+/* Give the CPU up and come back later. This is the cooperative half of the
+ * scheduler: the kernel switches to the next runnable process and returns here
+ * as if the call had simply finished. Returns 0. */
+static inline long wc_sched_yield(void)
+{
+    return wc_call1(SYS_SCHED_YIELD, 0);
+}
+
+/* Start another program from the archive; returns its pid, or a -WC_* error.
+ * The new process shares nothing with us but the CPU: it gets its own address
+ * space and its own copy of the argv convention we were handed. */
+static inline long wc_spawn(const char *path)
+{
+    return wc_call1(SYS_SPAWN, (long)path);
+}
+
 /* Does not come back: the kernel unwinds its own copy of this stack frame
  * instead of returning through it. The loop is for the compiler, not the CPU. */
 static inline void wc_exit(int code)

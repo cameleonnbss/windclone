@@ -131,6 +131,34 @@ for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "shell: cat ran and returned" "shell: cat exited with 0"; do
     grep -aq "$want" /tmp/wc-bios.log || fail "BIOS log missing: $want"
 done
+
+# The scheduler demo runs on its own once the timer is up: two copies of
+# /bin/tick, each with its own address space and pid, printing a line and
+# yielding in turn. Every marker below is a fixed line; the interesting one
+# is the ORDER, proven separately under this — a run-to-completion loop with
+# extra steps would still print all eight lines, just as A-1 A-2 A-3 A-done
+# B-1 ..., so the interleaving check is the one that actually fails if the
+# context switch is a lie.
+for want in "sched: building two processes" \
+            "proc: spawned /bin/tick as pid 1" \
+            "proc: spawned /bin/tick as pid 2" \
+            "sched: round-robin over the process table" \
+            "\\[tick A\\] step 1 pid 1" "\\[tick B\\] step 1 pid 2" \
+            "\\[tick A\\] step 2 pid 1" "\\[tick B\\] step 2 pid 2" \
+            "\\[tick A\\] done" "\\[tick B\\] done" \
+            "sched: all processes exited" \
+            "step: scheduler ok (two processes, round-robin)"; do
+    grep -aq "$want" /tmp/wc-bios.log || fail "BIOS log missing: $want"
+done
+# A-1 then B-1 on consecutive lines is the round-robin fingerprint. grep -A1
+# prints the matched line plus the one after it; if the scheduler really
+# interleaved, B's step-1 line immediately follows A's, so the piped -qF finds
+# it. A run-to-completion bug would put A's step-2 there instead, and this
+# fails. (We avoid grep -P: not every distro builds grep with PCRE.)
+grep -A1 -F '[tick A] step 1 pid 1' /tmp/wc-bios.log \
+    | grep -qF '[tick B] step 1 pid 2' \
+    || fail "scheduler did not interleave the two processes"
+echo '    ok: scheduler — two processes interleaved (round-robin)'
 echo '    ok: BIOS boot — memory, interrupts, PCI, keyboard (sendkey), log ring'
 
 # 3) UEFI boot (OVMF), same contract minus the PIC-specific line.
@@ -167,6 +195,9 @@ else
                 "initrd: /etc/motd" "step: vfs ok" \
                 "vfs: exists + dirent enumeration matches the archive" \
                 "step: userland ok (elf64 + ring 3 round trip)" \
+                "proc: spawned /bin/tick as pid 1" \
+                "\\[tick A\\] step 1 pid 1" "\\[tick B\\] step 1 pid 2" \
+                "step: scheduler ok (two processes, round-robin)" \
                 "gfx: framebuffer" "gfx: desktop composited"; do
         grep -aq "$want" /tmp/wc-uefi.log || fail "UEFI log missing: $want"
     done

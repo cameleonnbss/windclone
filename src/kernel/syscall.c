@@ -33,6 +33,7 @@
 #include "syscall.h"
 #include "vfs.h"
 #include "usermode.h"
+#include "proc.h"
 #include "paging.h"
 #include "idt.h"
 #include "serial.h"
@@ -156,6 +157,40 @@ static int64_t sys_getdirent(uint64_t index, uint64_t up)
     return 0;
 }
 
+/* spawn(path) — start another program from the archive and return its pid. The
+ * name is copied out per byte exactly as open() does, so a program cannot move
+ * the string under the kernel mid-call; the child gets its own address space
+ * and simply becomes the next thing the scheduler runs. */
+static int64_t sys_spawn(uint64_t upath)
+{
+    char path[USER_PATH_MAX];
+
+    if (!user_ptr_ok(upath, 1, 0))
+        return WC_EFAULT;
+
+    size_t i = 0;
+    int terminated = 0;
+    for (; i + 1 < USER_PATH_MAX; i++) {
+        if (!user_ptr_ok(upath + i, 1, 0))
+            break;
+        path[i] = *(const char *)(uintptr_t)(upath + i);
+        if (path[i] == '\0') {
+            terminated = 1;
+            break;
+        }
+    }
+    if (!terminated) {
+        if (i + 1 >= USER_PATH_MAX)
+            return WC_ENAMETOOLONG;
+        return WC_EFAULT;
+    }
+    if (i == 0)
+        return WC_EINVAL;
+
+    int pid = proc_spawn_path(path);
+    return pid < 0 ? WC_ENOENT : (int64_t)pid;
+}
+
 void syscall_handler(struct syscall_frame *f)
 {
     switch (f->rax) {
@@ -179,9 +214,32 @@ void syscall_handler(struct syscall_frame *f)
         f->rax = (uint64_t)sys_getdirent(f->rdi, f->rsi);
         break;
 
+    case SYS_GETPID:
+        /* The scheduler's answer; 0 when a program runs under the shell's
+         * single-program path, which has no process table entry. */
+        f->rax = (uint64_t)proc_current_pid();
+        break;
+
+    case SYS_SCHED_YIELD:
+        /* Cooperative switch: proc_yield() replaces *f with the next process's
+         * context (and loads its CR3), so the stub's iretq resumes *that*
+         * program. Do not touch f after this — it no longer describes the
+         * caller. The yielding process sees 0 when it is later resumed. */
+        proc_yield(f);
+        break;
+
+    case SYS_SPAWN:
+        f->rax = (uint64_t)sys_spawn(f->rdi);
+        break;
+
     case SYS_EXIT:
-        /* Never returns: unwinds to whoever called usermode_enter(). */
-        usermode_exit((int)f->rdi);
+        /* Under the scheduler, exit retires the process and moves on; it only
+         * "returns" into the next context. Outside it (a shell command) there
+         * is no table, so unwind to the single-program caller as before. */
+        if (proc_scheduler_active())
+            proc_exit(f, (int)f->rdi);
+        else
+            usermode_exit((int)f->rdi);
         break;
 
     default:

@@ -33,18 +33,14 @@
 #define EI_VERSION 6
 #define EI_OSABI   7
 
-/* One mapped page, as pass 2 needs to remember it. */
-struct mapped_page {
-    uint64_t va;
-    uint64_t phys;
-    int      writable;
-};
+/* The shell path keeps its image frames in one static list and reclaims them
+ * itself, because there is a single address space and only one program can be
+ * resident at a time. A process gets its own list through elf_load_pages(). */
+static struct elf_page shell_pages[ELF_MAX_PAGES];
+static unsigned shell_page_count;
 
-static struct mapped_page pages[ELF_MAX_PAGES];
-static unsigned page_count;
-
-/* Put the previous program's image back. There is one address space and one
- * list of pages, so "start a second program" means "the first one's frames
+/* Put the previous shell program's image back. There is one address space and
+ * one list of pages, so "start a second program" means "the first one's frames
  * come back first": without this, the second image would be copied into pages
  * the first left read-only — a kernel write into a read-only leaf, which
  * faults inside the kernel rather than returning an error. Freeing them is
@@ -52,14 +48,14 @@ static unsigned page_count;
  *
  * A failed load leaves its partial pages here too, which is the point: they
  * come back on the next attempt instead of leaking. */
-static void release_previous(void)
+static void release_shell_pages(void)
 {
-    for (unsigned i = 0; i < page_count; i++) {
-        paging_unmap_page(pages[i].va);
-        if (pages[i].phys != 0)
-            pmm_free_frame(pages[i].phys);
+    for (unsigned i = 0; i < shell_page_count; i++) {
+        paging_unmap_page(shell_pages[i].va);
+        if (shell_pages[i].phys != 0)
+            pmm_free_frame(shell_pages[i].phys);
     }
-    page_count = 0;
+    shell_page_count = 0;
 }
 
 static void reject(const char *why, uint64_t detail)
@@ -74,9 +70,10 @@ static void reject(const char *why, uint64_t detail)
     serial_write("\n");
 }
 
-static int remember_page(uint64_t va, uint64_t phys, int writable)
+static int remember_page(struct elf_page *pages, unsigned *count, unsigned cap,
+                         uint64_t va, uint64_t phys, int writable)
 {
-    for (unsigned i = 0; i < page_count; i++) {
+    for (unsigned i = 0; i < *count; i++) {
         if (pages[i].va == va) {
             /* Shared boundary page: if either segment wants it writable, it
              * stays writable. A leaf cannot be two things at once, and
@@ -88,12 +85,12 @@ static int remember_page(uint64_t va, uint64_t phys, int writable)
             return 0;
         }
     }
-    if (page_count == ELF_MAX_PAGES)
+    if (*count == cap)
         return -1;
-    pages[page_count].va = va;
-    pages[page_count].phys = phys;
-    pages[page_count].writable = writable;
-    page_count++;
+    pages[*count].va = va;
+    pages[*count].phys = phys;
+    pages[*count].writable = writable;
+    (*count)++;
     return 0;
 }
 
@@ -203,18 +200,25 @@ static int check_segment(const struct elf64_phdr *ph, uint64_t file_size)
 
 /* Copy the file bytes of one segment and zero its .bss tail. Fresh pages are
  * allocated and cleared; a page another segment already mapped is reused so
- * the shared boundary keeps the bytes both halves need. */
+ * the shared boundary keeps the bytes both halves need.
+ *
+ * The copy goes through the higher-half direct map, not the page's user
+ * virtual address: a process is built under its own table while the kernel
+ * still runs on the boot CR3, so `va` may be absent from the live tables even
+ * though `phys` is real. HHDM(phys) is always reachable and is the same RAM
+ * the program will read at `va` once its own CR3 is loaded. */
 static int fill_segment(int fd, const struct elf64_phdr *ph,
-                        uint64_t *bytes_loaded, uint64_t *bytes_zeroed)
+                        uint64_t *bytes_loaded, uint64_t *bytes_zeroed,
+                        struct elf_page *pages, unsigned *count, unsigned cap)
 {
     uint64_t intra     = ph->p_vaddr & ~PAGE_MASK;
     uint64_t seg_page  = seg_first_page(ph);
     uint64_t file_page = ph->p_offset - intra;
     uint64_t mem_end   = intra + ph->p_memsz;
     uint64_t data_end  = intra + ph->p_filesz;
-    uint64_t count     = (mem_end + PAGE_SIZE - 1) / PAGE_SIZE;
+    uint64_t npages     = (mem_end + PAGE_SIZE - 1) / PAGE_SIZE;
 
-    for (uint64_t i = 0; i < count; i++) {
+    for (uint64_t i = 0; i < npages; i++) {
         uint64_t va  = seg_page + i * PAGE_SIZE;
         uint64_t from = i * PAGE_SIZE;             /* page start, in segment terms */
 
@@ -226,9 +230,11 @@ static int fill_segment(int fd, const struct elf64_phdr *ph,
                 return -1;
             }
             paging_map_page(va, phys, PTE_WRITE | PTE_USER);
-            memset((void *)(uintptr_t)va, 0, (size_t)PAGE_SIZE);
+            memset(pmm_phys_to_virt(phys), 0, (size_t)PAGE_SIZE);
         }
-        if (remember_page(va, phys, (ph->p_flags & PF_W) != 0) != 0) {
+        uint8_t *kv = pmm_phys_to_virt(phys);
+        if (remember_page(pages, count, cap, va, phys,
+                          (ph->p_flags & PF_W) != 0) != 0) {
             reject("image needs more pages than the loader allows", va);
             return -1;
         }
@@ -238,8 +244,7 @@ static int fill_segment(int fd, const struct elf64_phdr *ph,
             uint64_t n = data_end - from;
             if (n > PAGE_SIZE)
                 n = PAGE_SIZE;
-            if (vfs_pread(fd, (void *)(uintptr_t)va, n, file_page + from)
-                    != (int64_t)n) {
+            if (vfs_pread(fd, kv + from, n, file_page + from) != (int64_t)n) {
                 reject("short read on segment data", va);
                 return -1;
             }
@@ -252,8 +257,7 @@ static int fill_segment(int fd, const struct elf64_phdr *ph,
             uint64_t zstart = data_end > from ? data_end : from;
             uint64_t zend = mem_end < from + PAGE_SIZE ? mem_end : from + PAGE_SIZE;
             if (zstart < zend) {
-                memset((void *)(uintptr_t)(va + (zstart - from)), 0,
-                       (size_t)(zend - zstart));
+                memset(kv + (zstart - from), 0, (size_t)(zend - zstart));
                 *bytes_zeroed += zend - zstart;
             }
         }
@@ -261,25 +265,30 @@ static int fill_segment(int fd, const struct elf64_phdr *ph,
     return 0;
 }
 
-static int entry_is_mapped(uint64_t entry)
+static int entry_is_mapped(const struct elf_page *pages, unsigned count,
+                           uint64_t entry)
 {
     /* The entry must fall in a page we mapped — otherwise iretq takes a fetch
      * fault and the report says "general protection fault" where the truth is
      * "bad file". */
-    for (unsigned i = 0; i < page_count; i++)
+    for (unsigned i = 0; i < count; i++)
         if (pages[i].va == (entry & PAGE_MASK))
             return 1;
     return 0;
 }
 
-int elf_load(int fd, struct elf_report *rep)
+/* The shared body. `pages`/`count`/`cap` is the caller's leaf list, and the
+ * image lands in whatever table paging_set_working() last selected — the boot
+ * table for the shell, a freshly cloned one for a process. */
+static int elf_load_core(int fd, struct elf_report *rep,
+                         struct elf_page *pages, unsigned *count, unsigned cap)
 {
     struct elf64_phdr segs[ELF_MAX_SEGMENTS];
     unsigned seg_count = 0;
     struct elf64_ehdr eh;
 
     memset(rep, 0, sizeof *rep);
-    release_previous();
+    *count = 0;
 
     int64_t size = vfs_size(fd);
     if (size < 0)
@@ -326,18 +335,19 @@ int elf_load(int fd, struct elf_report *rep)
     }
 
     for (unsigned i = 0; i < seg_count; i++) {
-        if (fill_segment(fd, &segs[i], &rep->bytes_loaded, &rep->bytes_zeroed) != 0)
+        if (fill_segment(fd, &segs[i], &rep->bytes_loaded, &rep->bytes_zeroed,
+                         pages, count, cap) != 0)
             return -1;
     }
 
-    if (!entry_is_mapped(eh.e_entry)) {
+    if (!entry_is_mapped(pages, *count, eh.e_entry)) {
         reject("e_entry is outside every mapped segment", eh.e_entry);
         return -1;
     }
 
     /* Pass 2: lower the flags the file asked for. Nothing writes to these
      * pages again, so the read-only code pages stay that way for the run. */
-    for (unsigned i = 0; i < page_count; i++) {
+    for (unsigned i = 0; i < *count; i++) {
         uint64_t flags = PTE_USER | (pages[i].writable ? PTE_WRITE : 0);
         uint64_t phys = paging_translate(pages[i].va);
         if (phys == 0) {
@@ -351,17 +361,34 @@ int elf_load(int fd, struct elf_report *rep)
 
     rep->entry    = eh.e_entry;
     rep->segments = seg_count;
-    rep->pages    = page_count;
+    rep->pages    = *count;
 
     /* pages[] is filled in segment order, and a file may list its segments in
      * any order at all, so the extent is a min/max, not first/last. */
     rep->low  = pages[0].va;
     rep->high = pages[0].va + PAGE_SIZE;
-    for (unsigned i = 1; i < page_count; i++) {
+    for (unsigned i = 1; i < *count; i++) {
         if (pages[i].va < rep->low)
             rep->low = pages[i].va;
         if (pages[i].va + PAGE_SIZE > rep->high)
             rep->high = pages[i].va + PAGE_SIZE;
     }
     return 0;
+}
+
+int elf_load(int fd, struct elf_report *rep)
+{
+    /* The shell has one address space: before a new image is copied in, the
+     * previous one's read-only frames must come back, or the copy would be a
+     * kernel write into a page the last program left unwritable. */
+    release_shell_pages();
+    return elf_load_core(fd, rep, shell_pages, &shell_page_count, ELF_MAX_PAGES);
+}
+
+int elf_load_pages(int fd, struct elf_report *rep,
+                   struct elf_page *out, unsigned cap, unsigned *out_count)
+{
+    /* A process owns its frames: nothing here frees another image, because
+     * each process has its own address space and its own leaf list. */
+    return elf_load_core(fd, rep, out, out_count, cap);
 }

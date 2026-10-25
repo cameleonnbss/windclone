@@ -104,6 +104,16 @@ _Static_assert(__builtin_offsetof(struct elf64_ehdr, e_phnum) == 56, "e_phnum at
 #define ELF_MAX_SEGMENTS 16
 #define ELF_MAX_PAGES    64      /* 256 KiB of image per program, for now */
 
+/* One page of a loaded image, kept so the owner can free it later. The shell
+ * path frees the previous program before loading the next (one address
+ * space); a process keeps its list and releases it on exit, under its own
+ * page tables. `writable` is what pass 2 needs to re-apply protection. */
+struct elf_page {
+    uint64_t va;
+    uint64_t phys;
+    int      writable;
+};
+
 struct elf_report {
     uint64_t entry;        /* e_entry, verified to be inside the image */
     uint64_t segments;     /* PT_LOAD count actually mapped */
@@ -120,5 +130,13 @@ struct elf_report {
  * there is no separate probe step: the loader is the check. Nothing is
  * entered here; the caller decides when to iretq. */
 int elf_load(int fd, struct elf_report *rep);
+
+/* The per-process form: identical rules, but the image goes into whatever
+ * table the caller has made current (paging_set_working) and the leaf frames
+ * are reported through `out` instead of the loader's static list. The caller
+ * owns those frames and frees them when the process exits. Fills *out_count.
+ * `cap` must be at least ELF_MAX_PAGES for a full-size image. */
+int elf_load_pages(int fd, struct elf_report *rep,
+                   struct elf_page *out, unsigned cap, unsigned *out_count);
 
 #endif

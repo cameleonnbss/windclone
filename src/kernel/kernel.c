@@ -30,6 +30,7 @@
 #include "vfs.h"
 #include "syscall.h"
 #include "usermode.h"
+#include "proc.h"
 #include "gfx.h"
 #include "desktop.h"
 #include "mouse.h"
@@ -513,6 +514,27 @@ void kmain(void)
                     }
                 }
                 serial_write("step: userland ok (elf64 + ring 3 round trip)\n");
+
+                /* Phase 5's real prize: two programs alive at the same time.
+                 * The loop above can only ever run one at a time — a second
+                 * ELF would overwrite the first at 0x400000 — so a scheduler
+                 * needed per-process address spaces before it meant anything.
+                 * Now proc_create() gives each /bin/tick its own page tables,
+                 * and proc_run_all() interleaves them: their output comes out
+                 * A-1 B-1 A-2 B-2, each resuming its own loop counter after
+                 * the other has had the CPU. Cooperative round-robin — the
+                 * timer can't preempt yet — but two contexts truly alternate,
+                 * which is the thing a single-program runner cannot fake. */
+                {
+                    const char *argv_a[2] = { "tick", "A" };
+                    const char *argv_b[2] = { "tick", "B" };
+                    serial_write("sched: building two processes\n");
+                    proc_create("/bin/tick", 2, argv_a, 0);
+                    proc_create("/bin/tick", 2, argv_b, 0);
+                    serial_write("sched: two processes live, interleaving now\n");
+                    proc_run_all();
+                    serial_write("step: scheduler ok (two processes, round-robin)\n");
+                }
             }
             if ((int)(last_second / 100) >= dump_at_second) {
                 serial_write("log ring (most recent): ");

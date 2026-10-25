@@ -61,6 +61,10 @@
 #define SYS_READ    4
 #define SYS_CLOSE   5
 #define SYS_GETDIRENT 6
+#define SYS_GETPID  7
+#define SYS_SCHED_YIELD 8
+#define SYS_SPAWN   9
+#define SYS_WAIT   10
 
 /* --- directory entries ------------------------------------------------- */
 /* One file's metadata, copied to the caller by SYS_GETDIRENT. Fixed size and

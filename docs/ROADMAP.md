@@ -123,7 +123,7 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       *(The roadmap called this the v0.1.0 milestone, but v0.1.0 was cut at
       Phase 5 — the loader therefore ships as v0.1.1)*
 
-## Phase 5 — Shell & processes 🔄
+## Phase 5 — Shell & processes ✅
 - [x] Text shell with line editing (a 64-byte IRQ queue, Enter/Backspace),
       built-ins and a scrollback grid that survives repaints: `help`,
       `about`, `clear`. `ls` and `cat` are no longer here, and that is the
@@ -162,7 +162,46 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       - They share `src/user/wcstr.h`: five `static inline` helpers, because
         `-nostdlib` means there is no `strlen`, no `memcpy`, and no archive to
         link one from.
-- [ ] `fork`-like process creation, scheduler (priority round-robin)
+- [x] `fork`-like process creation, scheduler (priority round-robin). This was
+      not a function to bolt on — it first broke a hard limit every earlier
+      phase had accepted: one address space and one fixed load base
+      (`0x400000`) meant a second program always overwrote the first, so
+      `usermode_run()` could only ever finish one before starting the next.
+      - **Per-process address spaces.** `paging_clone_address_space()` copies
+        the kernel's `P4` wholesale — text, data, the HHDM, the heap at 256
+        GiB, the VGA window — so the kernel keeps running unchanged under
+        whoever's `CR3` is loaded, then hands back a *private, empty* user
+        window. Two processes now hold the same `0x400000` and never see each
+        other's bytes. New page-table frames a clone allocates are recorded
+        through a table sink so `proc` can reclaim them on exit
+        (`paging_set_table_sink` / `paging_free_table_frames`).
+      - **The loader writes into the caller's table.** `elf_load_pages()` fills
+        a process's own page list, and because the image is built while the
+        kernel still runs on the boot `CR3`, `fill_segment` writes each byte
+        through the HHDM (`pmm_phys_to_virt`), not the user VA. `elf_load()`
+        stays as a thin wrapper so the shell/boot path is byte-for-byte
+        unchanged — every pre-existing CI marker still passes.
+      - **A context switch with no new assembly.** `proc.c` keeps a table of
+        `struct proc`, each holding a whole `struct syscall_frame`. To switch,
+        the running frame is saved into its slot, the next process's `CR3` and
+        working `P4` are loaded, and its saved frame is copied over the one on
+        the stack — the `syscall_stub`'s `iretq` then resumes *that* process.
+        The single kernel IRQ stack is re-loaded from the TSS on every ring 3 →
+        ring 0 entry, so nothing of a suspended process is stranded on it.
+        That is precisely why the switch is **cooperative** (taken inside a
+        syscall, `IF` already cleared by the `0xEE` gate) and why timer-driven
+        **preemption is the honest next step**, not something claimed here.
+      - **Three new syscalls:** `getpid(7)`, `sched_yield(8)`, `spawn(9)`.
+        Policy is round-robin over the READY set with a numeric priority as the
+        tie-break (lower runs first). `wait(10)` is reserved in `wcabi.h` but
+        deliberately **not wired** — it falls through to "unknown call" rather
+        than pretending to block.
+      - **`/bin/tick` proves it, and so does CI.** The demo spawns two copies
+        of one binary with different `argv` labels; each prints a line and
+        yields in turn. The serial log comes out `A-1 B-1 A-2 B-2 A-3 B-3`,
+        each resuming its own counter after the other had the CPU, and
+        `local-test.sh` asserts that *order* (not just that the lines exist) —
+        a run-to-completion loop with extra steps could not produce it.
 
 ## Phase 6 — Language expansion ⏳
 *Goal: use the right tool per layer (the "asm/C/C++/Rust" promise).*

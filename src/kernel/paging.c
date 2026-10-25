@@ -5,12 +5,22 @@
 #include "pmm.h"
 #include "serial.h"
 #include "string.h"
+#include "usermode.h"   /* USER_BASE / USER_ADDR_LIMIT for the clone window */
 
 void panic(const char *why);
 
 #define VGA_PHYS 0xB8000ULL          /* classic text-mode MMIO window */
 
-static uint64_t *p4;                 /* our P4, reachable via HHDM */
+static uint64_t *p4;                 /* the table the walker edits now    */
+static uint64_t *p4_kernel;          /* the boot table, kept for cloning  */
+
+/* When non-NULL, next_table() reports every frame it newly allocates here so
+ * the caller can free a whole private tree by list. See paging.h. */
+static uint64_t *tbl_sink;
+static unsigned  *tbl_sink_n;
+static unsigned   tbl_sink_cap;
+
+static void sink_add(uint64_t phys);
 
 static inline uint64_t idx(uint64_t virt, int level)
 {
@@ -38,6 +48,7 @@ static uint64_t *next_table(uint64_t *slot, int level, uint64_t flags)
     uint64_t phys = pmm_alloc_frame();
     if (phys == 0)
         panic("paging: out of frames while building page tables");
+    sink_add(phys);                  /* private node: whoever is building owns it */
     uint64_t *tbl = pmm_phys_to_virt(phys);
     memset(tbl, 0, FRAME_SIZE);
     *slot = phys | PTE_PRESENT | PTE_WRITE | need_user;
@@ -136,6 +147,7 @@ void paging_init(void)
     if (p4_phys == 0)
         panic("paging: no frame for the new P4");
     p4 = pmm_phys_to_virt(p4_phys);
+    p4_kernel = p4;                  /* the pristine view every clone copies */
     memset(p4, 0, FRAME_SIZE);
     for (int i = 256; i < 512; i++)
         p4[i] = limine_p4[i];
@@ -156,4 +168,100 @@ void paging_init(void)
     if (paging_translate(0) != 0)
         panic("paging: NULL page unexpectedly mapped");
     serial_write("paging: self-checks passed (VGA translates, NULL page traps)\n");
+}
+
+/* --- per-process address spaces --------------------------------------- */
+
+/* Report a freshly allocated private frame to whoever is building a process.
+ * A no-op when no sink is installed (the shell and boot paths). */
+static void sink_add(uint64_t phys)
+{
+    if (tbl_sink && tbl_sink_n && *tbl_sink_n < tbl_sink_cap)
+        tbl_sink[(*tbl_sink_n)++] = phys;
+}
+
+void paging_set_working(uint64_t *virt_p4)
+{
+    p4 = virt_p4;
+}
+
+uint64_t *paging_get_working(void)
+{
+    return p4;
+}
+
+void paging_switch(uint64_t cr3_phys)
+{
+    __asm__ volatile("mov %0, %%cr3" : : "r"(cr3_phys) : "memory");
+}
+
+uint64_t paging_kernel_cr3(void)
+{
+    return pmm_virt_to_phys(p4_kernel);
+}
+
+void paging_use_kernel(void)
+{
+    p4 = p4_kernel;
+    paging_switch(pmm_virt_to_phys(p4_kernel));
+}
+
+void paging_set_table_sink(uint64_t *sink, unsigned *count, unsigned cap)
+{
+    tbl_sink = sink;
+    tbl_sink_n = count;
+    tbl_sink_cap = cap;
+}
+
+void paging_free_table_frames(const uint64_t *tables, unsigned count)
+{
+    for (unsigned i = 0; i < count; i++)
+        if (tables[i] != 0)
+            pmm_free_frame(tables[i]);
+}
+
+/* Build a fresh P4 that sees the kernel exactly as boot did, but owns an
+ * empty private copy of the user window. See the header for why the copy is
+ * wholesale and only the 0..2 GiB branch is split. */
+uint64_t paging_clone_address_space(void)
+{
+    uint64_t p4_phys = pmm_alloc_frame();
+    if (p4_phys == 0)
+        panic("paging: no frame for a process address space");
+    uint64_t *np = pmm_phys_to_virt(p4_phys);
+    memcpy(np, p4_kernel, FRAME_SIZE);
+    sink_add(p4_phys);
+
+    /* P4[0] spans the entire low half: the VGA leaf and the user window both
+     * live under it, so sharing it by reference would let a process overwrite
+     * another's pages. Split it - copy the PDPT, keep it writable for ring 3. */
+    uint64_t l3_phys = pmm_alloc_frame();
+    if (l3_phys == 0)
+        panic("paging: no frame for a process PDPT");
+    uint64_t *l3 = pmm_phys_to_virt(l3_phys);
+    memcpy(l3, pmm_phys_to_virt(p4_kernel[0] & PTE_ADDR_MASK), FRAME_SIZE);
+    np[0] = l3_phys | PTE_PRESENT | PTE_WRITE | PTE_USER;
+    sink_add(l3_phys);
+
+    /* The PD under l3[0] covers 0..1 GiB: VGA sits at PD index 0, the user
+     * base (4 MiB) at index 2. Copy the PD, then clear everything from the
+     * user base up. The VGA entry stays pointed at the kernel's own table. */
+    if (l3[0] & PTE_PRESENT) {
+        uint64_t l2_phys = pmm_alloc_frame();
+        if (l2_phys == 0)
+            panic("paging: no frame for a process page directory");
+        uint64_t *l2 = pmm_phys_to_virt(l2_phys);
+        memcpy(l2, pmm_phys_to_virt(l3[0] & PTE_ADDR_MASK), FRAME_SIZE);
+        for (uint64_t i = (USER_BASE >> 21); i < 512; i++)
+            l2[i] = 0;               /* forget the kernel's view of the window */
+        l3[0] = l2_phys | PTE_PRESENT | PTE_WRITE | PTE_USER;
+        sink_add(l2_phys);
+    }
+
+    /* l3[1] covers 1..2 GiB, wholly inside the window: drop it outright so
+     * the loader rebuilds that branch private. USER_ADDR_LIMIT stops at 2 GiB
+     * so no higher l3 index can ever be a user address. */
+    l3[1] = 0;
+
+    return p4_phys;
 }

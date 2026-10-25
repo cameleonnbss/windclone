@@ -65,7 +65,8 @@ On boot the kernel:
    real **ELF64** images — `PT_LOAD` segments honoured, `.bss` zeroed, code
    pages write-protected — and runs them **in ring 3**. They reach the
    console and the archive only through the `int 0x80` gate
-   (`write`, `exit`, `open`, `read`, `close`, `getdirent`), every user pointer
+   (`write`, `exit`, `open`, `read`, `close`, `getdirent`, and later
+   `getpid`, `sched_yield`, `spawn`), every user pointer
    being checked against the page tables before the kernel touches it, and
    `exit` unwinds back to the kernel — the first privilege boundary in the
    system,
@@ -90,6 +91,16 @@ On boot the kernel:
    through `getdirent`, `cat /etc/issue` prints a file, `echo zzz` answers
    `zzz`, and whatever a program writes lands in the terminal. CI types the
    commands through the emulated keyboard and greps what they printed.
+14. runs **two programs at once**. Each process gets its own 4-level page
+   tables (`paging_clone_address_space()` shares the kernel's view, keeps the
+   user window private), so two images can sit at the same `0x400000` and never
+   see each other. A cooperative **round-robin scheduler** (`proc.c`) switches
+   between them by saving a process's `syscall_frame`, loading the next one's
+   `CR3`, and letting the stub's `iretq` resume it — no new assembly. The boot
+   spawns two copies of `/bin/tick` and CI asserts their output really
+   interleaves (`A-1 B-1 A-2 B-2 …`), which a run-to-completion loop cannot
+   fake. Preemption (the timer switching without being asked) is the next step
+   and is not claimed here.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
@@ -135,9 +146,10 @@ git tag v0.1.0 && git push origin v0.1.0
 ```
 src/kernel/        C kernel: entry (kmain), console + memory managers,
                    IDT/PIC/PIT, PCI + PS/2 drivers, initrd/VFS, ELF64 loader,
+                   per-process page tables + round-robin scheduler (proc),
                    interrupt stubs (NASM), string + port-I/O helpers
 src/user/          the programs that run in ring 3 — hello, motd, ls, cat,
-                   echo — with no libc of their own: a header of inline
+                   echo, tick — with no libc of their own: a header of inline
                    `int 0x80` wrappers and five static inline string helpers
 src/boot/          hand-written NASM boot code (two-stage educational MBR)
 rootfs/            what goes into the initrd: packed to a ustar tar, loaded
@@ -162,8 +174,8 @@ The full plan with checkboxes lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 2. ✅ GDT audit, IDT + exceptions, PIC remap, PIT timer uptime
 3. ✅ Physical + virtual memory managers (`pmm`, own page tables, `kmalloc`)
 4. ✅ PS/2 keyboard, PCI enumeration
-5. 🔄 Initrd ✅, VFS ✅, ELF64 processes ✅, six syscalls ✅, `cat`/`ls`/`echo`
-   as real programs ✅ — `fork` and a scheduler are what is left
+5. ✅ Initrd, VFS, ELF64 processes, nine syscalls, `cat`/`ls`/`echo` as real
+   programs, and a round-robin scheduler running two processes at once
 6. ⏳ Shell in C, drivers starting to move to Rust
 7. ⏳ POSIX/Linux compatibility layer (ELF loader + Linux syscall subset)
 8. ⏳ Graphical "windows" shell — earning the *Wind* in WindClone
