@@ -370,6 +370,13 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       Makefile to appear and `hidden 0`, and `tools/qemu-desktop.py menu` reads
       the index of `hello` out of that log, clicks *that* row, and greps
       `shell: launched 'hello' from the start menu` plus the program's own line
+- [x] One version string. `src/kernel/version.h` is what the status window, the
+      taskbar and `about` all draw, and the kernel says it on the boot log —
+      which the test reads back out of that header, so a number a release left
+      behind fails the run. Until now the desktop drew "0.1.0" and `about`
+      answered "0.0.4", both stale by several releases: three copies of a
+      version are three chances to be wrong, and an OS whose screen describes
+      an older OS is lying to the person reading it
 - [x] Mouse driver: 8042 aux channel, IRQ12 (cascade unmasked), 3-byte
       packets with the sign bits in the flags byte — verified headlessly by
       injecting `mouse_move` through the QEMU monitor and grepping the

@@ -35,6 +35,7 @@
 #include "serial.h"
 #include "shell.h"
 #include "vfs.h"
+#include "version.h"
 
 #define C_WALL_TOP    gfx_rgb(0x0B, 0x2A, 0x63)
 #define C_WALL_BOTTOM gfx_rgb(0x1F, 0x6B, 0xD8)
@@ -237,7 +238,7 @@ static void draw_status_content(const struct window *w)
     int tx = w->x + 24;
     int ty = w->y + TITLE_H + 22;
 
-    gfx_text(tx, ty, "WINDCLONE 0.1.0", C_INK, 2);
+    gfx_text(tx, ty, "WINDCLONE " WC_VERSION, C_INK, 2);
     ty += 34;
     gfx_text(tx, ty, "UN SYSTEME ECRIT DE ZERO", C_MUTED, 1);
     ty += 22;
@@ -256,6 +257,12 @@ static void draw_status_content(const struct window *w)
     gfx_text(tx, ty, "RESTAURE. LES ICONES OUVERT LES", C_MUTED, 1);
     ty += 12;
     gfx_text(tx, ty, "FENETRES FERMEES.", C_MUTED, 1);
+    ty += 12;
+    /* Said on screen because it is the part a user looks for and cannot see
+     * from the window list: the menu is a launcher, not a decoration. */
+    gfx_text(tx, ty, "DEMARRER OUVRIR UN MENU QUI", C_MUTED, 1);
+    ty += 12;
+    gfx_text(tx, ty, "LANCE LES PROGRAMMES DE /BIN.", C_MUTED, 1);
 }
 
 static void draw_trash_content(const struct window *w)
@@ -520,7 +527,9 @@ static void draw_taskbar(int W, int H)
         x += TASK_W + TASK_GAP;
     }
 
-    gfx_text(W - 178, y + 17, "WINDCLONE 0.1.0", C_MUTED, 1);
+    /* Same macro as the status window: one number, three places that show
+     * it, and no way for one of them to fall behind a release. */
+    gfx_text(W - 178, y + 17, "WINDCLONE " WC_VERSION, C_MUTED, 1);
     gfx_text(W - 56, y + 17, "12:00", C_WHITE, 1);
 }
 

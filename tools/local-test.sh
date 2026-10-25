@@ -288,6 +288,16 @@ grep -Fq "proc: killed pid $VPID (SIGKILL)" /tmp/wc-bios.log \
 { grep -aq 'sched: deadlock' /tmp/wc-bios.log \
   && fail "scheduler deadlocked — a kill woke nobody"; } || true
 echo '    ok: kill — SIGKILL ends a running child, its parent reaps code -9'
+
+# The version the kernel announces is the version the source says. The status
+# window, the taskbar and `about` all draw that same macro, so a number a
+# release left behind stops being possible: it fails the run instead of
+# shipping a screen that describes an older system.
+WC_V=$(sed -n 's/.*WC_VERSION *"\([^"]*\)".*/\1/p' src/kernel/version.h)
+[ -n "$WC_V" ] || fail 'version.h declares no WC_VERSION to check the boot against'
+grep -aqF "boot: windclone $WC_V" /tmp/wc-bios.log \
+    || fail 'BIOS boot did not announce the version in src/kernel/version.h'
+echo '    ok: version — the kernel says what the source declares'
 echo '    ok: BIOS boot — memory, interrupts, PCI, keyboard (sendkey), log ring'
 
 # 3) UEFI boot (OVMF), same contract minus the PIC-specific line.
@@ -319,6 +329,7 @@ else
         -serial file:/tmp/wc-uefi.log || true
     for want in "step: pmm ok" "step: paging ok" "vga: text console live" \
                 "kmalloc selftest ok" "step: heap ok" "boot complete" "uptime: 1s" \
+                "boot: windclone $WC_V" \
                 "pci: enumeration done" "step: keyboard live" \
                 "log ring (most recent):" "step: initrd ok" \
                 "initrd: /etc/motd" "step: vfs ok" \

@@ -30,6 +30,7 @@
 #include "vfs.h"
 #include "syscall.h"
 #include "usermode.h"
+#include "version.h"
 #include "proc.h"
 #include "gfx.h"
 #include "desktop.h"
@@ -303,7 +304,8 @@ void kmain(void)
     kprint("\nusable RAM: ");
     kprint_dec(ram_mb);
     kprint(" MiB\n");
-    klog("boot: firmware %s, usable RAM %u MiB", fw, (unsigned)ram_mb);
+    klog("boot: windclone %s, firmware %s, usable RAM %u MiB",
+         WC_VERSION, fw, (unsigned)ram_mb);
 
     /* 6. CPU plumbing: audit the GDT Limine gave us, install our own
      *    IDT (exceptions -> readable serial dump, IRQs -> handlers),

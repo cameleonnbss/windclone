@@ -27,6 +27,7 @@
 #include "serial.h"
 #include "string.h"
 #include "timer.h"
+#include "version.h"
 
 #define SHELL_ROWS 17
 #define SHELL_COLS 62
@@ -250,7 +251,7 @@ int shell_launch(const char *name)
 
 static void cmd_about(void)
 {
-    put_line("WINDCLONE 0.0.4 - X86_64");
+    put_line("WINDCLONE " WC_VERSION " - X86_64");
     put_line("KERNEL: C, ASM, SANS LIBC");
     put_line("RING 3 + INITRD + FRAMEBUFFER: OK");
     put_line_num("UPTIME: ", timer_ticks() / 100);
