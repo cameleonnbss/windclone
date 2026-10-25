@@ -33,6 +33,16 @@ static inline long wc_call1(long nr, long a0)
     return ret;
 }
 
+static inline long wc_call2(long nr, long a0, long a1)
+{
+    long ret;
+    __asm__ volatile("int $0x80"
+                     : "=a"(ret)
+                     : "a"(nr), "D"(a0), "S"(a1)
+                     : "memory");
+    return ret;
+}
+
 static inline long wc_call3(long nr, long a0, long a1, long a2)
 {
     long ret;
@@ -61,6 +71,16 @@ static inline long wc_open(const char *path)
 static inline long wc_close(long fd)
 {
     return wc_call1(SYS_CLOSE, fd);
+}
+
+/* One entry of the archive, by index. Returns 0 when `out` holds a name, and
+ * -WC_ENOENT past the last file — which is how a caller loop finds the end
+ * without a separate "how many" call. The kernel copies the whole struct into
+ * the buffer below, so it must be a real `struct wc_dirent`, not a pointer to
+ * something the compiler may lay out differently. */
+static inline long wc_getdirent(unsigned long index, struct wc_dirent *out)
+{
+    return wc_call2(SYS_GETDIRENT, (long)index, (long)out);
 }
 
 /* Does not come back: the kernel unwinds its own copy of this stack frame

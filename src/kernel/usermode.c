@@ -31,7 +31,8 @@
 
 /* Not noreturn despite the iretq: SYS_EXIT unwinds the stack back to the
  * instruction after the call, so this really does return — once. */
-extern void usermode_enter(uint64_t entry, uint64_t user_rsp);
+extern void usermode_enter(uint64_t entry, uint64_t user_rsp,
+                           uint64_t argc, uint64_t argv);
 extern void user_exit_to_kernel(void);
 
 static int exit_code_value;
@@ -74,9 +75,77 @@ static int map_stack(void)
     return 0;
 }
 
-int usermode_run(const char *path, int *exit_code)
+/* Lay the command line out on the program's own stack, then hand back the
+ * address _start is entered with in rsp. The shape is the one the AMD64 psABI
+ * describes, because that is the shape a Linux binary reads (see wcabi.h):
+ *
+ *   (%rsp)   argc
+ *            argv[0] .. argv[argc-1], NULL
+ *            NULL                       (envp: no environment yet)
+ *            0, 0                       (auxv terminated with AT_NULL)
+ *   above    the argument strings themselves
+ *
+ * Strings go in first, top-down, and the word table lands below them - that
+ * order is what makes the bounds exact: everything has to stay above
+ * USER_STACK_BOTTOM, which is where the loaded image already is. */
+static int build_stack(int argc, const char *const *argv, uint64_t *rsp_out)
+{
+    uint64_t ptrs[USER_ARG_MAX];
+    uint64_t words = 1 + (uint64_t)argc + 1 + 1 + 2;
+    uint64_t floor = USER_STACK_BOTTOM + 16;   /* a hole, never a landing spot */
+    uint64_t sp = USER_STACK_TOP - 16;
+
+    for (int i = argc - 1; i >= 0; i--) {
+        uint64_t l = strlen(argv[i]) + 1;
+        if (l > USER_ARGV_BYTES || sp - l < floor + words * 8)
+            return -1;
+        sp -= l;
+        memcpy((void *)(uintptr_t)sp, argv[i], (size_t)l);
+        ptrs[i] = sp;
+    }
+
+    /* The table needs 8-aligned addresses; rounding the string area down first
+     * costs a few bytes and buys that, and the 16-alignment the ABI asks for
+     * at entry is taken after the table is placed. */
+    sp &= ~7ULL;
+    if (sp < floor + words * 8)
+        return -1;
+    sp -= words * 8;
+    sp &= ~0xFULL;
+    if (sp < floor)
+        return -1;
+
+    uint64_t *p = (uint64_t *)(uintptr_t)sp;
+    *p++ = (uint64_t)argc;
+    for (int i = 0; i < argc; i++)
+        *p++ = ptrs[i];
+    *p++ = 0;                 /* argv[argc] */
+    *p++ = 0;                 /* envp[0] */
+    *p++ = 0;                 /* auxv: AT_NULL */
+    *p++ = 0;
+
+    *rsp_out = sp;
+    return 0;
+}
+
+int usermode_run(const char *path, int *exit_code, int argc,
+                 const char *const *argv)
 {
     struct elf_report rep;
+    const char *self[1];
+
+    /* No command line means "you, called by your own name" - what exec(2)
+     * would have put in argv[0] anyway, and what lets the boot self-check run
+     * a program without pretending to have arguments. */
+    if (argv == NULL || argc <= 0) {
+        self[0] = path;
+        argv = self;
+        argc = 1;
+    }
+    if (argc > USER_ARG_MAX) {
+        serial_write("user: too many arguments\n");
+        return -1;
+    }
 
     /* The program is opened like any other file, through the VFS. That is not
      * ceremony: it means the loader has one way to read bytes and no idea what
@@ -106,6 +175,13 @@ int usermode_run(const char *path, int *exit_code)
         return -1;
     }
 
+    uint64_t entry_rsp = USER_STACK_TOP - 16;
+    if (build_stack(argc, argv, &entry_rsp) != 0) {
+        vfs_close((int)fd);
+        serial_write("user: command line does not fit on the stack\n");
+        return -1;
+    }
+
     serial_write("user: ");
     serial_write(path);
     serial_write(" elf64, entry ");
@@ -120,15 +196,14 @@ int usermode_run(const char *path, int *exit_code)
     serial_write_dec(rep.bytes_loaded);
     serial_write(" bytes loaded, ");
     serial_write_dec(rep.bytes_zeroed);
-    serial_write(" zeroed, entering ring 3\n");
+    serial_write(" zeroed, argv ");
+    serial_write_dec((uint64_t)argc);
+    serial_write(", entering ring 3\n");
 
     exit_code_value = -1;
 
-    /* 16-byte aligned top, minus one word so a `call` in user code pushes
-     * into mapped memory instead of the guard-less hole above it. */
-    uint64_t rsp = USER_STACK_TOP - 16;
-
-    usermode_enter(rep.entry, rsp);
+    usermode_enter(rep.entry, entry_rsp, (uint64_t)argc,
+                   (uint64_t)(uintptr_t)entry_rsp + 8);
 
     /* Reached only through SYS_EXIT -> user_exit_to_kernel(). */
     vfs_close((int)fd);

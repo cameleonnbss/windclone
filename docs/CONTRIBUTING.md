@@ -117,6 +117,19 @@ UEFI) and print the serial banner. That is the whole contract.
   segments"` never matches the kernel line `[motd] segments`, so the smoke
   test fails on a line that is plainly in the log. Escape it (`\\[motd\\]`)
   when the literal is a shell string that feeds `grep` a BRE.
+* **An empty `PT_LOAD` is not a corrupt binary.** `ld` emits a `LOAD` with
+  `p_memsz == p_filesz == 0` for a program with nothing writable — `/bin/echo`
+  was the first one, and the loader answered "user: refused /bin/echo" while
+  `readelf` showed a perfectly normal image. The rule to keep is the one about
+  an impossible combination (`p_filesz` with no room for it), not the one about
+  a size nobody asked for: skip the empty segment, do not reject the program.
+* **A `sendkey` name this QEMU does not know is silently dropped.** The space
+  bar is `spc` here; the harness was typing `sp`, so the shell received
+  `echozzz` as one word and answered "command unknown" — a failure that looked
+  like a real bug in a feature that worked. The monitor prints *invalid
+  parameter* and forgets it, so `send_keys` now reads the reply after every key
+  and stops the run. Never let a test harness swallow the error it is built to
+  find.
 * **Prove input headlessly with the QEMU monitor:** `-monitor
   unix:/tmp/wc-mon.sock,server,nowait` plus `sendkey a` injected after
   boot, then grep the serial log for the decoded character. That is how

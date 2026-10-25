@@ -28,8 +28,11 @@
  *     "copy from this file offset to that address, page by page" legal.
  *     Without it a page boundary lands in the middle of the file mapping and
  *     the segment gets split in the wrong place;
- *   - p_memsz >= p_filesz and the file range is inside the archive, because
- *     otherwise the copy runs off the end of the initrd;
+ *   - p_memsz >= p_filesz and the file range is inside the archive,
+ *     because otherwise the copy runs off the end of the initrd;
+*   - a PT_LOAD with no memory and no bytes is skipped, not refused. ld emits
+ *     exactly that for a program with nothing writable, and a loader that
+ *     treats "zero size" as corruption is a loader that cannot run echo.
  *   - the virtual range is inside the user window, because the kernel shares
  *     one address space with the program and a segment at 0xffffffff80...
  *     would have the program's bytes overwrite kernel memory;

@@ -185,10 +185,6 @@ static int check_segment(const struct elf64_phdr *ph, uint64_t file_size)
 
     /* The fence. A segment outside the user window would land on the kernel,
      * the stack we are about to build, or the NULL trap page. */
-    if (ph->p_memsz == 0) {
-        reject("PT_LOAD with an empty memory range", ph->p_vaddr);
-        return -1;
-    }
     if (ph->p_vaddr < USER_BASE) {
         reject("segment is below USER_BASE", ph->p_vaddr);
         return -1;
@@ -309,6 +305,15 @@ int elf_load(int fd, struct elf_report *rep)
             return -1;
         }
         if (ph.p_type != PT_LOAD)
+            continue;
+        /* ld lists an empty .bss as a PT_LOAD that asks for no memory and
+         * carries no bytes — the first program with nothing writable
+         * (/bin/echo) is what found it. There is no page to map and no byte
+         * to copy, so it is skipped rather than loaded; refusing it would
+         * have refused a perfectly good image. A segment that HAS file bytes
+         * but no room for them is still the error it looks like, and
+         * p_memsz < p_filesz above is exactly that check. */
+        if (ph.p_memsz == 0 && ph.p_filesz == 0)
             continue;
         if (check_segment(&ph, (uint64_t)size) != 0)
             return -1;

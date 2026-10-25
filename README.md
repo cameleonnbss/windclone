@@ -65,9 +65,10 @@ On boot the kernel:
    real **ELF64** images — `PT_LOAD` segments honoured, `.bss` zeroed, code
    pages write-protected — and runs them **in ring 3**. They reach the
    console and the archive only through the `int 0x80` gate
-   (`write`, `exit`, `open`, `read`, `close`), every user pointer being
-   checked against the page tables before the kernel touches it, and `exit`
-   unwinds back to the kernel — the first privilege boundary in the system,
+   (`write`, `exit`, `open`, `read`, `close`, `getdirent`), every user pointer
+   being checked against the page tables before the kernel touches it, and
+   `exit` unwinds back to the kernel — the first privilege boundary in the
+   system,
 11. maps the linear framebuffer the bootloader set up (device memory, so
    uncached and outside the HHDM) and composites the **desktop**: gradient
    wallpaper, desktop icons, a taskbar with a start button, and three
@@ -83,10 +84,12 @@ On boot the kernel:
    monitor and greps the kernel's `wm:` markers — a headless run therefore
    proves the window manager, not just the mouse,
 13. runs a **command prompt in a window**: a terminal with a line editor and
-   a scrollback grid, focused by clicking it. `ls` reads the initrd, `cat`
-   prints a file, and `hello` really loads `/bin/hello` and runs it in ring 3
-   before returning to the prompt. CI types the command through the emulated
-   keyboard and greps what it started.
+   a scrollback grid, focused by clicking it. Only `help`, `about` and `clear`
+   are built in; anything else is looked for in `/bin` and started as a real
+   program with the rest of the line as its `argv` — `ls` lists the archive
+   through `getdirent`, `cat /etc/issue` prints a file, `echo zzz` answers
+   `zzz`, and whatever a program writes lands in the terminal. CI types the
+   commands through the emulated keyboard and greps what they printed.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
@@ -133,8 +136,9 @@ git tag v0.1.0 && git push origin v0.1.0
 src/kernel/        C kernel: entry (kmain), console + memory managers,
                    IDT/PIC/PIT, PCI + PS/2 drivers, initrd/VFS, ELF64 loader,
                    interrupt stubs (NASM), string + port-I/O helpers
-src/user/          the programs that run in ring 3 (no libc of their own:
-                   a header of inline `int 0x80` wrappers)
+src/user/          the programs that run in ring 3 — hello, motd, ls, cat,
+                   echo — with no libc of their own: a header of inline
+                   `int 0x80` wrappers and five static inline string helpers
 src/boot/          hand-written NASM boot code (two-stage educational MBR)
 rootfs/            what goes into the initrd: packed to a ustar tar, loaded
                    by the bootloader as a module, read in place by the kernel
@@ -158,8 +162,8 @@ The full plan with checkboxes lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 2. ✅ GDT audit, IDT + exceptions, PIC remap, PIT timer uptime
 3. ✅ Physical + virtual memory managers (`pmm`, own page tables, `kmalloc`)
 4. ✅ PS/2 keyboard, PCI enumeration
-5. 🔄 Initrd ✅, VFS ✅, ELF64 processes ✅, five syscalls ✅ — `cat`/`ls`/`echo`
-   as programs rather than built-ins next
+5. 🔄 Initrd ✅, VFS ✅, ELF64 processes ✅, six syscalls ✅, `cat`/`ls`/`echo`
+   as real programs ✅ — `fork` and a scheduler are what is left
 6. ⏳ Shell in C, drivers starting to move to Rust
 7. ⏳ POSIX/Linux compatibility layer (ELF loader + Linux syscall subset)
 8. ⏳ Graphical "windows" shell — earning the *Wind* in WindClone

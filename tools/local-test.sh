@@ -17,14 +17,29 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 # Inject keystrokes through a QEMU monitor unix socket once the kernel
 # is up: `sendkey a` makes the emulated 8042 deliver a real IRQ1, so the
 # keyboard decode path is proven end-to-end, headless.
+#
+# The reply is read and checked because a name this QEMU does not know is
+# silently dropped: `sendkey sp` (space) used to be typed as nothing at all,
+# and the shell then received "echozzz" as one word and answered "command
+# unknown" - a wrong-looking but passing-looking failure. Now an unaccepted
+# key name stops the run instead of quietly changing the command line.
 send_keys() {
     local sock=$1; shift
     python3 - "$sock" "$@" <<'EOF'
 import socket, time, sys
-s = socket.socket(socket.AF_UNIX); s.settimeout(3); s.connect(sys.argv[1])
+s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(sys.argv[1])
 time.sleep(0.2); s.recv(4096)
 for k in sys.argv[2:]:
-    s.sendall(('sendkey %s\n' % k).encode()); time.sleep(0.2)
+    s.sendall(('sendkey %s\n' % k).encode())
+    reply = b''
+    while b'(qemu)' not in reply:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        reply += chunk
+    if b'invalid' in reply.lower():
+        sys.exit('    sendkey: this QEMU rejected the key name %r' % k)
+    time.sleep(0.15)
 # a real PS/2 packet through the emulated 8042, same idea as sendkey
 s.sendall(b'mouse_move 80 40\n'); time.sleep(0.3)
 s.close()
@@ -76,8 +91,15 @@ timeout "$TIMEOUT" $Q -cdrom windclone.iso -m 512 -display none -no-reboot \
     -monitor unix:/tmp/wc-biosmon,server,nowait &
 BIOPID=$!
 sleep 6
-# a/b prove the decoder; the shell then really runs `hello` in ring 3
-send_keys /tmp/wc-biosmon a b ret h e l l o ret
+# a/b prove the decoder; the shell then really runs `hello` in ring 3,
+# `ls` enumerates the archive through SYS_GETDIRENT, `echo zzz` proves the
+# command line reached _start (the word comes back verbatim), and `cat
+# /etc/issue` prints bytes that exist nowhere else in this log. `spc` is
+# what this QEMU's monitor calls the space bar.
+send_keys /tmp/wc-biosmon a b ret h e l l o ret \
+    l s ret \
+    e c h o spc z z z ret \
+    c a t spc slash e t c slash i s s u e ret
 wait $BIOPID 2>/dev/null || true
 for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "vga: text console live" "kmalloc selftest ok" "step: heap ok" \
@@ -92,6 +114,7 @@ for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "gdt: our own table live" "syscall: int 0x80 gate installed" \
             "vfs: descriptor table live" "step: vfs ok" \
             "vfs: read-back, offset, ebadf and enoent checks passed" \
+            "vfs: exists + dirent enumeration matches the archive" \
             "elf64, entry" "hello from ring 3" \
             "step: userland ok (elf64 + ring 3 round trip)" \
             "\\[motd\\] segments: .data marker=0x5a5a .bss counter=0" \
@@ -99,7 +122,13 @@ for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "\\[motd\\] read after close returned -9" \
             "gfx: framebuffer" "gfx: desktop composited" \
             "mouse: 8042 aux channel live" "mouse: first packet decoded" \
-            "shell: hello ran and returned"; do
+            "shell: hello ran and returned" \
+            "shell: running 'ls'" "\\[ls\\] " "entries, " \
+            "shell: ls ran and returned" \
+            "shell: running 'echo'" "zzz" \
+            "shell: echo ran and returned" \
+            "shell: running 'cat'" "0.0.4 - initrd live" \
+            "shell: cat ran and returned" "shell: cat exited with 0"; do
     grep -aq "$want" /tmp/wc-bios.log || fail "BIOS log missing: $want"
 done
 echo '    ok: BIOS boot — memory, interrupts, PCI, keyboard (sendkey), log ring'
@@ -136,6 +165,7 @@ else
                 "pci: enumeration done" "step: keyboard live" \
                 "log ring (most recent):" "step: initrd ok" \
                 "initrd: /etc/motd" "step: vfs ok" \
+                "vfs: exists + dirent enumeration matches the archive" \
                 "step: userland ok (elf64 + ring 3 round trip)" \
                 "gfx: framebuffer" "gfx: desktop composited"; do
         grep -aq "$want" /tmp/wc-uefi.log || fail "UEFI log missing: $want"

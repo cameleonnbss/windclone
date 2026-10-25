@@ -1,13 +1,18 @@
 /* WindClone — command line: line editor, built-ins, and program launcher.
  *
  * Everything here runs from the idle loop, never from an IRQ: the keyboard
- * driver only queues bytes (see keyboard.c), so a `cat` that walks the
- * initrd or a `hello` that enters ring 3 cannot deadlock an interrupt.
+ * driver only queues bytes (see keyboard.c), so a `cat` that walks the initrd
+ * or a program that enters ring 3 cannot deadlock an interrupt.
  *
  * The scrollback is a fixed grid of characters, not a framebuffer: the
  * window can be repainted (dragged, overlapped) as often as it likes and
  * the text is still there. That is the same reason a real terminal keeps
  * cells and not pixels.
+ *
+ * Most commands are no longer here. `ls`, `cat`, `echo`, `hello` are ELF
+ * programs in /bin, launched with their arguments and given this grid as
+ * their stdout — which is the whole reason the sink below exists: a program
+ * that can only talk to the serial port is a program nobody can use.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -16,8 +21,8 @@
 
 #include "shell.h"
 #include "gfx.h"
-#include "initrd.h"
 #include "usermode.h"
+#include "vfs.h"
 #include "keyboard.h"
 #include "serial.h"
 #include "string.h"
@@ -97,100 +102,107 @@ static void put_line_num(const char *prefix, uint64_t value)
 static void cmd_help(void)
 {
     put_line("COMMANDES:");
-    put_line("  HELP          CETTE LISTE");
-    put_line("  LS            FICHIERS DE L'INITRD");
-    put_line("  CAT <FICHIER> AFFICHE UN FICHIER");
-    put_line("  HELLO         LANCE /BIN/HELLO EN RING 3");
-    put_line("  ABOUT         VERSION ET UPTIME");
-    put_line("  CLEAR         EFFACE L'ECRAN");
+    put_line("  HELP           CETTE LISTE");
+    put_line("  ABOUT          VERSION ET UPTIME");
+    put_line("  CLEAR          EFFACE L'ECRAN");
+    put_line("  - PROGRAMMES DANS /BIN -");
+    put_line("  LS             LISTE L'INITRD");
+    put_line("  CAT <FICHIER>  AFFICHE UN FICHIER");
+    put_line("  ECHO <MOTS>    RENVOIE SES ARGUMENTS");
+    put_line("  HELLO          UN PROGRAMME QUI PARLE EN RING 3");
+    put_line("  MOTD           LIT /ETC/MOTD VIA LE VFS");
 }
 
-static void cmd_ls(void)
+/* --- a program's stdout, wired into the grid -------------------------
+ * The kernel hands write(1)/write(2) bytes here whenever a program runs.
+ * They arrive in whatever chunks the program chose - half a line, a whole
+ * file, forty bytes at a time - so there is a pending row that only gets
+ * flushed on a newline, at the end of a line that filled up, or when the
+ * program exits without one. */
+static char pending[SHELL_COLS + 1];
+static int  pending_len;
+
+static void sink_put_pending(void)
 {
-    unsigned n = initrd_count();
-    if (n == 0) {
-        put_line("INITRD VIDE OU ABSENT");
+    if (pending_len == 0)
         return;
-    }
-
-    put_line_num("FICHIERS: ", n);
-
-    for (unsigned i = 0; i < n; i++) {
-        const struct initrd_file *f = initrd_at(i);
-        char buf[SHELL_COLS + 1];
-        int c = 0;
-
-        buf[c++] = ' ';
-        buf[c++] = '/';
-        for (int k = 0; f->name[k] != '\0' && c < SHELL_COLS - 12; k++)
-            buf[c++] = upper(f->name[k]);
-        buf[c++] = ' ';
-        buf[c++] = '(';
-
-        char digits[21];
-        int d = 0;
-        uint64_t size = f->size;
-        do {
-            digits[d++] = (char)('0' + (size % 10));
-            size /= 10;
-        } while (size != 0 && d < 20);
-        while (d > 0 && c < SHELL_COLS - 4)
-            buf[c++] = digits[--d];
-
-        buf[c++] = ' ';
-        buf[c++] = 'B';
-        buf[c++] = ')';
-        buf[c] = '\0';
-        put_line(buf);
-    }
+    pending[pending_len] = '\0';
+    put_line(pending);
+    pending_len = 0;
 }
 
-static void cmd_cat(const char *name)
+static void shell_sink(const char *data, uint64_t len)
 {
-    const struct initrd_file *f = initrd_find(name);
-    if (f == NULL) {
-        put_line("FICHIER INTROUVABLE");
-        return;
-    }
-
-    /* Stream the file into the grid one '\n' at a time: text files only,
-     * and long lines are cut rather than wrapped (wrapping needs a width,
-     * the grid is meant to be dumb). */
-    char line[SHELL_COLS + 1];
-    int c = 0;
-    for (uint64_t i = 0; i < f->size; i++) {
-        char ch = (char)f->data[i];
-        if (ch == '\r')
+    for (uint64_t i = 0; i < len; i++) {
+        char c = data[i];
+        if (c == '\r')
             continue;
-        if (ch == '\n' || c >= SHELL_COLS) {
-            line[c] = '\0';
-            put_line(line);
-            c = 0;
-            if (ch != '\n')
-                line[c++] = ch;
+        if (c == '\n' || pending_len >= SHELL_COLS) {
+            sink_put_pending();
+            if (c != '\n')
+                pending[pending_len++] = c;   /* wrap: keep the byte */
             continue;
         }
-        line[c++] = ch;
+        pending[pending_len++] = c;
     }
-    if (c > 0) {
-        line[c] = '\0';
-        put_line(line);
-    }
+    dirty = 1;
 }
 
-static void cmd_hello(void)
+/* --- running a program ----------------------------------------------- */
+#define PROGRAM_PATH_MAX 64
+
+/* Everything that is not a built-in is looked for in /bin, run with the rest
+ * of the line as argv, and given the terminal as its console. That is the
+ * difference between "the shell has commands" and "there is an OS": the
+ * kernel never hears about a program's name beyond the path it opened. */
+static void cmd_program(int argc, const char *const *argv)
 {
-    /* This line is the CI contract for typing: to reach it, the keyboard
-     * must have decoded h-e-l-l-o in order through the real IRQ path. */
-    serial_write("shell: running 'hello' from the prompt\n");
-    put_line("EXECUTION DE /BIN/HELLO EN RING 3...");
-    int code = -1;
-    if (usermode_run("/bin/hello", &code) == 0) {
-        put_line_num("TERMINE, CODE DE SORTIE: ", (uint64_t)(code < 0 ? 0 : (unsigned)code));
-        serial_write("shell: hello ran and returned\n");
-    } else {
-        put_line("IMPOSSIBLE DE LANCER /BIN/HELLO");
+    char path[PROGRAM_PATH_MAX];
+    int n = 0;
+
+    for (const char *p = "/bin/"; *p != '\0'; p++)
+        path[n++] = *p;
+    for (int i = 0; argv[0][i] != '\0' && n < PROGRAM_PATH_MAX - 1; i++)
+        path[n++] = argv[0][i];
+    path[n] = '\0';
+
+    if (!vfs_exists(path)) {
+        put_line("COMMANDE INCONNUE. TAPE HELP.");
+        serial_write("shell: no program ");
+        serial_write(path);
+        serial_write("\n");
+        return;
     }
+
+    /* The word the CI contract greps for: reaching this line means the
+     * keyboard decoded the command in order through the real IRQ path. */
+    serial_write("shell: running '");
+    serial_write(argv[0]);
+    serial_write("' from the prompt\n");
+
+    int code = -1;
+    if (usermode_run(path, &code, argc, argv) != 0) {
+        put_line("IMPOSSIBLE DE LANCER CE PROGRAMME");
+        serial_write("shell: failed to run ");
+        serial_write(path);
+        serial_write("\n");
+        return;
+    }
+
+    /* Whatever the program printed that had no trailing newline is still in
+     * `pending` - a screen that lost a program's last words would look like
+     * the program never said them. */
+    sink_put_pending();
+
+    put_line_num("CODE DE SORTIE: ", (uint64_t)(code < 0 ? 0 : (unsigned)code));
+    serial_write("shell: ");
+    serial_write(argv[0]);
+    serial_write(" ran and returned\n");
+    serial_write("shell: ");
+    serial_write(argv[0]);
+    serial_write(" exited with ");
+    serial_write_dec((uint64_t)(code < 0 ? 0 : (unsigned)code));
+    serial_write("\n");
 }
 
 static void cmd_about(void)
@@ -219,20 +231,37 @@ static void execute(void)
 
     if (input_len == 0) {
         /* bare Enter: nothing to do */
-    } else if (strcmp(input, "help") == 0) {
-        cmd_help();
-    } else if (strcmp(input, "ls") == 0) {
-        cmd_ls();
-    } else if (strncmp(input, "cat ", 4) == 0) {
-        cmd_cat(input + 4);
-    } else if (strcmp(input, "hello") == 0) {
-        cmd_hello();
-    } else if (strcmp(input, "about") == 0) {
-        cmd_about();
-    } else if (strcmp(input, "clear") == 0) {
-        grid_clear();
     } else {
-        put_line("COMMANDE INCONNUE. TAPE HELP.");
+        /* Tokenise in place: spaces become NULs, so argv[] points into
+         * `input` and there is no second copy to keep in sync. The buffer is
+         * a kernel static that outlives the call, and usermode_run() copies
+         * the strings onto the program's stack before entering ring 3 - so
+         * the program owns its own argv from the moment it starts, which is
+         * what lets a shell reuse `input` for the next line. */
+        const char *argv[USER_ARG_MAX];
+        int argc = 0;
+        int i = 0;
+
+        while (i < input_len && argc < USER_ARG_MAX) {
+            while (i < input_len && input[i] == ' ')
+                input[i++] = '\0';
+            if (i >= input_len)
+                break;
+            argv[argc++] = &input[i];
+            while (i < input_len && input[i] != ' ')
+                i++;
+        }
+
+        if (argc == 0)
+            ;   /* nothing but spaces */
+        else if (strcmp(argv[0], "help") == 0)
+            cmd_help();
+        else if (strcmp(argv[0], "about") == 0)
+            cmd_about();
+        else if (strcmp(argv[0], "clear") == 0)
+            grid_clear();
+        else
+            cmd_program(argc, argv);
     }
 
     input_len = 0;
@@ -245,6 +274,12 @@ static void execute(void)
 void shell_init(void)
 {
     grid_clear();
+
+    /* From here on, whatever a program writes to fd 1 or 2 is typed into this
+     * grid. The serial port still receives every byte - that is what CI
+     * greps - but a user at the screen only has this window. */
+    vfs_set_console_sink(shell_sink);
+
     put_line("WINDCLONE - INVITE DE COMMANDES");
     put_line("TAPE HELP POUR LA LISTE DES COMMANDES.");
     put_line("");

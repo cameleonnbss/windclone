@@ -30,7 +30,10 @@ INITRD       := build/initrd.tar
 
 # Userland programs: real ELF64 executables, linked at USER_BASE by
 # linkers/user.ld and mapped segment by segment by src/kernel/elf.c.
-USER_BINS := build/hello build/motd
+# The rule below is a pattern, so adding a command is two edits, not four:
+# a src/user/<name>.c and its name here.
+USER_BINS := build/hello build/motd build/ls build/cat build/echo
+USER_HDRS := $(wildcard src/user/*.h) src/kernel/wcabi.h
 
 # -mno-sse... : keep gcc from emitting SSE/AVX. At boot time CR4/XMM state
 # is not guaranteed, and -O2 happily vectorises loops (movdqa etc.) which
@@ -97,15 +100,25 @@ build/hello.o: src/user/hello.asm
 	@mkdir -p build
 	$(NASM) -f elf64 -o $@ $<
 
-build/hello: build/hello.o linkers/user.ld
-	$(CC) $(ULDFLAGS) -o $@ $<
-
-build/motd.o: src/user/motd.c
+# Every C program: compile, then link against the userland script. An explicit
+# rule (hello.o above) always beats a pattern rule, which is why the assembled
+# program can keep its nasm step while sharing the link step below.
+#
+# The headers are listed as prerequisites on purpose: wcabi.h is the contract
+# between kernel and program, so editing it has to rebuild userland, and a
+# stale build/ls.o carrying the old struct layout is exactly the kind of bug a
+# clean CI would not be able to reproduce.
+build/%.o: src/user/%.c $(USER_HDRS)
 	@mkdir -p build
 	$(CC) $(UCFLAGS) -c $< -o $@
 
-build/motd: build/motd.o linkers/user.ld
+build/%: build/%.o linkers/user.ld
 	$(CC) $(ULDFLAGS) -o $@ $<
+
+# Without this make treats build/<name>.o as a throwaway intermediate and
+# deletes it after linking, so every build recompiles every program and
+# nothing is left for `objdump -d` to look at.
+.PRECIOUS: build/%.o
 
 user: $(USER_BINS)
 

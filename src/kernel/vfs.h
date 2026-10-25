@@ -63,6 +63,23 @@ int64_t vfs_close(int fd);
  * because it must know how far the program headers go before mapping. */
 int64_t vfs_size(int fd);
 
+/* Does this path resolve to anything? The shell needs the yes/no answer to
+ * decide whether a word is a program, and it must not have to reach into the
+ * initrd to get it — that is the rule this header opened with. */
+int vfs_exists(const char *path);
+
+/* Fill one directory entry from the archive, by index. 0 = wrote it, -WC_ENOENT
+ * once `index` is past the last file (that is how a caller loop finds the end
+ * without a separate count call), -WC_EINVAL on a null pointer. Kernel-side
+ * pointer only: syscall.c copies it out to ring 3 after validating. */
+int64_t vfs_dirent(uint64_t index, struct wc_dirent *out);
+
+/* Where a program's write(1)/write(2) lands when there is something on the
+ * screen that wants it. Serial always gets every byte — it is what CI greps —
+ * and the sink is what a human sees. NULL restores the VGA text console. */
+typedef void (*vfs_sink_fn)(const char *data, uint64_t len);
+void vfs_set_console_sink(vfs_sink_fn fn);
+
 /* Live descriptors, for the boot report and for leaking tests. */
 unsigned vfs_open_count(void);
 

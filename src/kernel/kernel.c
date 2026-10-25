@@ -403,6 +403,26 @@ void kmain(void)
         kassert(vfs_close((int)fd) == 0);
         kassert(vfs_open_count() == 0);
         serial_write("vfs: read-back, offset, ebadf and enoent checks passed\n");
+
+        /* The two calls Phase 5's shell is built on: a yes/no path lookup,
+         * and one directory entry per index until the archive says ENOENT.
+         * The count is checked against initrd_count() because that is how
+         * many files the archive was parsed into: an enumeration that stopped
+         * early would show a /bin with missing programs, and one that never
+         * ended would hang the shell inside ring 3. */
+        kassert(vfs_exists("/etc/motd") == 1);
+        kassert(vfs_exists("/no/such/file") == 0);
+        struct wc_dirent dent;
+        unsigned listed = 0;
+        while (vfs_dirent(listed, &dent) == 0) {
+            kassert(dent.namelen > 0 && dent.namelen < WC_NAME_MAX);
+            kassert(dent.name[dent.namelen] == '\0');   /* safe to print */
+            listed++;
+        }
+        kassert(listed == initrd_count());
+        kassert(vfs_dirent(0, NULL) == WC_EINVAL);
+        serial_write("vfs: exists + dirent enumeration matches the archive\n");
+
         klog("vfs: %u files behind %u descriptor slots", initrd_count(), 8u);
         serial_write("step: vfs ok\n");
     } else {
@@ -470,7 +490,9 @@ void kmain(void)
              * because a second program is the test that the loader really put
              * the first one's frames back: hello is a two-segment asm image,
              * motd is a gcc image with .rodata, .data and .bss that opens a
-             * file through the vfs. */
+             * file through the vfs. argc 0 / argv NULL means "run it with just
+             * its own name" — the boot path has no command line, and the shell
+             * is what supplies a real one from the keyboard. */
             if (!user_ran) {
                 user_ran = 1;
                 static const char *programs[] = { "/bin/hello", "/bin/motd" };
@@ -479,7 +501,7 @@ void kmain(void)
                     serial_write("user: starting ");
                     serial_write(programs[p]);
                     serial_write(" from the initrd\n");
-                    if (usermode_run(programs[p], &code) == 0) {
+                    if (usermode_run(programs[p], &code, 0, NULL) == 0) {
                         serial_write("user: program returned, exit code ");
                         serial_write_dec((uint64_t)(code < 0 ? 0 : (unsigned)code));
                         serial_write("\n");

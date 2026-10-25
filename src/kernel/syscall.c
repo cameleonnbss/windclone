@@ -136,6 +136,26 @@ static int64_t sys_close(uint64_t fd)
     return vfs_close((int)fd);
 }
 
+/* getdirent(index, struct wc_dirent *out) — the one call that hands a program
+ * a structure instead of bytes. The kernel fills its own copy, checks the
+ * caller's address, then moves it in one piece: the VFS is never given a
+ * ring-3 pointer, so a half-written entry cannot exist even if the program
+ * passes a buffer one byte from the end of its stack. */
+static int64_t sys_getdirent(uint64_t index, uint64_t up)
+{
+    struct wc_dirent d;
+
+    if (!user_ptr_ok(up, sizeof d, 1))
+        return WC_EFAULT;
+
+    int64_t r = vfs_dirent(index, &d);
+    if (r != 0)
+        return r;
+
+    memcpy((void *)(uintptr_t)up, &d, sizeof d);
+    return 0;
+}
+
 void syscall_handler(struct syscall_frame *f)
 {
     switch (f->rax) {
@@ -153,6 +173,10 @@ void syscall_handler(struct syscall_frame *f)
 
     case SYS_CLOSE:
         f->rax = (uint64_t)sys_close(f->rdi);
+        break;
+
+    case SYS_GETDIRENT:
+        f->rax = (uint64_t)sys_getdirent(f->rdi, f->rsi);
         break;
 
     case SYS_EXIT:

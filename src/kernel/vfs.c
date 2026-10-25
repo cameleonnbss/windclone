@@ -26,6 +26,7 @@ struct open_file {
 
 static struct open_file slots[VFS_MAX_OPEN];
 static unsigned live;
+static vfs_sink_fn console_sink;
 
 void vfs_init(void)
 {
@@ -102,13 +103,60 @@ int64_t vfs_read(int fd, void *buf, uint64_t len)
 }
 
 /* Both consoles, always: serial is what CI and the smoke tests read, the
- * text screen is what a human sitting at the machine reads. A program that
- * only reached one of them would look broken from the other. */
+ * screen is what a human sitting at the machine reads. Which screen depends
+ * on the phase: once the desktop is up, the terminal window is the only
+ * surface a user can see (0xB8000 is behind a linear framebuffer), so the
+ * shell registers a sink and program output lands in its scrollback. The
+ * serial port never stops receiving anything, or every CI grep would depend
+ * on a window manager that has nothing to do with files. */
 static void console_write(const void *buf, uint64_t len)
 {
     serial_write_len((const char *)buf, (size_t)len);
+    if (console_sink != NULL) {
+        console_sink((const char *)buf, len);
+        return;
+    }
     if (vga_available())
         kprint_len((const char *)buf, (size_t)len);
+}
+
+void vfs_set_console_sink(vfs_sink_fn fn)
+{
+    console_sink = fn;
+}
+
+/* The path answer the shell wants before it tries to run something. Held to
+ * the rule at the top of this file: the shell asks, it does not keep a
+ * pointer into the archive. */
+int vfs_exists(const char *path)
+{
+    if (path == NULL || path[0] == '\0')
+        return 0;
+    return initrd_find(path) != NULL ? 1 : 0;
+}
+
+/* One entry of the archive by position, for a program that wants to list it.
+ * Names longer than WC_NAME_MAX are truncated rather than refused: a 100-byte
+ * name is legal in a tar and `ls` showing the first 63 characters of it beats
+ * failing the whole listing over cosmetics. */
+int64_t vfs_dirent(uint64_t index, struct wc_dirent *out)
+{
+    if (out == NULL)
+        return WC_EINVAL;
+
+    const struct initrd_file *f = initrd_at((unsigned)index);
+    if (f == NULL)
+        return WC_ENOENT;
+
+    memset(out, 0, sizeof *out);
+    size_t l = strlen(f->name);
+    if (l > WC_NAME_MAX - 1)
+        l = WC_NAME_MAX - 1;
+    memcpy(out->name, f->name, l);
+    out->name[l] = '\0';
+    out->namelen = l;
+    out->size = f->size;
+    return 0;
 }
 
 int64_t vfs_write(int fd, const void *buf, uint64_t len)

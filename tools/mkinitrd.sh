@@ -20,14 +20,19 @@ STAGE=build/initrd-root
 mkdir -p "$(dirname "$OUT")"
 
 # Stage = the checked-in rootfs plus the programs we build (they are
-# artifacts, not sources, so they never land in the tree). Every build/*
-# entry listed in USER_BINS goes to /bin with its extension stripped, which
-# is why the loop below skips anything that is not one of them.
+# artifacts, not sources, so they never land in the tree). The list below is
+# the same set as USER_BINS in the Makefile: a program that is missing simply
+# stays out of the archive, which is why `make` builds userland first - and
+# why the warning is loud rather than silent, because a /bin with fewer names
+# than the Makefile promises shows up at the prompt as "command unknown".
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin"
 cp -a "$ROOT"/. "$STAGE"/
-for prog in hello motd; do
-    [ -f "build/$prog" ] || continue
+for prog in hello motd ls cat echo; do
+    if [ ! -f "build/$prog" ]; then
+        echo "[mkinitrd] WARNING: build/$prog is missing, /bin/$prog will not exist" >&2
+        continue
+    fi
     cp "build/$prog" "$STAGE/bin/$prog"
 done
 

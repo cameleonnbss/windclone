@@ -9,6 +9,20 @@
  *   args:    rdi, rsi, rdx, r10
  *   result:  rax; a negative value is one of the -WC_* errors below
  *
+ * How a program starts (the Part 5 addition, frozen like everything else):
+ *
+ *   _start is entered with rdi = argc and rsi = argv, *and* the same
+ *   information sits on the stack the way the AMD64 psABI describes it:
+ *
+ *     (%rsp)  argc
+ *             argv[0] .. argv[argc-1], NULL
+ *             envp[0] = NULL            (no environment yet)
+ *             0, 0                      (an empty auxv: AT_NULL)
+ *
+ *   Registers are the convenient contract, the stack is the honest one: a
+ *   Linux binary reads argv from memory, never from rdi, so passing both now
+ *   is what lets Part 7 run one without rewriting the loader.
+ *
  * Two choices here are deliberate and worth defending:
  *
  * 1) The fourth argument is r10, not rcx. rcx is scratch in this ABI, and a
@@ -34,12 +48,33 @@
 #ifndef WINDCLONE_WCABI_H
 #define WINDCLONE_WCABI_H
 
+/* The dirent struct below needs fixed-width types, and a freestanding program
+ * has no reason to have included stdint.h before this header. gcc ships
+ * stdint.h for -ffreestanding builds, so both sides of the boundary get the
+ * same 8-byte uint64_t - which is the whole point of freezing a struct here. */
+#include <stdint.h>
+
 /* --- call numbers ----------------------------------------------------- */
 #define SYS_WRITE   1
 #define SYS_EXIT    2
 #define SYS_OPEN    3
 #define SYS_READ    4
 #define SYS_CLOSE   5
+#define SYS_GETDIRENT 6
+
+/* --- directory entries ------------------------------------------------- */
+/* One file's metadata, copied to the caller by SYS_GETDIRENT. Fixed size and
+ * fixed offsets because it crosses a privilege boundary: a program built for
+ * this kernel has to be able to lay the same bytes out without our headers.
+ * `name` has no leading '/' - the initrd stores it that way - and is always
+ * NUL-terminated inside the 64 bytes. */
+#define WC_NAME_MAX 64
+
+struct wc_dirent {
+    uint64_t size;
+    uint64_t namelen;               /* strlen(name), excluding the NUL */
+    char     name[WC_NAME_MAX];
+};
 
 /* --- the three standard descriptors ----------------------------------- */
 #define STDIN_FILENO   0

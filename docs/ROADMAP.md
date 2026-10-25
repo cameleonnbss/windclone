@@ -115,19 +115,53 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       re-mapped read-only — otherwise writing `.text` read-only faults on the
       very copy that fills it. Loading a program releases the previous one's
       frames first, so running two in a row cannot re-fill read-only pages.
+      A `PT_LOAD` with neither memory nor bytes — what `ld` emits for a program
+      with nothing writable — is skipped rather than treated as corruption.
       Known gaps: no NX (read-only code is still executable), one address
-      space shared with the kernel, no `argv`/`envp`/auxv on the stack.
+      space shared with the kernel, and `envp`/auxv are the empty placeholders
+      `argv` was extended with, not a feature yet.
       *(The roadmap called this the v0.1.0 milestone, but v0.1.0 was cut at
       Phase 5 — the loader therefore ships as v0.1.1)*
 
 ## Phase 5 — Shell & processes 🔄
 - [x] Text shell with line editing (a 64-byte IRQ queue, Enter/Backspace),
-      built-ins and a scrollback grid that survives repaints: `help`, `ls`,
-      `cat <file>`, `about`, `clear`
+      built-ins and a scrollback grid that survives repaints: `help`,
+      `about`, `clear`. `ls` and `cat` are no longer here, and that is the
+      point — they moved into `/bin` below
 - [x] `hello` starts `/bin/hello` from the initrd in ring 3 and returns to
       the prompt — a command that is a real program, not a built-in
-- [ ] More programs in the initrd (`cat`, `ls`, `echo` as ELF files rather
-      than built-ins), which needs the ELF loader
+- [x] More programs in the initrd (`cat`, `ls`, `echo` as ELF files rather
+      than built-ins), which needs the ELF loader. What it took, beyond
+      three `.c` files:
+      - **`argv` across the boundary.** `usermode_run()` now takes a command
+        line and `build_stack()` lays it out on the program's own stack in the
+        exact AMD64 psABI shape (`argc`, `argv[]`, `NULL`, empty `envp`,
+        `AT_NULL`), with the strings above it and the whole thing bounded by
+        `USER_ARG_MAX`/`USER_ARGV_BYTES` so "does not fit" is an answer
+        instead of a run off the bottom of a 16 KiB stack. `_start` is also
+        entered with `rdi=argc, rsi=argv`: registers are the convenient
+        contract, the stack is the honest one, and a Linux binary — Phase 7 —
+        reads the second and not the first.
+      - **A sixth syscall, `getdirent(6)`**, which copies one fixed-layout
+        `struct wc_dirent` (size, namelen, 64-byte name) by index and answers
+        `-ENOENT` past the last file. That is how `ls` finds the end without
+        the kernel ever learning what a directory is. The buffer is validated
+        (`PRESENT` + `USER` + `WRITE`) before the struct is filled, and the
+        kernel copies from its own stack, so the VFS never sees a ring-3
+        pointer.
+      - **`vfs_exists()`**, because the shell has to answer "is this word a
+        program?" without reaching into the initrd itself.
+      - **A console sink.** `vfs_set_console_sink()` routes a program's
+        `write(1)`/`write(2)` into the terminal grid, wrapping and flushing on
+        exit so nothing is lost. The serial port still receives every byte —
+        it is what CI greps — but a human only has the window.
+      - `/bin/ls` lists the archive (8 entries, sizes columned), `/bin/cat`
+        copies files or reports `-ENOENT` and exits `1`, `/bin/echo` prints
+        its arguments — and `echo zzz` coming back as `zzz` over a real
+        `sendkey`-typed command line is the proof the whole handover works.
+      - They share `src/user/wcstr.h`: five `static inline` helpers, because
+        `-nostdlib` means there is no `strlen`, no `memcpy`, and no archive to
+        link one from.
 - [ ] `fork`-like process creation, scheduler (priority round-robin)
 
 ## Phase 6 — Language expansion ⏳

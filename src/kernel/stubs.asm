@@ -203,12 +203,19 @@ tss_flush:
     ret
 
 ; --- enter ring 3 ----------------------------------------------------
-;   rdi = entry point, rsi = user stack pointer
+;   rdi = entry point, rsi = user stack pointer,
+;   rdx = argc, rcx = argv (what _start sees in rdi/rsi, see wcabi.h)
 ;
 ; iretq pops rip/cs/rflags/rsp/ss when it crosses to a lower privilege
 ; level, so the five words are pushed in reverse. RFLAGS.IF stays set:
 ; the timer must keep ticking in userland, and that first tick landing on
 ; a ring-3 stack is exactly what the TSS is for.
+;
+; argc/argv are moved into place only AFTER the frame is pushed: the
+; pushed rip and rsp are what the CPU loads, and rdi/rsi happen to hold
+; them, so overwriting the argument registers last keeps the handover
+; honest. The stack carries the same two values the psABI way, which is
+; what a Linux binary actually reads.
 ;
 ; The current rsp/rbp are stashed first so sys_exit() can come back here:
 ; a syscall cannot "return" through iretq to a kernel caller, it has to
@@ -225,6 +232,8 @@ usermode_enter:
     push qword 0x202         ; rflags: IF=1, bit 1 reserved-set
     push qword 0x23          ; cs = ring-3 code selector (0x20 | 3)
     push rdi                 ; rip
+    mov  rdi, rdx            ; _start(argc,
+    mov  rsi, rcx            ;        argv)
     iretq
 
 ; --- leave ring 3 and resume the kernel caller -----------------------

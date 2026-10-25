@@ -31,9 +31,23 @@
  * representable in a signed 32-bit int for later debugging. */
 #define USER_ADDR_LIMIT  0x80000000ULL
 
+/* A command line, as far as the stack builder is concerned: at most this many
+ * words, and at most this many bytes of text between them. Both are bounded so
+ * the copy below can say "this will not fit" instead of running off the bottom
+ * of a 16 KiB stack. */
+#define USER_ARG_MAX     8
+#define USER_ARGV_BYTES  224
+
 /* Returns 0 when the program ran to exit(), negative on a load failure.
- * `exit_code` receives what the program passed to exit(). */
-int usermode_run(const char *path, int *exit_code);
+ * `exit_code` receives what the program passed to exit().
+ *
+ * argv is the command line, argv[0] being the program's own name — the
+ * convention a program relies on to know how it was called. Passing NULL (or
+ * argc <= 0) means "run it with just its own name", which is what the boot
+ * self-check wants. The strings are copied into the program's stack, so the
+ * caller's own buffer may be a kernel static that dies right after. */
+int usermode_run(const char *path, int *exit_code, int argc,
+                 const char *const *argv);
 
 /* Called from the SYS_EXIT handler; does not return. */
 void usermode_exit(int code) __attribute__((noreturn));
