@@ -309,9 +309,11 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         never point at somebody new. The honest limitation stays written down:
         orphans exist until a shell is everyone's parent.
       - **What the process table is still not wired to: the desktop shell.**
-        `hello`, `ls`, `cat` and `echo` typed at the prompt still go through
-        `usermode_run()` — one program, run to completion, back to the prompt —
-        because the shell is kernel-side code and not itself a process. So
+        `hello`, `ls`, `cat` and `echo` — typed at the prompt *or* clicked in
+        the start menu, which went in later and changed nothing here — still go
+        through `usermode_run()`: one program, run to completion, back to the
+        prompt. That is because the shell is kernel-side code and not itself a
+        process. So
         those programs get real answers from `write`/`open`/`getdirent` and an
         honest refusal from the process verbs: `spawn` and `kill` answer
         `-WC_EPERM`, `wait` `-WC_ECHILD`, since pretending to have started
@@ -353,7 +355,21 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
 - [x] Headless proof: `tools/qemu-desktop.py` injects real PS/2 moves and
       clicks through the QEMU monitor and greps the kernel's `wm:` markers
 - [ ] Damage tracking + double buffer (a mouse move still repaints everything)
-- [ ] Start menu, and a launcher that starts programs from the initrd
+- [x] Start menu, and a launcher that starts programs from the initrd. The
+      rows are not written in `desktop.c`: opening the panel enumerates the
+      archive through `vfs_dirent()` and keeps the `bin/` entries, so a program
+      added to the initrd is launchable with the mouse without the desktop
+      hearing about it. A row click raises the terminal (that is where the
+      program's stdout goes) and calls the shell's own launcher, so a click and
+      a typed word resolve, run and report the same way — only the log says who
+      asked. The button that used to be "show desktop" got promoted to an action
+      row inside the menu, so nothing was dropped. Rows that do not fit the
+      screen are counted in the footer instead of being truncated into names
+      that do not exist. Proof: the kernel prints one `wm: menu row N name` per
+      program, `tools/local-test.sh` requires every `USER_BINS` name from the
+      Makefile to appear and `hidden 0`, and `tools/qemu-desktop.py menu` reads
+      the index of `hello` out of that log, clicks *that* row, and greps
+      `shell: launched 'hello' from the start menu` plus the program's own line
 - [x] Mouse driver: 8042 aux channel, IRQ12 (cascade unmasked), 3-byte
       packets with the sign bits in the flags byte — verified headlessly by
       injecting `mouse_move` through the QEMU monitor and grepping the

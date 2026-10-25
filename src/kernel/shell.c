@@ -151,11 +151,19 @@ static void shell_sink(const char *data, uint64_t len)
 /* --- running a program ----------------------------------------------- */
 #define PROGRAM_PATH_MAX 64
 
-/* Everything that is not a built-in is looked for in /bin, run with the rest
+/* The one path from a word to a running program. Both entry points — the
+ * keyboard prompt and the desktop's start menu — come through here, so a
+ * program started by a mouse click gets the same /bin lookup, the same
+ * terminal as its stdout and the same exit code as one typed by hand. `verb`
+ * and `origin` are the only difference, and they exist because a log that
+ * cannot tell the two apart cannot prove which one a test drove.
+ *
+ * Everything that is not a built-in is looked for in /bin, run with the rest
  * of the line as argv, and given the terminal as its console. That is the
  * difference between "the shell has commands" and "there is an OS": the
  * kernel never hears about a program's name beyond the path it opened. */
-static void cmd_program(int argc, const char *const *argv)
+static int launch(int argc, const char *const *argv,
+                  const char *verb, const char *origin)
 {
     char path[PROGRAM_PATH_MAX];
     int n = 0;
@@ -171,14 +179,19 @@ static void cmd_program(int argc, const char *const *argv)
         serial_write("shell: no program ");
         serial_write(path);
         serial_write("\n");
-        return;
+        return -1;
     }
 
-    /* The word the CI contract greps for: reaching this line means the
-     * keyboard decoded the command in order through the real IRQ path. */
-    serial_write("shell: running '");
+    /* The word the CI contract greps for: reaching this line with "running"
+     * means the keyboard decoded the command in order through the real IRQ
+     * path; with "launched" it means a mouse click reached the same code. */
+    serial_write("shell: ");
+    serial_write(verb);
+    serial_write(" '");
     serial_write(argv[0]);
-    serial_write("' from the prompt\n");
+    serial_write("' ");
+    serial_write(origin);
+    serial_write("\n");
 
     int code = -1;
     if (usermode_run(path, &code, argc, argv) != 0) {
@@ -186,7 +199,7 @@ static void cmd_program(int argc, const char *const *argv)
         serial_write("shell: failed to run ");
         serial_write(path);
         serial_write("\n");
-        return;
+        return -1;
     }
 
     /* Whatever the program printed that had no trailing newline is still in
@@ -203,6 +216,36 @@ static void cmd_program(int argc, const char *const *argv)
     serial_write(" exited with ");
     serial_write_dec((uint64_t)(code < 0 ? 0 : (unsigned)code));
     serial_write("\n");
+    return 0;
+}
+
+static void cmd_program(int argc, const char *const *argv)
+{
+    launch(argc, argv, "running", "from the prompt");
+}
+
+/* The desktop's start menu calls this with one of the names it read out of
+ * /bin. No arguments: a menu row is a program, not a command line. */
+int shell_launch(const char *name)
+{
+    if (name == NULL || name[0] == '\0')
+        return -1;
+
+    /* The prompt echoes its own line in execute(); the menu has to write the
+     * equivalent, or a program's output appears on screen with nothing saying
+     * which program produced it. */
+    char echo[SHELL_COLS + 1];
+    int n = 0;
+    for (const char *p = "DEMARRER : "; *p != '\0' && n < SHELL_COLS - 1; p++)
+        echo[n++] = *p;
+    for (int i = 0; name[i] != '\0' && n < SHELL_COLS - 1; i++)
+        echo[n++] = name[i];
+    echo[n] = '\0';
+    put_line(echo);
+
+    const char *argv[1];
+    argv[0] = name;
+    return launch(1, argv, "launched", "from the start menu");
 }
 
 static void cmd_about(void)

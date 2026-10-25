@@ -376,7 +376,24 @@ python3 tools/qemu-desktop.py windclone.iso maxmax
 python3 tools/qemu-desktop.py windclone.iso close
 python3 tools/qemu-desktop.py windclone.iso start
 
-# 6) kernel text console: the "vga: text console live" marker (checked in
+# 6) the start menu is the archive, not a picture of it. Every program the
+#    build puts into /bin must appear as a row (the kernel writes one
+#    "wm: menu row <n> <name>" line per entry), and clicking a row must run
+#    that program. The expected set comes from the Makefile, so a new program
+#    that forgot to register itself in the menu fails the run.
+echo '==> start menu (launcher)'
+python3 tools/qemu-desktop.py windclone.iso menu || fail 'start menu launch'
+MENU_LOG=${WM_LOG:-/tmp/wc-wm.log}
+for prog in $(sed -n 's/^USER_BINS := \(.*\)$/\1/p' Makefile | tr ' ' '\n' | sed 's|build/||'); do
+    grep -aqE "wm: menu row [0-9]+ $prog\$" "$MENU_LOG" \
+        || fail "start menu has no row for /bin/$prog"
+done
+# nothing may be left out on a screen this size: hidden must be zero, or the
+# rows above are only part of /bin and the loop proved nothing.
+grep -aqE 'wm: menu rows [0-9]+, hidden 0$' "$MENU_LOG" \
+    || fail 'start menu hid programs that fit nowhere'
+
+# 7) kernel text console: the "vga: text console live" marker (checked in
 #    the BIOS + UEFI logs above) proves the kernel mapped 0xB8000 through
 #    its OWN page tables and a text cell written there reads back intact.
 #    A composited GRAPHICAL terminal (Limine framebuffer + font) is tracked

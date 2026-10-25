@@ -17,6 +17,11 @@
  * buffer: a mouse move repaints everything, which is the next thing to
  * fix, not the thing to hide.
  *
+ * The DEMARRER button is a start menu, and the menu is a launcher: its rows
+ * are the /bin entries of the initrd, read back through the VFS every time
+ * the panel opens, and clicking one really runs that program. Nothing in
+ * this file knows a program's name.
+ *
  * The font is uppercase A-Z 0-9 with ":-.!" only, so interface strings
  * stay clear of apostrophes: an unknown glyph silently becomes a space.
  *
@@ -27,7 +32,9 @@
 #include "gfx.h"
 #include "log.h"
 #include "mouse.h"
+#include "serial.h"
 #include "shell.h"
+#include "vfs.h"
 
 #define C_WALL_TOP    gfx_rgb(0x0B, 0x2A, 0x63)
 #define C_WALL_BOTTOM gfx_rgb(0x1F, 0x6B, 0xD8)
@@ -299,6 +306,189 @@ static void draw_window(const struct window *w)
     gfx_frame(w->x, w->y, w->w, w->h, border);
 }
 
+/* --- start menu -------------------------------------------------------- */
+
+#define MENU_X        START_X
+#define MENU_W        236
+#define MENU_HEADER_H 30
+#define MENU_ITEM_H   22
+#define MENU_FOOTER_H 26
+#define MENU_GAP      6          /* air between the panel and the taskbar */
+#define MENU_MAX      16         /* rows the array can hold; menu_scan() also
+                                  * caps that by what the screen has room for */
+#define MENU_NAME_MAX 24
+
+/* Not a list written in this file: every row is a /bin entry of the initrd,
+ * read back through the VFS each time the panel opens. Add a program to the
+ * archive and it is launchable with the mouse without a line of desktop code
+ * changing — which is the only honest meaning of "a launcher for programs
+ * from the initrd". A hardcoded menu would be a screenshot of one. */
+static char menu_names[MENU_MAX][MENU_NAME_MAX];
+static int menu_count;    /* rows that hold a program */
+static int menu_hidden;   /* entries /bin has no row for */
+static int menu_open;
+
+/* Archive names come from initrd.c with no leading slash: "bin/hello",
+ * "etc/motd". Only files under bin/ are programs. */
+static int menu_is_program(const char *name)
+{
+    const char *p = "bin/";
+    for (int i = 0; p[i] != '\0'; i++)
+        if (name[i] != p[i])
+            return 0;
+    return name[4] != '\0';
+}
+
+static void menu_scan(int H)
+{
+    /* Rows the screen can actually hold, the header, the action row, the
+     * footer and the taskbar subtracted. A menu that overflowed the desktop
+     * would put its last programs where no click can reach them, and a
+     * launcher that quietly loses programs is worse than one that says so in
+     * the footer. */
+    int room = H - TASKBAR_H - MENU_GAP - MENU_HEADER_H - MENU_FOOTER_H
+               - MENU_ITEM_H;
+    room /= MENU_ITEM_H;
+    if (room > MENU_MAX)
+        room = MENU_MAX;
+    if (room < 0)
+        room = 0;
+
+    menu_count = 0;
+    menu_hidden = 0;
+
+    for (uint64_t i = 0; ; i++) {
+        struct wc_dirent de;
+        if (vfs_dirent(i, &de) < 0)
+            break;                     /* past the last entry: that is the end */
+        if (!menu_is_program(de.name))
+            continue;
+
+        const char *base = de.name + 4;
+        int l = 0;
+        while (base[l] != '\0')
+            l++;
+        /* A name with no room in a row stays out rather than being truncated
+         * into a name that does not exist: a menu that lies about what it
+         * will launch is worse than one that admits it is missing something. */
+        if (l >= MENU_NAME_MAX || menu_count >= room) {
+            menu_hidden++;
+            continue;
+        }
+        for (int k = 0; k <= l; k++)
+            menu_names[menu_count][k] = base[k];
+        /* One line per program on the serial port, not in the log ring: the
+         * ring is 48 messages deep and a menu of a dozen would flush the boot
+         * evidence out of it, while the file a test greps keeps everything. */
+        serial_write("wm: menu row ");
+        serial_write_dec((uint64_t)menu_count);
+        serial_write(" ");
+        serial_write(base);
+        serial_write("\n");
+        menu_count++;
+    }
+
+    /* Both halves of the number, so a test can prove the panel showed the
+     * whole of /bin rather than the part that was convenient to draw. */
+    serial_write("wm: menu rows ");
+    serial_write_dec((uint64_t)menu_count);
+    serial_write(", hidden ");
+    serial_write_dec((uint64_t)menu_hidden);
+    serial_write("\n");
+}
+
+/* The panel grows upward from the button it came from. Drawing and hit
+ * testing both go through these two helpers, so a row can never be clickable
+ * somewhere other than where it is painted. */
+static int menu_height(void)
+{
+    return MENU_HEADER_H + (menu_count + 1) * MENU_ITEM_H + MENU_FOOTER_H;
+}
+
+static int menu_top(int H)
+{
+    return H - TASKBAR_H - menu_height() - MENU_GAP;
+}
+
+/* 0..menu_count-1 = a program, menu_count = the show-desktop row, -1 = inside
+ * the panel but not on a row, -2 = outside it. */
+static int menu_row_at(int mx, int my, int H)
+{
+    int top = menu_top(H);
+    if (mx < MENU_X || mx >= MENU_X + MENU_W ||
+        my < top || my >= top + menu_height())
+        return -2;
+    for (int i = 0; i <= menu_count; i++) {
+        int ry = top + MENU_HEADER_H + i * MENU_ITEM_H;
+        if (my >= ry && my < ry + MENU_ITEM_H)
+            return i;
+    }
+    return -1;
+}
+
+/* The 5x7 font takes strings, not numbers, so a count has to be spelled into
+ * a buffer before it can be drawn. Returns the new length. */
+static int append_num(char *line, int n, int cap, int v)
+{
+    char digits[8];
+    int d = 0;
+    do {
+        digits[d++] = (char)('0' + (v % 10));
+        v /= 10;
+    } while (v != 0 && d < (int)sizeof digits);
+    while (d > 0 && n < cap - 1)
+        line[n++] = digits[--d];
+    return n;
+}
+
+static int append_text(char *line, int n, int cap, const char *s)
+{
+    for (int i = 0; s[i] != '\0' && n < cap - 1; i++)
+        line[n++] = s[i];
+    return n;
+}
+
+static void draw_menu(int H)
+{
+    int top = menu_top(H);
+    int hot = menu_row_at(mouse_x(), mouse_y(), H);
+
+    gfx_fill(MENU_X, top, MENU_W, menu_height(), gfx_rgb(0x0D, 0x11, 0x17));
+    gfx_frame(MENU_X, top, MENU_W, menu_height(), gfx_rgb(0x2B, 0x36, 0x48));
+    gfx_fill(MENU_X, top, MENU_W, 2, C_ACCENT);
+
+    draw_logo(MENU_X + 12, top + 10, 6, 3);
+    gfx_text(MENU_X + 36, top + 12, "PROGRAMMES /BIN", C_WHITE, 1);
+
+    for (int i = 0; i < menu_count; i++) {
+        int ry = top + MENU_HEADER_H + i * MENU_ITEM_H;
+        if (i == hot)
+            gfx_fill(MENU_X + 3, ry, MENU_W - 6, MENU_ITEM_H, C_TITLE_HOT);
+        gfx_text(MENU_X + 16, ry + 8, menu_names[i], C_WHITE, 1);
+    }
+
+    /* One action under the programs: the button that used to BE this menu
+     * still does what it did, it just lives in the panel now. */
+    int ay = top + MENU_HEADER_H + menu_count * MENU_ITEM_H;
+    gfx_fill(MENU_X + 3, ay - 1, MENU_W - 6, 1, gfx_rgb(0x2B, 0x36, 0x48));
+    if (hot == menu_count)
+        gfx_fill(MENU_X + 3, ay, MENU_W - 6, MENU_ITEM_H, C_TITLE_HOT);
+    gfx_text(MENU_X + 16, ay + 8, "AFFICHER LE BUREAU", C_WHITE, 1);
+
+    /* The count is the claim: this panel is /bin, not a handful of names a
+     * desktop happened to be written with. */
+    char line[48];
+    int n = append_num(line, 0, (int)sizeof line, menu_count);
+    n = append_text(line, n, (int)sizeof line, " PROGRAMMES");
+    if (menu_hidden > 0) {
+        n = append_text(line, n, (int)sizeof line, "  +");
+        n = append_num(line, n, (int)sizeof line, menu_hidden);
+        n = append_text(line, n, (int)sizeof line, " CACHES");
+    }
+    line[n] = '\0';
+    gfx_text(MENU_X + 16, ay + MENU_ITEM_H + 8, line, C_MUTED, 1);
+}
+
 static void draw_taskbar(int W, int H)
 {
     int y = H - TASKBAR_H;
@@ -308,7 +498,10 @@ static void draw_taskbar(int W, int H)
     gfx_fill(0, y, W, TASKBAR_H, C_TASKBAR);
     gfx_fill(0, y, W, 2, C_ACCENT);
 
-    int start_hot = mx >= START_X && mx < START_X + START_W && my >= y;
+    /* Open means lit: a taskbar button whose menu is on screen has to look
+     * like it, or the panel appears to belong to nothing. */
+    int start_hot = menu_open ||
+                    (mx >= START_X && mx < START_X + START_W && my >= y);
     gfx_fill(START_X, y + 8, START_W, 28,
              start_hot ? C_TITLE_HOT : gfx_rgb(0x16, 0x1B, 0x22));
     draw_logo(START_X + 8, y + 14, 7, 3);
@@ -348,7 +541,8 @@ static int task_button_at(int mx, int my, int H)
     return -2;               /* on the bar, but not on a button */
 }
 
-/* DEMARRER = show desktop: hide every window, or bring them all back. */
+/* Show desktop: hide every window, or bring them all back. Reached from the
+ * start menu's action row — the DEMARRER button itself opens the menu. */
 static void toggle_show_desktop(void)
 {
     int anything_shown = 0;
@@ -363,13 +557,60 @@ static void toggle_show_desktop(void)
     klog(anything_shown ? "wm: show desktop" : "wm: windows restored");
 }
 
-/* One mouse press, resolved in the order a desktop user means it:
- * taskbar, then title bars, then window bodies, then icons. */
+/* One mouse press, resolved in the order a desktop user means it: an open
+ * menu first, then the taskbar, then title bars, then window bodies, then
+ * icons. */
 static void handle_press(int mx, int my, int W, int H)
 {
+    /* The menu owns the screen while it is open. A row runs its action; a
+     * click anywhere else closes the panel and stops there — the click that
+     * dismisses a menu does not fall through to whatever is underneath it,
+     * which is what makes a menu safe to click away from. */
+    if (menu_open) {
+        int row = menu_row_at(mx, my, H);
+        if (row == -2) {
+            menu_open = 0;
+            klog("wm: start menu closed");
+            return;
+        }
+        if (row < 0)
+            return;                        /* frame, header, footer */
+        if (row == menu_count) {
+            menu_open = 0;
+            toggle_show_desktop();
+            return;
+        }
+
+        /* Copy the name: shell_launch() does not return until the program has
+         * exited, and the panel must already be gone by then — a menu left on
+         * screen during a run would be a picture of a state that ended. */
+        char name[MENU_NAME_MAX];
+        for (int i = 0; i < MENU_NAME_MAX; i++) {
+            name[i] = menu_names[row][i];
+            if (name[i] == '\0')
+                break;
+        }
+        menu_open = 0;
+
+        /* The program's stdout is the terminal window. Showing it is the
+         * difference between a launch a user can see and a launch the log
+         * alone remembers. */
+        wins[WIN_TERM].open = 1;
+        wins[WIN_TERM].min = 0;
+        raise_window(WIN_TERM);
+
+        shell_launch(name);
+        return;
+    }
+
     if (my >= H - TASKBAR_H) {
         if (mx >= START_X && mx < START_X + START_W) {
-            toggle_show_desktop();
+            /* Scanned on the way in, not cached from boot: the menu is the
+             * archive as it is now, so a program added to the initrd appears
+             * in the panel without anything here changing. */
+            menu_scan(H);
+            menu_open = 1;
+            klog("wm: start menu opened, %d programs", menu_count);
             return;
         }
         int id = task_button_at(mx, my, H);
@@ -536,5 +777,7 @@ void desktop_frame(void)
     }
 
     draw_taskbar(W, H);
+    if (menu_open)
+        draw_menu(H);                  /* above the windows: it asked for them */
     draw_cursor(mx, my);
 }

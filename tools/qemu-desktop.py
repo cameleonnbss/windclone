@@ -13,7 +13,12 @@ Scenarios (each one asserts the serial markers the kernel prints):
     minimize   minimise the terminal, restore it from the taskbar
     maxmax     maximise the terminal, then restore it
     close      close the status window, reopen it from a desktop icon
-    start      DEMARRER hides every window; pressing it again brings them back
+    start      DEMARRER opens the menu, its action row shows the desktop,
+               and a click outside the panel dismisses it
+    menu       open the menu, find the row the kernel listed for /bin/hello,
+               click it, and check the program really ran
+    menushot   open the menu and leave it open — this one exists to be
+               screenshotted (docs/screenshots/start-menu.png)
 
 Exit status 0 = every step did what the serial log says it did.
 SPDX-License-Identifier: MIT
@@ -37,6 +42,8 @@ BTN_W, BTN_DY, BTN_H = 26, 8, 18
 TASK_X, TASK_W, TASK_GAP = 132, 168, 6
 START_X, START_W = 12, 110
 ICON_X, ICON_W = 28, 52
+MENU_X, MENU_W = START_X, 236
+MENU_HEADER_H, MENU_ITEM_H, MENU_FOOTER_H, MENU_GAP = 30, 22, 26, 6
 
 
 class Monitor:
@@ -121,6 +128,43 @@ def task_button_x(slot, count):
     return TASK_X + slot * (TASK_W + TASK_GAP) + TASK_W // 2
 
 
+def wait_serial(pattern, timeout=25.0):
+    """Poll the serial file until `pattern` matches. A click that opens the
+    menu makes the kernel enumerate /bin before it repaints, and the row a
+    test wants to click is only known once those lines exist — so this waits
+    for the log, not for a guessed delay."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        text = ""
+        try:
+            with open(LOG, errors="replace") as fh:
+                text = fh.read()
+        except OSError:
+            pass
+        m = re.search(pattern, text)
+        if m:
+            return m
+        time.sleep(0.25)
+    raise SystemExit("serial never said %s (%s)" % (pattern, LOG))
+
+
+def menu_layout(H):
+    """(top, rows) of the start menu. The panel is anchored above the taskbar
+    and grows upward, and its height depends on how many programs the kernel
+    listed — so the geometry comes from the kernel's own count line instead of
+    being assumed by the test."""
+    rows = int(wait_serial(r"wm: menu rows (\d+), hidden (\d+)").group(1))
+    height = MENU_HEADER_H + (rows + 1) * MENU_ITEM_H + MENU_FOOTER_H
+    return H - TASKBAR_H - height - MENU_GAP, rows
+
+
+def menu_row_y(H, index):
+    """Centre y of row `index`; `index == rows` is the action row under the
+    programs, which is what `index=rows` means when this is called."""
+    top, rows = menu_layout(H)
+    return top + MENU_HEADER_H + index * MENU_ITEM_H + MENU_ITEM_H // 2
+
+
 def scenario_actions(sc, mon, W, H):
     tx, ty = W - min(TERM_W, W - 40) - 48, H - TASKBAR_H - TERM_H - 60
     tw = min(TERM_W, W - 40)
@@ -142,8 +186,28 @@ def scenario_actions(sc, mon, W, H):
         mon.click(*title_button(status, 2))                     # close status
         mon.click(ICON_X + ICON_W // 2, 28 + 30)                # ORDINATEUR icon
     elif sc == "start":
-        mon.click(START_X + START_W // 2, H - TASKBAR_H + 22)   # DEMARRER
-        mon.click(START_X + START_W // 2, H - TASKBAR_H + 22)   # ...and back
+        btn = (START_X + START_W // 2, H - TASKBAR_H + 22)
+        mon.click(*btn)                                  # open the menu
+        action = menu_row_y(H, menu_layout(H)[1])        # the action row
+        mon.click(MENU_X + MENU_W // 2, action)          # AFFICHER LE BUREAU
+        mon.click(*btn)                                  # open it again
+        mon.click(MENU_X + MENU_W // 2, action)          # ...and back
+        mon.click(*btn)                                  # open a third time
+        mon.click(W - 60, 30)                            # click the empty
+                                                         # desktop to dismiss
+    elif sc == "menu":
+        mon.click(START_X + START_W // 2, H - TASKBAR_H + 22)
+        # Which row is /bin/hello? The kernel says, one line per program:
+        #     wm: menu row 3 hello
+        # Reading the index out of the log is what makes this a test of the
+        # launcher and not a test of a coordinate the test guessed.
+        idx = int(wait_serial(r"wm: menu row (\d+) hello\n").group(1))
+        mon.click(MENU_X + MENU_W // 2, menu_row_y(H, idx))
+        time.sleep(1.0)
+    elif sc == "menushot":
+        mon.click(START_X + START_W // 2, H - TASKBAR_H + 22)
+        wait_serial(r"wm: start menu opened")   # the panel is up before the
+        time.sleep(0.5)                          # screenshot is taken
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -156,7 +220,13 @@ MARKERS = {
     "minimize":  ["wm: window minimised", "wm: window restored from taskbar"],
     "maxmax":    ["wm: window maximised", "wm: window restored"],
     "close":     ["wm: window closed", "wm: window opened from icon"],
-    "start":     ["wm: show desktop", "wm: windows restored"],
+    "start":     ["wm: start menu opened", "wm: show desktop",
+                  "wm: windows restored", "wm: start menu closed"],
+    # a click on a row the kernel listed itself: the name reaches the log
+    # twice, once as the menu's content and once as a program that ran
+    "menu":      ["wm: menu row", "shell: launched 'hello' from the start menu",
+                  "shell: hello ran and returned", "hello from ring 3"],
+    "menushot":  ["wm: start menu opened", "wm: menu rows"],
 }
 
 

@@ -12,6 +12,14 @@ buttons and desktop icons](docs/screenshots/desktop.png)
 terminal focused and running `/bin/hello` from the initrd in ring 3.
 Screenshot taken by the test suite itself (`tools/qemu-desktop.py`).*
 
+![WindClone start menu: twelve program rows read out of /bin in the initrd,
+above the DEMARRER button](docs/screenshots/start-menu.png)
+
+*The start menu, opened by one click on DEMARRER. Every row is a `/bin`
+entry that the kernel enumerated from the initrd at that moment — clicking
+one runs it. The test suite clicks a row it found in its own serial log and
+checks the program answered (`tools/qemu-desktop.py menu`).*
+
 **WindClone** is a hobby operating system project. Nothing is copied from
 Linux or Windows: the kernel is written by us in C (with assembly for the
 earliest stages), and Rust / C++ are planned for drivers and userland as the
@@ -125,6 +133,14 @@ On boot the kernel:
    trap frame, so it rides the exit arm and does not return. CI proves both by
    absence as well as presence: `[bell] done` and `[vanish] STILL HERE` must
    **not** be in the log, while the reaped pid and its `-9` must.
+17. opens a **start menu** that is a launcher, not a picture of one: the rows
+   are the `/bin` entries of the initrd, enumerated through the VFS each time
+   the panel opens, so a program added to the archive is clickable without the
+   desktop knowing its name. Clicking a row runs that program through the same
+   path the command prompt uses — same lookup, same terminal for its output,
+   same exit code — and the test proves it by reading the row index out of the
+   kernel's own log line and clicking *that*, then checking `/bin/hello`
+   answered. Nothing in `desktop.c` contains a program name.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

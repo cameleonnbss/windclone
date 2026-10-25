@@ -17,6 +17,14 @@ void shell_init(void);
 /* Feed one key from keyboard_take_char(). */
 void shell_key(int c);
 
+/* Start /bin/<name> for good: the same lookup, the same terminal as its
+ * stdout and the same exit-code line as a word typed at the prompt — only
+ * the log says who asked. This is what the desktop's start menu calls, so a
+ * mouse click runs a program instead of describing one. Blocks until the
+ * program exits: it is called from the idle loop, never from an IRQ.
+ * 0 = the program ran, -1 = no such program or the loader refused it. */
+int shell_launch(const char *name);
+
 /* Paint the grid at (x,y); `width` is for wrapping the input line. */
 void shell_draw(int x, int y, int width);
 
