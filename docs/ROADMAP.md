@@ -308,6 +308,18 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         *not* resetting `next_pid`, so pids are never reused and a stale pid can
         never point at somebody new. The honest limitation stays written down:
         orphans exist until a shell is everyone's parent.
+      - **What the process table is still not wired to: the desktop shell.**
+        `hello`, `ls`, `cat` and `echo` typed at the prompt still go through
+        `usermode_run()` — one program, run to completion, back to the prompt —
+        because the shell is kernel-side code and not itself a process. So
+        those programs get real answers from `write`/`open`/`getdirent` and an
+        honest refusal from the process verbs: `spawn` and `kill` answer
+        `-WC_EPERM`, `wait` `-WC_ECHILD`, since pretending to have started
+        something nobody would schedule is worse than refusing (a `spawn` that
+        only allocated an address space and left the child `READY` forever
+        looked exactly like a working feature). Giving the shell a slot in the
+        table — so a terminal window becomes every program's parent and the
+        orphan case above disappears — is the rest of this phase.
 
 ## Phase 6 — Language expansion ⏳
 *Goal: use the right tool per layer (the "asm/C/C++/Rust" promise).*

@@ -168,13 +168,23 @@ static int64_t sys_getdirent(uint64_t index, uint64_t up)
  * A static arena rather than the stack because USER_ARG_MAX × USER_PATH_MAX
  * is a KiB-scale request and a syscall handler should not grow that per call.
  * argc <= 0 keeps the old path-only contract: the child runs as its own name,
- * exactly like the boot demos' NULL argv. */
+ * exactly like the boot demos' NULL argv.
+ *
+ * Outside the scheduler there is nothing that would ever run the child: the
+ * desktop shell starts one program at a time through usermode_run(), so a
+ * spawn from a prompt would allocate an address space, hand back a pid, and
+ * leave that process READY forever — a leak that also looks like a feature.
+ * Answer -WC_EPERM instead, the same honest refusal wait() and kill() already
+ * give, until the shell itself is a process. */
 static char spawn_argbuf[USER_ARG_MAX][USER_PATH_MAX];
 static const char *spawn_argv[USER_ARG_MAX];
 
 static int64_t sys_spawn(uint64_t upath, uint64_t argc, uint64_t uargv)
 {
     char path[USER_PATH_MAX];
+
+    if (!proc_scheduler_active())
+        return WC_EPERM;
 
     if (!user_ptr_ok(upath, 1, 0))
         return WC_EFAULT;

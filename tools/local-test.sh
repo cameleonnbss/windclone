@@ -99,7 +99,8 @@ sleep 6
 send_keys /tmp/wc-biosmon a b ret h e l l o ret \
     l s ret \
     e c h o spc z z z ret \
-    c a t spc slash e t c slash i s s u e ret
+    c a t spc slash e t c slash i s s u e ret \
+    r e a p e r ret
 wait $BIOPID 2>/dev/null || true
 for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "vga: text console live" "kmalloc selftest ok" "step: heap ok" \
@@ -128,7 +129,11 @@ for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "shell: running 'echo'" "zzz" \
             "shell: echo ran and returned" \
             "shell: running 'cat'" "0.0.4 - initrd live" \
-            "shell: cat ran and returned" "shell: cat exited with 0"; do
+            "shell: cat ran and returned" "shell: cat exited with 0" \
+            "shell: running 'reaper'" \
+            "\\[reaper\\] spawned pid -1" \
+            "\\[reaper\\] wait again -> -10" \
+            "shell: reaper ran and returned"; do
     grep -aq "$want" /tmp/wc-bios.log || fail "BIOS log missing: $want"
 done
 
