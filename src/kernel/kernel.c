@@ -570,6 +570,28 @@ void kmain(void)
                     proc_run_all();
                     serial_write("step: wait ok (spawn with argv + blocking wait + reaping)\n");
                 }
+
+                /* The fourth verb. wait() lets a parent react to a death; kill()
+                 * lets it cause one. /bin/reaper spawns /bin/bell — a child that
+                 * runs for seconds and never quits by itself — yields so the bell
+                 * demonstrably lives, and kills it: the victim is off-CPU (READY
+                 * or BLOCKED) by definition, so the kernel retires it where it
+                 * stands, frees its address space, marks the zombie EXITED with
+                 * code -SIGKILL and wakes the parent's wait(). The reaped pid and
+                 * the -9 are the proof, and the missing "[bell] done" is the
+                 * other half of it. /bin/vanish covers the case that cannot be
+                 * done in place — killing yourself holds the CPU and the frame,
+                 * so it routes through the exit arm and never returns; its
+                 * second line must therefore never appear. */
+                {
+                    const char *argv_r[1] = { "reaper" };
+                    const char *argv_v[1] = { "vanish" };
+                    serial_write("proc: a parent that kills, and a process that ends itself\n");
+                    proc_create("/bin/reaper", 1, argv_r, 0);
+                    proc_create("/bin/vanish", 1, argv_v, 0);
+                    proc_run_all();
+                    serial_write("step: kill ok (SIGKILL ends a process, its parent reaps it)\n");
+                }
             }
             if ((int)(last_second / 100) >= dump_at_second) {
                 serial_write("log ring (most recent): ");

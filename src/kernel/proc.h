@@ -108,6 +108,30 @@ void proc_exit(struct syscall_frame *f, int code);
  * while the scheduler is driving the CPU. */
 int  proc_wait(struct syscall_frame *f, uint64_t uout);
 
+/* kill(pid, sig) from ring 3 — one process ending another. Only SIGKILL is
+ * implemented (there is no delivery, no masking, no handler: this is
+ * termination, not Unix in full, and the roadmap says so).
+ *
+ * The kill is *synchronous*, and the reason it can be is worth stating: the
+ * killer is the running process, so any other target is by definition NOT on
+ * the CPU — it is READY or BLOCKED, holding only a saved frame and memory no
+ * CR3 points at. That means the kernel can retire it in place exactly as an
+ * exiting process retires itself (free its address space, mark it EXITED with
+ * code -SIGKILL, wake its parent) without touching a trap frame at all.
+ * Deferring death to the victim's next syscall boundary would have needed a
+ * "owed" flag and would leave a compute loop unkillable; killing a running
+ * process asynchronously instead means surgery on the tick's frame. Neither
+ * is necessary, so neither is done.
+ *
+ * Killing yourself is the one case that is not in-place: it goes through the
+ * exit arm of the switch, so it does not return.
+ *
+ * Returns 0, -WC_EINVAL (a signal other than SIGKILL), -WC_ESRCH (no such
+ * pid, or a pid already exited and awaiting its parent's wait — a zombie
+ * cannot be killed twice) or -WC_EPERM (not under the scheduler, so there is
+ * no table to kill from). */
+int  proc_kill(int pid, int sig, struct syscall_frame *f);
+
 /* The pid of the running process, or 0 when the scheduler is not driving
  * anything (so the shell's own ring-3 runs report a plain, honest 0). */
 int  proc_current_pid(void);

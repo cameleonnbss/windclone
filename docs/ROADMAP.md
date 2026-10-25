@@ -159,7 +159,7 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         copies files or reports `-ENOENT` and exits `1`, `/bin/echo` prints
         its arguments — and `echo zzz` coming back as `zzz` over a real
         `sendkey`-typed command line is the proof the whole handover works.
-      - They share `src/user/wcstr.h`: five `static inline` helpers, because
+      - They share `src/user/wcstr.h`: eight `static inline` helpers, because
         `-nostdlib` means there is no `strlen`, no `memcpy`, and no archive to
         link one from.
 - [x] `fork`-like process creation, scheduler (priority round-robin). This was
@@ -196,7 +196,8 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         Policy is round-robin over the READY set with a numeric priority as the
         tie-break (lower runs first). `wait(10)` was reserved in `wcabi.h` and
         at first deliberately **not wired** — it fell through to "unknown call"
-        rather than pretending to block. It is now real; see the last bullets.
+        rather than pretending to block. It is now real, and `kill(11)` joined
+        it; see the last bullets.
       - **`/bin/tick` proves the cooperative switch, and so does CI.** The demo
         spawns two copies of one binary with different `argv` labels; each
         prints a line and yields in turn, each resuming its own counter after
@@ -269,6 +270,44 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         so moving the demo does not rot the check) and asserts the spawn pid,
         the child's own `[exit] code N pid P`, and the parent's `reaped pid P
         code N` all agree for both children, order-free.
+      - **`kill(pid, sig)` (v0.1.6)** — the fourth verb, and the first syscall
+        that edits *somebody else's* entry in the process table. Only `SIGKILL`
+        exists: there is no delivery, no masking and no handler, so this is
+        termination rather than Unix in full, and `WC_ESRCH (-3)` was added to
+        the frozen error table for "no such process". The implementation is
+        **synchronous**, and the reason is worth keeping: the killer is the
+        running process, so every other target is by definition off-CPU — READY
+        or BLOCKED, holding a saved frame and an address space no `CR3` points
+        at — which lets `proc_kill()` retire it where it stands exactly as an
+        exiting process retires itself (`proc_free_space`, slot `EXITED` with
+        code `-SIGKILL`, `wake_parent`) without touching a trap frame. Two
+        alternatives were rejected: deferring death to the victim's next syscall
+        needs an "owed" flag and leaves a compute loop unkillable, and killing a
+        *running* process asynchronously means surgery on the tick's frame.
+        Self-kill is the one case that cannot be in-place — the victim holds the
+        CPU and the frame the `iretq` is about to pop — so it routes through the
+        `SWITCH_EXIT` arm and does not return. `wake_parent()` became a function
+        for this: an exit and a kill owe the parent exactly the same promise.
+      - **`/bin/bell`, `/bin/reaper`, `/bin/vanish`.** The victim is a child that
+        works for seconds and never quits by itself, so a kill that lands is the
+        only way it stops; the parent yields first to prove it was alive. The
+        evidence is deliberately half absence: `[bell] done` and `[vanish] STILL
+        HERE` must **not** appear, while the spawn pid, the bell's own `getpid()`,
+        the kernel's `proc: killed pid P (SIGKILL) by pid Q`, and the parent's
+        `reaped pid P code -9` must all name the same process. The three error
+        answers are checked too — `-WC_ESRCH` for a pid already reaped,
+        `-WC_EINVAL` for a signal that does not exist, `-WC_ECHILD` for a
+        `wait()` with nothing left to wait for.
+      - **The table now gets swept, or the boot demos would have run it dry.**
+        An `EXITED` slot whose parent is gone as well (a boot-spawned process,
+        or an orphan — there is no `init` to re-parent to yet) can never be
+        reaped, and `PROC_MAX` is 8: four demo blocks each leaking two or three
+        slots exhausts the table mid-boot. `proc_run_all()` now calls
+        `proc_table_sweep()` on the way home, freeing every leftover (an
+        orphaned `BLOCKED` sleeper still owns its pages) while deliberately
+        *not* resetting `next_pid`, so pids are never reused and a stale pid can
+        never point at somebody new. The honest limitation stays written down:
+        orphans exist until a shell is everyone's parent.
 
 ## Phase 6 — Language expansion ⏳
 *Goal: use the right tool per layer (the "asm/C/C++/Rust" promise).*

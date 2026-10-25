@@ -281,6 +281,15 @@ void syscall_handler(struct syscall_frame *f)
         f->rax = (uint64_t)proc_wait(f, f->rdi);
         break;
 
+    case SYS_KILL:
+        /* Ending somebody else is a table edit, not a switch — the victim is by
+         * definition not on the CPU, so the call returns into the killer with
+         * 0 or -WC_ESRCH/-WC_EINVAL like any other. The exception is self-kill:
+         * proc_kill() routes that through the exit arm and never returns, so
+         * the assignment below simply does not happen for the caller. */
+        f->rax = (uint64_t)proc_kill((int)f->rdi, (int)f->rsi, f);
+        break;
+
     case SYS_EXIT:
         /* Under the scheduler, exit retires the process and moves on; it only
          * "returns" into the next context. Outside it (a shell command) there

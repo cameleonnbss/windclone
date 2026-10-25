@@ -235,6 +235,54 @@ grep -Fq "[waiter] reaped pid $P9 code 9" /tmp/wc-bios.log \
 { grep -aq 'sched: deadlock' /tmp/wc-bios.log \
   && fail "scheduler deadlocked — a waiter was never woken"; } || true
 echo '    ok: wait — spawn with argv, blocking wait, wake-up, zombie reaping'
+
+# The fourth verb. /bin/reaper spawns /bin/bell (a child that runs for seconds
+# and never quits on its own), yields so it demonstrably lives, kills it, and
+# reaps it. /bin/vanish covers self-kill, the one case that cannot be done as a
+# table edit. As in the wait demo, pids are READ back from the log instead of
+# hardcoded — and here the cross-checks are the whole point: the pid the kernel
+# handed the parent on spawn must be the pid the child printed for itself, the
+# pid the kill names, and the pid wait() returns, with the code the kernel
+# marked (-SIGKILL). Two claims are absences, and they are the ones that prove
+# the kill actually stopped something: the bell never reached its final line,
+# and vanish never came back from a call that is not supposed to return.
+for want in "proc: a parent that kills, and a process that ends itself" \
+            "proc: spawned /bin/bell as pid" \
+            "\\[reaper\\] spawned pid" \
+            "\\[bell\\] ringing pid" "\\[bell\\] round 1" \
+            "proc: killed pid" "\\[reaper\\] kill" \
+            "\\[reaper\\] reaped pid" \
+            "\\[reaper\\] kill again -> -3" \
+            "\\[reaper\\] kill sig 1 -> -22" \
+            "\\[reaper\\] wait again -> -10" \
+            "\\[reaper\\] child killed and reaped" \
+            "\\[vanish\\] bye pid" \
+            "step: kill ok (SIGKILL ends a process, its parent reaps it)"; do
+    grep -aq "$want" /tmp/wc-bios.log || fail "BIOS log missing: $want"
+done
+KID=$(grep -aF '[reaper] spawned pid' /tmp/wc-bios.log | sed 's/.*pid \(-\?[0-9]*\).*/\1/')
+[ -n "$KID" ] || fail "the reaper's child has no pid to follow"
+grep -Fq "[bell] ringing pid $KID" /tmp/wc-bios.log \
+    || fail "the bell's own getpid() ($KID expected) does not match what spawn returned"
+grep -Fq "[reaper] kill $KID -> 0" /tmp/wc-bios.log \
+    || fail "kill() did not answer 0 for the pid spawn handed back"
+grep -Fq "proc: killed pid $KID (SIGKILL)" /tmp/wc-bios.log \
+    || fail "the kernel did not report killing $KID"
+grep -Fq "[reaper] reaped pid $KID code -9" /tmp/wc-bios.log \
+    || fail "wait() did not return the killed child with code -SIGKILL"
+# The killed child must not have run to its own ending, and the self-killed
+# process must not have returned from the call that ends it.
+{ grep -aqF '[bell] done' /tmp/wc-bios.log \
+  && fail "the bell finished on its own — kill() did not stop it"; } || true
+{ grep -aqF '[vanish] STILL HERE' /tmp/wc-bios.log \
+  && fail "self-kill returned into the process instead of ending it"; } || true
+VPID=$(grep -aF '[vanish] bye pid' /tmp/wc-bios.log | sed 's/.*pid \([0-9]*\).*/\1/')
+[ -n "$VPID" ] || fail "vanish printed no pid"
+grep -Fq "proc: killed pid $VPID (SIGKILL)" /tmp/wc-bios.log \
+    || fail "the kernel did not report vanish's self-kill of $VPID"
+{ grep -aq 'sched: deadlock' /tmp/wc-bios.log \
+  && fail "scheduler deadlocked — a kill woke nobody"; } || true
+echo '    ok: kill — SIGKILL ends a running child, its parent reaps code -9'
 echo '    ok: BIOS boot — memory, interrupts, PCI, keyboard (sendkey), log ring'
 
 # 3) UEFI boot (OVMF), same contract minus the PIC-specific line.
@@ -282,9 +330,21 @@ else
                 "\\[waiter\\] reaped pid" \
                 "\\[waiter\\] all children reaped" \
                 "step: wait ok (spawn with argv + blocking wait + reaping)" \
+                "\\[reaper\\] spawned pid" "\\[bell\\] ringing pid" \
+                "\\[reaper\\] kill" "\\[reaper\\] reaped pid" \
+                "\\[reaper\\] child killed and reaped" \
+                "\\[vanish\\] bye pid" \
+                "step: kill ok (SIGKILL ends a process, its parent reaps it)" \
                 "gfx: framebuffer" "gfx: desktop composited"; do
         grep -aq "$want" /tmp/wc-uefi.log || fail "UEFI log missing: $want"
     done
+    UKID=$(grep -aF '[reaper] spawned pid' /tmp/wc-uefi.log | sed 's/.*pid \(-\?[0-9]*\).*/\1/')
+    grep -Fq "[reaper] reaped pid $UKID code -9" /tmp/wc-uefi.log \
+        || fail "UEFI: wait() did not return the killed child with code -SIGKILL"
+    { grep -aqF '[bell] done' /tmp/wc-uefi.log \
+      && fail "UEFI: the bell finished on its own — kill() did not stop it"; } || true
+    { grep -aqF '[vanish] STILL HERE' /tmp/wc-uefi.log \
+      && fail "UEFI: self-kill returned instead of ending the process"; } || true
     { grep -aq 'sched: deadlock' /tmp/wc-uefi.log \
       && fail "UEFI run deadlocked — a waiter was never woken"; } || true
     echo '    ok: UEFI boot — same memory + device stack comes up identically'

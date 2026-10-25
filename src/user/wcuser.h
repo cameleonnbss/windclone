@@ -1,7 +1,7 @@
 /* WindClone — the program's side of the syscall boundary.
  *
- * A freestanding program has no libc, so these three inline wrappers are the
- * whole standard library for now. They are correct only because of one fact
+ * A freestanding program has no libc, so these inline wrappers are the whole
+ * standard library for now. They are correct only because of one fact
  * about this kernel's entry path, worth stating before anyone "optimises" it:
  *
  *   int 0x80 lands in syscall_stub (src/kernel/stubs.asm), which pushes all
@@ -131,6 +131,18 @@ static inline void wc_exit(int code)
     wc_call1(SYS_EXIT, code);
     for (;;)
         ;
+}
+
+/* End another process. Only SIGKILL exists, and it cannot be caught, blocked
+ * or ignored — there is no delivery at all, the victim is simply retired. 0 on
+ * success, -WC_ESRCH for a pid that is not alive (including one that already
+ * exited and awaits its parent's wait), -WC_EINVAL for another signal.
+ *
+ * Killing your own pid is how a program exits with "I was killed" as its code;
+ * that call does not return, so treat it exactly like wc_exit(). */
+static inline long wc_kill(long pid, long sig)
+{
+    return wc_call2(SYS_KILL, pid, sig);
 }
 
 /* Write a literal's bytes without a strlen() call to link against. `sizeof s -

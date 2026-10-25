@@ -315,6 +315,43 @@ static void wakeup_deliver(struct proc *q)
         memcpy((void *)(uintptr_t)q->wait_out, &q->wake_code, sizeof(int));
 }
 
+/* A child died — by its own exit() or by somebody's kill() — and its parent may
+ * be sitting in wait(). The zombie's table slot stays for the parent to reap
+ * (only the memory is given back by the caller) and the pid is planted as the
+ * return value of the wait() call that blocked, exactly the way the yield arm
+ * returns 0. Called BEFORE pick_ready so a woken parent is part of the set the
+ * scheduler chooses from.
+ *
+ * The armed flag is what makes this safe to attempt for *every* exit, not only
+ * exits that find a BLOCKED parent. A wake promises one specific zombie; if a
+ * second child dies while the first wake is still undelivered (the parent READY
+ * but a tick not yet resumed it), overwriting the promise would hand the parent
+ * the same pid twice — the first wake's numbers were already planted, and its
+ * zombie would still be sitting EXITED when the parent's next wait scanned the
+ * table. So the child a wake speaks for is armed, proc_wait's scan skips armed
+ * slots, and an exit whose parent is awake already leaves its zombie unarmed —
+ * an ordinary, fully-formed reap candidate. There is exactly one promise per
+ * zombie. This is a real bug this comment used to not exist for. */
+static void wake_parent(int c, int code)
+{
+    struct proc *cc = &table[c];
+    if (cc->parent == 0)
+        return;                 /* a boot demo has no parent to notify */
+    for (int i = 0; i < PROC_MAX; i++) {
+        struct proc *pp = &table[i];
+        if (pp->pid != cc->parent)
+            continue;
+        if (pp->state == PROC_BLOCKED && !pp->wake_pending) {
+            pp->state = PROC_READY;
+            pp->ctx.rax = (uint64_t)cc->pid;
+            pp->wake_code = code;
+            pp->wake_pending = 1;
+            cc->armed = 1;
+        }
+        break;
+    }
+}
+
 /* The single switch point. Save the running context, retire the caller
  * (READY on yield, EXITED on exit, BLOCKED on wait), and either resume another
  * process by rewriting `f` for the stub's iretq, or — when none is left —
@@ -335,39 +372,11 @@ static void sched_switch(struct syscall_frame *f, int mode, int code)
         table[c].ctx.rax = 0;      /* sched_yield() returns 0 when resumed */
     }
 
-    /* The process trilogy's last edge: a child that exits while its parent
-     * sits in wait() wakes it. The zombie's table slot stays for the parent
-     * to reap — only its memory is given back below — and the pid is planted
-     * as the return value of the wait() call that blocked, exactly the way
-     * the yield arm returns 0. This happens BEFORE pick_ready so the woken
-     * parent is part of the set being chosen from.
-     *
-     * The armed flag is what makes this safe to attempt for *every* exit, not
-     * only exits that find a BLOCKED parent. A wake promises one specific
-     * zombie; if a second child dies while the first wake is still undelivered
-     * (the parent READY but a tick not yet resumed it), overwriting the
-     * promise would hand the parent the same pid twice — the first wake's
-     * numbers were already planted, and its zombie would still be sitting
-     * EXITED when the parent's next wait scanned the table. So the child a
-     * wake speaks for is armed, the scan below skips armed slots, and an exit
-     * whose parent is awake already leaves its zombie unarmed — an ordinary,
-     * fully-formed reap candidate. There is exactly one promise per zombie.
-     * This is a real bug this comment used to not exist for. */
-    if (mode == SWITCH_EXIT && table[c].parent != 0) {
-        for (int i = 0; i < PROC_MAX; i++) {
-            struct proc *pp = &table[i];
-            if (pp->pid != table[c].parent)
-                continue;
-            if (pp->state == PROC_BLOCKED && !pp->wake_pending) {
-                pp->state = PROC_READY;
-                pp->ctx.rax = (uint64_t)table[c].pid;
-                pp->wake_code = code;
-                pp->wake_pending = 1;
-                table[c].armed = 1;
-            }
-            break;
-        }
-    }
+    /* The trilogy's last edge, and the kill's: a child that dies while its
+     * parent sits in wait() wakes it. See wake_parent() for why exactly one
+     * promise per zombie is the thing that makes this safe to attempt always. */
+    if (mode == SWITCH_EXIT)
+        wake_parent(c, code);
 
     int n = pick_ready(rr);
     if (n >= 0) {
@@ -526,6 +535,72 @@ int proc_wait(struct syscall_frame *f, uint64_t uout)
     return WC_ECHILD;
 }
 
+/* kill(pid, SIGKILL) — one process ending another, and the reason the process
+ * table has to be reachable *from* ring 3 rather than only driven by the kernel.
+ *
+ * The kill is synchronous, and the reason it can be is worth stating: the killer
+ * is the running process, so any other target is by definition NOT on the CPU —
+ * it is READY or BLOCKED, holding a saved frame and an address space no CR3
+ * points at. So the kernel can retire it where it stands, exactly as an exiting
+ * process retires itself (give the memory back, mark the slot EXITED with the
+ * code -SIGKILL, wake its parent) without touching a trap frame at all. Two
+ * alternatives were rejected on purpose: deferring death to the victim's next
+ * syscall needs an "owed" flag and leaves a compute loop unkillable, and killing
+ * a *running* process asynchronously means surgery on the tick's frame. Neither
+ * is necessary here, so neither is done.
+ *
+ * Killing yourself is the one case that is not in-place: it goes through the
+ * exit arm of the switch, so it does not return.
+ *
+ * A victim's own children are NOT re-parented. There is no init yet, so an
+ * orphan's zombie keeps a parent pid nobody will ever wait with again and its
+ * slot stays until proc_run_all() sweeps the table. That is a real limitation,
+ * not a detail: a shell (Phase 5's remaining half) is what will make every
+ * process a descendant of something that reaps. */
+int proc_kill(int pid, int sig, struct syscall_frame *f)
+{
+    if (!sched_active || current < 0)
+        return WC_EPERM;        /* no table to kill from outside the scheduler */
+    if (sig != SIGKILL)
+        return WC_EINVAL;       /* there is no delivery, so no other signal */
+
+    int t = -1;
+    for (int i = 0; i < PROC_MAX; i++) {
+        if (table[i].state != PROC_FREE && table[i].pid == pid) {
+            t = i;
+            break;
+        }
+    }
+    if (t < 0 || table[t].state == PROC_EXITED)
+        return WC_ESRCH;        /* never existed, or already a zombie — which
+                                 * is not dead twice, it is waiting to be reaped */
+
+    /* Reported before either arm, because both are a killing and the log line
+     * is the kernel's own witness: for a self-kill the two pids are equal, and
+     * once the switch below runs there is no "by pid" left to print. */
+    serial_write("proc: killed pid ");
+    serial_write_dec((uint64_t)pid);
+    serial_write(" (SIGKILL) by pid ");
+    serial_write_dec((uint64_t)table[current].pid);
+    serial_write("\n");
+
+    if (t == current) {
+        /* Self-kill: an ordinary exit whose code says it was killed. */
+        sched_switch(f, SWITCH_EXIT, -sig);
+        return WC_EPERM;        /* not reached */
+    }
+
+    struct proc *v = &table[t];
+    v->state = PROC_EXITED;
+    v->exit_code = -sig;
+    v->armed = 0;
+    v->wait_out = 0;
+    v->wake_pending = 0;        /* a sleeper's pending wake dies with it */
+    proc_free_space(v);         /* safe: the victim's CR3 is not loaded */
+    wake_parent(t, -sig);
+    return 0;
+}
+
 int proc_current_pid(void)
 {
     return current >= 0 ? table[current].pid : 0;
@@ -534,6 +609,31 @@ int proc_current_pid(void)
 int proc_scheduler_active(void)
 {
     return sched_active;
+}
+
+/* Every leftover in the table at the end of a run is a dead end: an EXITED slot
+ * whose parent is gone as well (a boot demo, or an orphan), or a BLOCKED sleeper
+ * the deadlock report already named. Nobody can reap them — wait() only works
+ * from a running process — so without this sweep those slots are burned for the
+ * rest of the session, and the boot demos alone (tick, spin, waiter, reaper)
+ * would run PROC_MAX dry halfway through. Memory needs no ceremony here: an
+ * EXITED slot gave its frames back at exit, a BLOCKED one still holds them and
+ * proc_free_space() hands those over. next_pid is deliberately NOT reset: pids
+ * are never reused, so a program holding an old pid can never point at a new
+ * process by accident. */
+static void proc_table_sweep(void)
+{
+    for (int i = 0; i < PROC_MAX; i++) {
+        if (table[i].state == PROC_FREE)
+            continue;
+        proc_free_space(&table[i]);
+        table[i].state = PROC_FREE;
+        table[i].parent = 0;
+        table[i].armed = 0;
+        table[i].wait_out = 0;
+        table[i].wake_pending = 0;
+        table[i].name[0] = '\0';
+    }
 }
 
 void proc_run_all(void)
@@ -559,5 +659,6 @@ void proc_run_all(void)
     sched_active = 0;
     current = -1;
     paging_use_kernel();
+    proc_table_sweep();
     serial_write("sched: all processes exited\n");
 }

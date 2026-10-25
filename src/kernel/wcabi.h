@@ -65,6 +65,13 @@
 #define SYS_SCHED_YIELD 8
 #define SYS_SPAWN   9
 #define SYS_WAIT   10
+#define SYS_KILL   11
+
+/* --- signals ------------------------------------------------------------ */
+/* Only SIGKILL exists so far, and only as the argument of kill(): there is no
+ * delivery, no masking, no handler. It is Linux's number because Linux's
+ * numbers are the whole reason for this header's errno choices. */
+#define SIGKILL       9
 
 /* --- directory entries ------------------------------------------------- */
 /* One file's metadata, copied to the caller by SYS_GETDIRENT. Fixed size and
@@ -89,6 +96,7 @@ struct wc_dirent {
  * program can test `rax < 0` without knowing the table. */
 #define WC_EPERM    (-1)
 #define WC_ENOENT   (-2)
+#define WC_ESRCH    (-3)                /* no such process               */
 #define WC_EBADF    (-9)
 #define WC_ECHILD   (-10)               /* no children to wait for   */
 #define WC_EFAULT   (-14)

@@ -66,7 +66,7 @@ On boot the kernel:
    pages write-protected — and runs them **in ring 3**. They reach the
    console and the archive only through the `int 0x80` gate
    (`write`, `exit`, `open`, `read`, `close`, `getdirent`, and later
-   `getpid`, `sched_yield`, `spawn`), every user pointer
+   `getpid`, `sched_yield`, `spawn`, `wait`, `kill`), every user pointer
    being checked against the page tables before the kernel touches it, and
    `exit` unwinds back to the kernel — the first privilege boundary in the
    system,
@@ -115,6 +115,16 @@ On boot the kernel:
    slot survives until the parent reaps it, so `spawn → exit → wait → reap`
    closes the process trilogy the way Unix does it; CI cross-checks the
    pid/code pairs the parent saw against the ones the children printed.
+16. lets a program **end another one**. `kill(pid, SIGKILL)` is the fourth
+   verb: `/bin/reaper` spawns `/bin/bell` — a child that works for seconds and
+   never quits by itself — yields until the bell demonstrably prints, kills it,
+   and reaps it. The victim is off-CPU by definition (READY or BLOCKED), so the
+   kernel retires it where it stands: address space back, slot marked `EXITED`
+   with code `-SIGKILL`, the waiting parent woken. `/bin/vanish` covers the one
+   case that cannot be a table edit — killing yourself holds the CPU and the
+   trap frame, so it rides the exit arm and does not return. CI proves both by
+   absence as well as presence: `[bell] done` and `[vanish] STILL HERE` must
+   **not** be in the log, while the reaped pid and its `-9` must.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
@@ -163,9 +173,9 @@ src/kernel/        C kernel: entry (kmain), console + memory managers,
                    per-process page tables + preemptive round-robin scheduler
                    (proc), interrupt stubs (NASM), string + port-I/O helpers
 src/user/          the programs that run in ring 3 — hello, motd, ls, cat,
-                   echo, tick, spin, exit, waiter — with no libc of their
-                   own: a header of inline `int 0x80` wrappers and seven
-                   static inline string helpers
+                   echo, tick, spin, exit, waiter, bell, reaper, vanish — with
+                   no libc of their own: a header of inline `int 0x80` wrappers
+                   and eight static inline string helpers
 src/boot/          hand-written NASM boot code (two-stage educational MBR)
 rootfs/            what goes into the initrd: packed to a ustar tar, loaded
                    by the bootloader as a module, read in place by the kernel

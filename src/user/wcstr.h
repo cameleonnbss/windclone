@@ -2,8 +2,8 @@
  *
  * Why a header and not a .c: the link is -nostdlib with no archive to pull
  * from, so a second object file would have to be added to every program's
- * rule in the Makefile. Four small static inline functions cost nothing, and
- * a program that uses only two of them keeps only those two.
+ * rule in the Makefile. A handful of small static inline functions costs
+ * nothing, and a program that uses only two of them keeps only those two.
  *
  * Why these are here at all: binutils will happily resolve a reference to
  * memcpy() out of libgcc when you build normally, and refuse it here. -nostdlib
@@ -111,6 +111,26 @@ static inline unsigned wc_app_dec(char *out, unsigned n, unsigned long value)
     while (d > 0 && n < 56)
         out[n++] = digits[--d];
     return n;
+}
+
+/* Signed decimal. A killed process's exit code is -SIGKILL and a failed syscall
+ * answers -WC_*, so the programs that report those numbers have to be able to
+ * print a minus sign — an appender that silently dropped it would turn "code
+ * -9" into "code 9" and make CI prove the opposite of what it thinks. C's
+ * negation of the most negative int is UB, so the magnitude comes from an
+ * unsigned wrap, which is defined. */
+static inline unsigned wc_app_signed(char *out, unsigned n, long value)
+{
+    unsigned long mag;
+
+    if (value < 0) {
+        if (n < 56)
+            out[n++] = '-';
+        mag = 0UL - (unsigned long)value;
+    } else {
+        mag = (unsigned long)value;
+    }
+    return wc_app_dec(out, n, mag);
 }
 
 #endif
