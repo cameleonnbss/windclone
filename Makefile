@@ -5,6 +5,7 @@
 #
 #   make            -> windclone.iso (bootable on BIOS + UEFI machines)
 #   make initrd     -> build/initrd.tar (the tar module packed from rootfs/)
+#   make user       -> the userland ELF programs that go into it
 #   make run        -> boot the ISO in QEMU (with serial console)
 #   make mbr        -> educational 512-byte MBR image (build/mbr.bin)
 #   make run-mbr    -> boot the MBR image in QEMU
@@ -27,9 +28,9 @@ KERNEL_ASM_OBJ := $(patsubst src/kernel/%.asm,build/%.asm.o,$(KERNEL_ASM))
 ROOTFS_FILES := $(shell find rootfs -type f 2>/dev/null)
 INITRD       := build/initrd.tar
 
-# Userland programs: flat binaries assembled at the address usermode.c
-# maps them to (USER_BASE in src/kernel/usermode.h).
-USER_BINS := build/hello
+# Userland programs: real ELF64 executables, linked at USER_BASE by
+# linkers/user.ld and mapped segment by segment by src/kernel/elf.c.
+USER_BINS := build/hello build/motd
 
 # -mno-sse... : keep gcc from emitting SSE/AVX. At boot time CR4/XMM state
 # is not guaranteed, and -O2 happily vectorises loops (movdqa etc.) which
@@ -44,7 +45,30 @@ CFLAGS  := -std=gnu11 -O2 -Wall -Wextra -Werror \
 LDFLAGS := -T linkers/kernel.ld -nostdlib -static -no-pie \
            -z max-page-size=0x1000 -Wl,--build-id=none
 
-.PHONY: all kernel iso initrd run mbr run-mbr clean fetch-limine
+# Userland is compiled like the kernel - no libc, and the same no-SSE rule, so
+# that a fault in ring 3 cannot be gcc vectorising a loop on an FPU state we
+# never initialised. It is NOT compiled like the kernel in one respect: no
+# -mcmodel=kernel. A program lives at 0x400000, in the lower half, where the
+# small code model is correct and the kernel model would not even link.
+UCFLAGS := -std=gnu11 -O2 -Wall -Wextra -Werror \
+           -ffreestanding -fno-pic -fno-pie \
+           -mno-red-zone \
+           -mno-sse -mno-sse2 -mno-avx -mno-mmx -mno-80387 -msoft-float \
+           -fno-stack-protector -fno-asynchronous-unwind-tables -fno-builtin \
+           -Isrc/kernel -Isrc/user
+# noexecstack is spelled without a hyphen: `noexec-stack` is silently
+# "ignored", which is how a build can look tidy and still emit an executable
+# stack segment.
+#
+# -Wl,-s drops the symbol and string tables. Nothing in this system reads them
+# at runtime - the loader walks program headers only - and the initrd lives in
+# RAM, so an unstripped program costs 12 KiB of memory for bytes no page will
+# ever hold.
+ULDFLAGS := -T linkers/user.ld -nostdlib -static -no-pie \
+            -z max-page-size=0x1000 -z noexecstack \
+            -Wl,--build-id=none -Wl,-s
+
+.PHONY: all kernel iso initrd run mbr run-mbr clean fetch-limine user
 
 all: iso
 
@@ -66,9 +90,24 @@ kernel: build/kernel.elf
 
 # ---- initrd (tar module, parsed in place by src/kernel/initrd.c) -----
 
-build/hello: src/user/hello.asm
+# Each program is two steps: an object, then a link against the userland
+# script. -nostdlib means what it says - there is no crt1.o and no libgcc, so
+# a reference to memcpy() fails the build instead of faulting at runtime.
+build/hello.o: src/user/hello.asm
 	@mkdir -p build
-	$(NASM) -f bin -o $@ $<
+	$(NASM) -f elf64 -o $@ $<
+
+build/hello: build/hello.o linkers/user.ld
+	$(CC) $(ULDFLAGS) -o $@ $<
+
+build/motd.o: src/user/motd.c
+	@mkdir -p build
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+build/motd: build/motd.o linkers/user.ld
+	$(CC) $(ULDFLAGS) -o $@ $<
+
+user: $(USER_BINS)
 
 build/initrd.tar: tools/mkinitrd.sh $(ROOTFS_FILES) $(USER_BINS)
 	@mkdir -p build

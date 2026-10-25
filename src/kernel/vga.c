@@ -220,6 +220,17 @@ void kprint(const char *s)
         put_char(*s++);
 }
 
+/* Length-bounded twin of kprint(). A kernel buffer handed over by a user
+ * program is not NUL-terminated and may not even be readable past its
+ * length, so the VFS writes exactly the bytes the caller promised. */
+void kprint_len(const char *s, size_t n)
+{
+    if (buffer == NULL)
+        return;
+    for (size_t i = 0; i < n; i++)
+        put_char(s[i]);
+}
+
 void kclear(void)
 {
     if (buffer == NULL)

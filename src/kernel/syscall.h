@@ -6,10 +6,13 @@
  *   rax = call number, rdi/rsi/rdx/r10 = arguments, result back in rax.
  *   Entered with `int 0x80` (a DPL-3 interrupt gate, so ring 3 may use it).
  *
- * Two calls exist — deliberately. write(fd, buf, len) and exit(code) are
- * enough to prove the whole path: ring-3 code asking the kernel to do
- * something it is not allowed to do itself (touch the UART), and a
- * controlled way back into the kernel.
+ * The numbers, the argument registers and the error values are not here: they
+ * live in wcabi.h, the one header the kernel and a user program both include,
+ * so a call number can never drift apart from its userland declaration.
+ *
+ * Five calls now — write, read, open, close, exit. They are the whole of
+ * Phase 4's promise: ring-3 code asking the kernel for bytes it may not touch
+ * itself, and a controlled way back into the kernel.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -18,12 +21,7 @@
 
 #include <stdint.h>
 
-#define SYS_WRITE 1
-#define SYS_EXIT  2
-
-/* fd values: the console is the only thing that exists for now. */
-#define SYS_FD_STDOUT 1
-#define SYS_FD_STDERR 2
+#include "wcabi.h"     /* SYS_*, *_FILENO, WC_* — the shared half of the ABI */
 
 /* Interrupt frame as the stub builds it. The first part mirrors
  * struct regs exactly (see idt.h); the two fields after it are only

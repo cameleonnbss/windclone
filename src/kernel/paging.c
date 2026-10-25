@@ -73,7 +73,12 @@ void paging_unmap_page(uint64_t virt)
     __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
 }
 
-uint64_t paging_translate(uint64_t virt)
+/* Walk to the entry that actually covers `virt`: the 4 KiB leaf, or the huge
+ * page table entry that maps it directly. *shift_out counts the low address
+ * bits that entry leaves free to the address itself - 12 for a 4 KiB leaf, 21
+ * for a 2 MiB page, 30 for a 1 GiB one - which is what makes the physical
+ * address reconstructable for either. Returns 0 on an absent slot. */
+static uint64_t walk(uint64_t virt, int *shift_out)
 {
     uint64_t *tbl = p4;
     /* descend P4 -> P3 -> P2 (levels 4..2); level 1 is the leaf table */
@@ -83,16 +88,37 @@ uint64_t paging_translate(uint64_t virt)
             return 0;
         if (slot & PTE_PS) {
             /* huge page (1 GiB at P3, 2 MiB at P2): resolve in place */
-            uint64_t shift = 12 + 9 * (level - 1);
-            uint64_t mask  = (1ULL << shift) - 1;
-            return (slot & ~mask & PTE_ADDR_MASK) | (virt & mask);
+            *shift_out = 12 + 9 * (level - 1);
+            return slot;
         }
         tbl = pmm_phys_to_virt(slot & PTE_ADDR_MASK);
     }
     uint64_t leaf = tbl[idx(virt, 1)];
     if (!(leaf & PTE_PRESENT))
         return 0;
-    return (leaf & PTE_ADDR_MASK) | (virt & 0xFFF);
+    *shift_out = 12;
+    return leaf;
+}
+
+uint64_t paging_translate(uint64_t virt)
+{
+    int shift;
+    uint64_t entry = walk(virt, &shift);
+    if (entry == 0)
+        return 0;
+    uint64_t mask = (1ULL << shift) - 1;
+    return (entry & ~mask & PTE_ADDR_MASK) | (virt & mask);
+}
+
+/* The live entry for `virt`, flags included, or 0 when unmapped. Kept beside
+ * paging_translate() because both walk the same way, and it is the flag bits a
+ * caller wants: the address tells you a page exists, only the flags say
+ * whether writing to it is allowed. A huge page reports the table entry that
+ * covers it, which carries the same P|W|U bits. */
+uint64_t paging_flags(uint64_t virt)
+{
+    int shift;
+    return walk(virt, &shift);
 }
 
 void paging_init(void)

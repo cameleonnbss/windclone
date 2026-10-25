@@ -27,6 +27,7 @@
 #include "pci.h"
 #include "keyboard.h"
 #include "initrd.h"
+#include "vfs.h"
 #include "syscall.h"
 #include "usermode.h"
 #include "gfx.h"
@@ -370,6 +371,40 @@ void kmain(void)
         kprint(" files read from the tar module.\n");
         klog("initrd: %u files from %s", initrd_count(), initrd_module_path());
         serial_write("step: initrd ok\n");
+
+        /* The seam Phase 4 was built for: from here on, anything that wants
+         * the archive's bytes opens a path instead of holding a pointer into
+         * the module. That is what lets the ELF loader, the shell and ring 3
+         * read files through one door - and it is why `motd` above, taken
+         * straight out of the tar, is now only useful as a second opinion. */
+        vfs_init();
+
+        int64_t fd = vfs_open("/etc/motd");
+        kassert(fd >= 3);
+        int64_t motd_size = vfs_size((int)fd);
+        kassert(motd_size == (int64_t)motd->size);
+
+        char probe[3];
+        int64_t got = vfs_read((int)fd, probe, sizeof probe);
+        kassert(got == 3 && probe[0] == (char)motd->data[0]);
+        /* Reading on must continue where the last read stopped, and the way to
+         * prove it is to compare the next byte against the archive's own byte
+         * three - a descriptor that restarted would read the first one again. */
+        if (motd_size > 3) {
+            kassert(vfs_read((int)fd, probe, 1) == 1);
+            kassert(probe[0] == (char)motd->data[3]);
+        }
+        kassert(vfs_close((int)fd) == 0);
+        /* A closed slot answers EBADF rather than reading the next file. */
+        kassert(vfs_size((int)fd) == WC_EBADF);
+        kassert(vfs_open("/no/such/file") == WC_ENOENT);
+        kassert(vfs_open("/etc/motd") == fd);  /* the slot came back for reuse */
+        kassert(vfs_open_count() == 1);
+        kassert(vfs_close((int)fd) == 0);
+        kassert(vfs_open_count() == 0);
+        serial_write("vfs: read-back, offset, ebadf and enoent checks passed\n");
+        klog("vfs: %u files behind %u descriptor slots", initrd_count(), 8u);
+        serial_write("step: vfs ok\n");
     } else {
         serial_write("initrd: no tar module found - ISO built without "
                      "build/initrd.tar?\n");
@@ -429,22 +464,33 @@ void kmain(void)
             serial_write_dec(last_second);
             serial_write(")\n");
 
-            /* Run the first user program once the timer has proven the
-             * machine is fully up — a fault in ring 3 borrows the same
-             * exception path the boot used, so it is equally legible. */
+            /* Run the user programs once the timer has proven the machine is
+             * fully up — a fault in ring 3 borrows the same exception path the
+             * boot used, so it is equally legible. Two of them, in order,
+             * because a second program is the test that the loader really put
+             * the first one's frames back: hello is a two-segment asm image,
+             * motd is a gcc image with .rodata, .data and .bss that opens a
+             * file through the vfs. */
             if (!user_ran) {
                 user_ran = 1;
-                int code = -1;
-                serial_write("user: starting /bin/hello from the initrd\n");
-                if (usermode_run("/bin/hello", &code) == 0) {
-                    serial_write("user: program returned, exit code ");
-                    serial_write_dec((uint64_t)(code < 0 ? 0 : (unsigned)code));
-                    serial_write("\n");
-                    serial_write("step: userland ok (ring 3 round trip)\n");
-                    klog("user: ring 3 program exited with %d", code);
-                } else {
-                    serial_write("user: could not start /bin/hello\n");
+                static const char *programs[] = { "/bin/hello", "/bin/motd" };
+                for (unsigned p = 0; p < sizeof programs / sizeof programs[0]; p++) {
+                    int code = -1;
+                    serial_write("user: starting ");
+                    serial_write(programs[p]);
+                    serial_write(" from the initrd\n");
+                    if (usermode_run(programs[p], &code) == 0) {
+                        serial_write("user: program returned, exit code ");
+                        serial_write_dec((uint64_t)(code < 0 ? 0 : (unsigned)code));
+                        serial_write("\n");
+                        klog("user: %s exited with %d", programs[p], code);
+                    } else {
+                        serial_write("user: could not start ");
+                        serial_write(programs[p]);
+                        serial_write("\n");
+                    }
                 }
+                serial_write("step: userland ok (elf64 + ring 3 round trip)\n");
             }
             if ((int)(last_second / 100) >= dump_at_second) {
                 serial_write("log ring (most recent): ");

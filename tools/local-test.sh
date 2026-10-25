@@ -90,7 +90,13 @@ for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "step: initrd ok" "initrd: /etc/motd" \
             "initrd: missing path lookup returns NULL" \
             "gdt: our own table live" "syscall: int 0x80 gate installed" \
-            "hello from ring 3" "step: userland ok (ring 3 round trip)" \
+            "vfs: descriptor table live" "step: vfs ok" \
+            "vfs: read-back, offset, ebadf and enoent checks passed" \
+            "elf64, entry" "hello from ring 3" \
+            "step: userland ok (elf64 + ring 3 round trip)" \
+            "\\[motd\\] segments: .data marker=0x5a5a .bss counter=0" \
+            "\\[motd\\] closed. bytes read: " \
+            "\\[motd\\] read after close returned -9" \
             "gfx: framebuffer" "gfx: desktop composited" \
             "mouse: 8042 aux channel live" "mouse: first packet decoded" \
             "shell: hello ran and returned"; do
@@ -129,7 +135,8 @@ else
                 "kmalloc selftest ok" "step: heap ok" "boot complete" "uptime: 1s" \
                 "pci: enumeration done" "step: keyboard live" \
                 "log ring (most recent):" "step: initrd ok" \
-                "initrd: /etc/motd" "step: userland ok (ring 3 round trip)" \
+                "initrd: /etc/motd" "step: vfs ok" \
+                "step: userland ok (elf64 + ring 3 round trip)" \
                 "gfx: framebuffer" "gfx: desktop composited"; do
         grep -aq "$want" /tmp/wc-uefi.log || fail "UEFI log missing: $want"
     done

@@ -15,6 +15,7 @@
 void vga_init(void *hw, int force_text_mode);
 int  vga_available(void);
 void kprint(const char *s);
+void kprint_len(const char *s, size_t n);   /* for non-NUL-terminated buffers */
 void kclear(void);
 
 #endif

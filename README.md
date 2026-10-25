@@ -59,10 +59,15 @@ On boot the kernel:
    packed into a plain ustar tar by `tools/mkinitrd.sh`, and the kernel walks
    it in place, lists its files and dumps `/etc/motd` — the first data in the
    system that is not part of the kernel image,
-10. installs its own GDT (ring-3 selectors) and a TSS, then runs `/bin/hello`
-   from that initrd **in ring 3**: the program reaches the console only
-   through the `int 0x80` gate (`write`, `exit`), and `exit` unwinds back to
-   the kernel — the first privilege boundary in the system,
+10. installs its own GDT (ring-3 selectors) and a TSS, puts a small descriptor
+   table over the initrd (`open`/`read`/`write`/`close`, fd 0-2 being the
+   console and fd 3+ the files), then loads `/bin/hello` and `/bin/motd` as
+   real **ELF64** images — `PT_LOAD` segments honoured, `.bss` zeroed, code
+   pages write-protected — and runs them **in ring 3**. They reach the
+   console and the archive only through the `int 0x80` gate
+   (`write`, `exit`, `open`, `read`, `close`), every user pointer being
+   checked against the page tables before the kernel touches it, and `exit`
+   unwinds back to the kernel — the first privilege boundary in the system,
 11. maps the linear framebuffer the bootloader set up (device memory, so
    uncached and outside the HHDM) and composites the **desktop**: gradient
    wallpaper, desktop icons, a taskbar with a start button, and three
@@ -126,12 +131,15 @@ git tag v0.1.0 && git push origin v0.1.0
 
 ```
 src/kernel/        C kernel: entry (kmain), console + memory managers,
-                   IDT/PIC/PIT, PCI + PS/2 drivers, interrupt stubs (NASM),
-                   string + port-I/O helpers
+                   IDT/PIC/PIT, PCI + PS/2 drivers, initrd/VFS, ELF64 loader,
+                   interrupt stubs (NASM), string + port-I/O helpers
+src/user/          the programs that run in ring 3 (no libc of their own:
+                   a header of inline `int 0x80` wrappers)
 src/boot/          hand-written NASM boot code (two-stage educational MBR)
 rootfs/            what goes into the initrd: packed to a ustar tar, loaded
                    by the bootloader as a module, read in place by the kernel
-linkers/           ELF64 linker script (higher-half kernel)
+linkers/           ELF64 linker scripts — kernel.ld (higher-half kernel),
+                   user.ld (programs linked at 0x400000, small model)
 vendor/limine.h    vendored bootloader API header (BSD-0, upstream Limine)
 tools/             fetch-limine.{sh,ps1}, build-iso.sh, mkinitrd.sh,
                    local-test.sh (smoke suite, same one CI runs),
@@ -150,7 +158,8 @@ The full plan with checkboxes lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 2. ✅ GDT audit, IDT + exceptions, PIC remap, PIT timer uptime
 3. ✅ Physical + virtual memory managers (`pmm`, own page tables, `kmalloc`)
 4. ✅ PS/2 keyboard, PCI enumeration
-5. 🔄 Initrd ✅, VFS, ELF user processes, syscalls
+5. 🔄 Initrd ✅, VFS ✅, ELF64 processes ✅, five syscalls ✅ — `cat`/`ls`/`echo`
+   as programs rather than built-ins next
 6. ⏳ Shell in C, drivers starting to move to Rust
 7. ⏳ POSIX/Linux compatibility layer (ELF loader + Linux syscall subset)
 8. ⏳ Graphical "windows" shell — earning the *Wind* in WindClone

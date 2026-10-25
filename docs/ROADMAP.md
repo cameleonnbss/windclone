@@ -68,7 +68,7 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       kept in RAM (IRQ-safe, tiny printf), replayed every 5 s on serial
       and reserved for the Phase 5 debug shell
 
-## Phase 4 — Userland v0 🔄
+## Phase 4 — Userland v0 ✅
 *Goal: the first program that isn't the kernel.*
 
 - [x] tar-based initrd from Limine modules: `rootfs/` is packed into a
@@ -77,19 +77,48 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       checksum → octal size → padded data → next block). Files are
       slices of the module, so reading `/etc/motd` costs zero copies;
       an absent path returns `NULL`, never a wild pointer
-- [ ] VFS layer (`open/read/write/close` in-kernel)
+- [x] VFS layer (`open`/`read`/`write`/`close` in-kernel): a fixed table of
+      descriptors over the initrd's slices — fd 0/1/2 are the console, fd 3+
+      are files, `read` advances the offset, EOF is `0`, a closed or unknown
+      descriptor is `-9` (`EBADF`) and a missing path is `-2` (`ENOENT`);
+      files are read-only, so a `write` to a file descriptor is refused
+      instead of silently succeeding. The kernel's own ELF loader reads
+      programs through this same door, and so does ring 3
 - [x] Ring 3: our own GDT with DPL-3 code/data selectors, a TSS so an
       interrupt taken in userland lands on a kernel stack, `iretq` entry,
       and a DPL-3 `int 0x80` gate — the first privilege boundary in the
       system
-- [x] Two syscalls first: `write(fd, buf, len)` and `exit(code)`; exit
-      unwinds the syscall stack back into the kernel, so a program that
-      ends hands control back instead of wedging the CPU
-- [x] `/bin/hello` — a flat binary from the initrd (assembled at
-      `USER_BASE`, first 94 bytes of user code) that writes a line from
-      ring 3 and exits; CI greps the line it printed
-- [ ] ELF64 process loader: replace the flat-binary path in `usermode.c`
-      with real `PT_LOAD` segments — release v0.1.0 milestone
+- [x] Five syscalls so far: `write`, `exit`, then `open`/`read`/`close`.
+      `exit` unwinds the syscall stack back into the kernel, so a program
+      that ends hands control back instead of wedging the CPU; an unknown
+      call number answers `-38` (`ENOSYS`) rather than faulting. Every
+      user pointer is validated first — range, then `PRESENT` + `USER`
+      (+ `WRITE` for a read target) page by page — because there is no
+      fixup table yet: a fault inside a syscall is a panic, not an `-EFAULT`
+- [x] `/bin/hello` — the first program. Started as a flat binary assembled
+      at `USER_BASE`; it is now a real ELF64 object (`nasm -f elf64`,
+      `_start`, `.rodata`) that the loader places and runs, and CI greps
+      the line it printed from ring 3
+- [x] `/bin/motd` — the first program that reads a file: `open`/`read` in
+      128-byte chunks until EOF, `close`, then one more `read` to show the
+      descriptor is really dead. It also reports its own `.data` (a marker
+      read back with `volatile`, because a compiler that folds a variable
+      nothing ever writes would delete the very section under test) and its
+      `.bss` counter, which is how the load/zero split is proven from inside
+      the program rather than from a `readelf` invocation
+- [x] ELF64 process loader: the flat-binary path in `usermode.c` is gone.
+      `elf.c` honours every `PT_LOAD` (entry must be mapped, offsets and
+      virtual addresses must agree `mod p_align`, sizes must not overflow or
+      escape the user window), uses each page as a window into the file, and
+      zeroes `p_memsz - p_filesz` for `.bss`. Protection is a **second**
+      pass: filling happens while every page is writable, then code pages are
+      re-mapped read-only — otherwise writing `.text` read-only faults on the
+      very copy that fills it. Loading a program releases the previous one's
+      frames first, so running two in a row cannot re-fill read-only pages.
+      Known gaps: no NX (read-only code is still executable), one address
+      space shared with the kernel, no `argv`/`envp`/auxv on the stack.
+      *(The roadmap called this the v0.1.0 milestone, but v0.1.0 was cut at
+      Phase 5 — the loader therefore ships as v0.1.1)*
 
 ## Phase 5 — Shell & processes 🔄
 - [x] Text shell with line editing (a 64-byte IRQ queue, Enter/Backspace),

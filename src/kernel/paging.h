@@ -37,4 +37,10 @@ void paging_unmap_page(uint64_t virt);
 /* Walk the live tables: physical address of `virt`, or 0 if absent. */
 uint64_t paging_translate(uint64_t virt);
 
+/* The entry that covers `virt`, flag bits included, or 0 if absent. Needed
+ * before the kernel touches an address a user program supplied: the page may
+ * exist and still be read-only, and writing to it would then fault inside the
+ * kernel instead of answering -WC_EFAULT. */
+uint64_t paging_flags(uint64_t virt);
+
 #endif

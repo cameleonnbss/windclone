@@ -20,11 +20,16 @@ STAGE=build/initrd-root
 mkdir -p "$(dirname "$OUT")"
 
 # Stage = the checked-in rootfs plus the programs we build (they are
-# artifacts, not sources, so they never land in the tree).
+# artifacts, not sources, so they never land in the tree). Every build/*
+# entry listed in USER_BINS goes to /bin with its extension stripped, which
+# is why the loop below skips anything that is not one of them.
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin"
 cp -a "$ROOT"/. "$STAGE"/
-[ -f build/hello ] && cp build/hello "$STAGE/bin/hello"
+for prog in hello motd; do
+    [ -f "build/$prog" ] || continue
+    cp "build/$prog" "$STAGE/bin/$prog"
+done
 
 # "." makes tar emit relative entries (./etc/motd); the kernel strips the
 # leading "./" so lookups can use "/etc/motd". Directories become typeflag
