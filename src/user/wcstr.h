@@ -72,4 +72,45 @@ static inline void wc_put_dec(long fd, unsigned long value)
     }
 }
 
+/* One whole line, one syscall: the shape the scheduler demos have to print in.
+ *
+ * With timer-driven preemption a tick may land between two write syscalls and
+ * switch processes mid-line, tearing "[spin B" and " ] round 2" across the
+ * other process's output. A switch cannot interrupt a syscall — the tick that
+ * arrives while the process is in ring 0 resumes it untouched — so composing
+ * a line from these pieces and writing it once makes each line atomic with
+ * respect to interleaving, and CI's marker greps can rely on whole lines.
+ * Every appender caps at 56 bytes so a fixed 64-byte caller buffer cannot be
+ * overrun, whatever argv happens to hand the program as its label. */
+static inline unsigned wc_app_str(char *out, unsigned n, const char *s)
+{
+    while (*s && n < 56)
+        out[n++] = *s++;
+    return n;
+}
+
+static inline unsigned wc_app_bytes(char *out, unsigned n, const char *s,
+                                    unsigned long len)
+{
+    for (; len > 0 && n < 56; len--)
+        out[n++] = *s++;
+    return n;
+}
+
+static inline unsigned wc_app_dec(char *out, unsigned n, unsigned long value)
+{
+    char digits[24];
+    unsigned d = 0;
+
+    if (value == 0)
+        digits[d++] = '0';
+    while (value > 0 && d < sizeof digits) {
+        digits[d++] = (char)('0' + (value % 10));
+        value /= 10;
+    }
+    while (d > 0 && n < 56)
+        out[n++] = digits[--d];
+    return n;
+}
+
 #endif

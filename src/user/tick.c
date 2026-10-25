@@ -15,6 +15,10 @@
  * the loader handed each process, and reading it back is a free re-proof that
  * argv crossed the privilege boundary intact.
  *
+ * Every line is composed in a buffer and written with ONE write syscall: a
+ * timer tick can preempt this process between syscalls but never mid-syscall,
+ * so one write per line keeps the marker a whole line for CI to grep.
+ *
  * SPDX-License-Identifier: MIT
  */
 #include "wcstr.h"
@@ -26,20 +30,26 @@ void _start(int argc, char **argv)
     long pid = wc_getpid();
 
     for (int i = 1; i <= 3; i++) {
-        wc_write(STDOUT_FILENO, "[tick ", 6);
-        wc_write(STDOUT_FILENO, label, len);
-        wc_write(STDOUT_FILENO, "] step ", 7);
-        wc_put_dec(STDOUT_FILENO, (unsigned long)i);
-        wc_write(STDOUT_FILENO, " pid ", 5);
-        wc_put_dec(STDOUT_FILENO, (unsigned long)(pid < 0 ? 0 : pid));
-        wc_write(STDOUT_FILENO, "\n", 1);
+        char line[64];
+        unsigned n = 0;
+        n = wc_app_str(line, n, "[tick ");
+        n = wc_app_bytes(line, n, label, len);
+        n = wc_app_str(line, n, "] step ");
+        n = wc_app_dec(line, n, (unsigned long)i);
+        n = wc_app_str(line, n, " pid ");
+        n = wc_app_dec(line, n, (unsigned long)(pid < 0 ? 0 : pid));
+        n = wc_app_str(line, n, "\n");
+        wc_write(STDOUT_FILENO, line, n);
 
         /* Give the CPU up and pick the counter back up where it stopped. */
         wc_sched_yield();
     }
 
-    wc_write(STDOUT_FILENO, "[tick ", 6);
-    wc_write(STDOUT_FILENO, label, len);
-    wc_write(STDOUT_FILENO, "] done\n", 7);
+    char line[64];
+    unsigned n = 0;
+    n = wc_app_str(line, n, "[tick ");
+    n = wc_app_bytes(line, n, label, len);
+    n = wc_app_str(line, n, "] done\n");
+    wc_write(STDOUT_FILENO, line, n);
     wc_exit(0);
 }

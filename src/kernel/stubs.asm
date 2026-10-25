@@ -220,10 +220,25 @@ tss_flush:
 ; The current rsp/rbp are stashed first so sys_exit() can come back here:
 ; a syscall cannot "return" through iretq to a kernel caller, it has to
 ; unwind to the frame that called usermode_enter().
+;
+; rbx and r12-r15 are stashed for the same reason, and this is an ABI fix,
+; not decoration: C callers are entitled to assume a function preserves the
+; callee-saved registers, and everything ring 3 does afterwards — the
+; process's own register values, the frame proc.c copies over a syscall
+; frame on a context switch — lands in exactly those registers. Before the
+; scheduler, nothing of a caller's happened to be live in them across the
+; excursion, so the violation was invisible; with two processes it was not:
+; a kernel pointer parked in r14 across proc_run_all() came back holding a
+; dead process's context. user_exit_to_kernel gives them back.
 global usermode_enter
 usermode_enter:
     mov [rel user_kernel_rsp], rsp
     mov [rel user_kernel_rbp], rbp
+    mov [rel user_saved_rbx], rbx
+    mov [rel user_saved_r12], r12
+    mov [rel user_saved_r13], r13
+    mov [rel user_saved_r14], r14
+    mov [rel user_saved_r15], r15
     mov ax, 0x1B             ; ring-3 data selector (0x18 | 3)
     mov ds, ax
     mov es, ax
@@ -242,6 +257,11 @@ user_exit_to_kernel:
     mov ax, 0x10             ; back to kernel data before touching memory
     mov ds, ax
     mov es, ax
+    mov rbx, [rel user_saved_rbx]
+    mov r12, [rel user_saved_r12]
+    mov r13, [rel user_saved_r13]
+    mov r14, [rel user_saved_r14]
+    mov r15, [rel user_saved_r15]
     mov rsp, [rel user_kernel_rsp]
     mov rbp, [rel user_kernel_rbp]
     ; int 0x80 is an interrupt gate: the CPU cleared IF on the way in and
@@ -299,6 +319,11 @@ syscall_stub:
 section .data
 user_kernel_rsp: dq 0
 user_kernel_rbp: dq 0
+user_saved_rbx:  dq 0
+user_saved_r12:  dq 0
+user_saved_r13:  dq 0
+user_saved_r14:  dq 0
+user_saved_r15:  dq 0
 
 ; (the `global` declarations live inside the ISR_*/IRQ_STUB macros)
 

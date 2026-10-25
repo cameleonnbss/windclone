@@ -100,4 +100,12 @@ int  proc_scheduler_active(void);
  * new pid, or -1. The caller keeps running; the child enters the READY set. */
 int  proc_spawn_path(const char *path);
 
+/* Timer-driven preemption. Called from the IRQ0 path with the interrupted
+ * frame after the tick is accounted and EOI'd. Returns non-zero only when it
+ * actually switched: in that case it has loaded another process's CR3 and
+ * overwritten `f`, so the stub's iretq resumes that process instead. When the
+ * interrupted context is not ring 3, or no other process is runnable, it is a
+ * no-op and returns 0 — the same process simply continues. */
+int  proc_timer_preempt(struct syscall_frame *f);
+
 #endif

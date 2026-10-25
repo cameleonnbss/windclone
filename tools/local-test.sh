@@ -150,15 +150,51 @@ for want in "sched: building two processes" \
             "step: scheduler ok (two processes, round-robin)"; do
     grep -aq "$want" /tmp/wc-bios.log || fail "BIOS log missing: $want"
 done
-# A-1 then B-1 on consecutive lines is the round-robin fingerprint. grep -A1
-# prints the matched line plus the one after it; if the scheduler really
-# interleaved, B's step-1 line immediately follows A's, so the piped -qF finds
-# it. A run-to-completion bug would put A's step-2 there instead, and this
-# fails. (We avoid grep -P: not every distro builds grep with PCRE.)
-grep -A1 -F '[tick A] step 1 pid 1' /tmp/wc-bios.log \
-    | grep -qF '[tick B] step 1 pid 2' \
+# Round-robin proven order-free: each process must print at least once while
+# the other still has lines left, so neither ran to the end before the other
+# began. Line adjacency ("B-1 right after A-1") used to be the check, but with
+# a preemptive tick the first timer switch may land before B's very first
+# write, legitimately putting two A lines first — what stays impossible for a
+# run-to-completion loop is the crossing tested here.
+TA1=$(grep -anF '[tick A]' /tmp/wc-bios.log | head -1 | cut -d: -f1)
+TAL=$(grep -anF '[tick A]' /tmp/wc-bios.log | tail -1 | cut -d: -f1)
+TB1=$(grep -anF '[tick B]' /tmp/wc-bios.log | head -1 | cut -d: -f1)
+TBL=$(grep -anF '[tick B]' /tmp/wc-bios.log | tail -1 | cut -d: -f1)
+[ -n "$TA1" ] && [ -n "$TAL" ] && [ -n "$TB1" ] && [ -n "$TBL" ] \
+    || fail "tick markers vanished from the BIOS log"
+{ [ "$TA1" -lt "$TBL" ] && [ "$TB1" -lt "$TAL" ]; } \
     || fail "scheduler did not interleave the two processes"
 echo '    ok: scheduler — two processes interleaved (round-robin)'
+
+# Preemption is a strictly stronger claim than the cooperative test above, so
+# it gets its own program and its own check. Two /bin/spin processes burn CPU
+# in a hot loop and NEVER call sched_yield — cooperative round-robin could not
+# interleave them (one would spin all the way to done before the other printed
+# a line). pids are 3 and 4: next_pid keeps counting across the tick demo.
+for want in "sched: two compute-heavy procs, no yields" \
+            "proc: spawned /bin/spin as pid 3" \
+            "proc: spawned /bin/spin as pid 4" \
+            "\\[spin A\\] start pid 3" "\\[spin B\\] start pid 4" \
+            "\\[spin A\\] round 3" "\\[spin B\\] round 3" \
+            "\\[spin A\\] done" "\\[spin B\\] done" \
+            "step: preemption ok (timer switched a busy process)"; do
+    grep -aq "$want" /tmp/wc-bios.log || fail "BIOS log missing: $want"
+done
+# Interleaving, stated order-free: the first tick after usermode_enter() may
+# land before A's first write or after it, so which process prints first is
+# timing luck — but run-to-completion is not. If each process prints at least
+# once while the other still has lines left, neither ran to the end before the
+# other began, which is exactly what only a preemptive switch can produce:
+# A's first line must come before B's last, and B's first before A's last.
+A1=$(grep -anF '[spin A]' /tmp/wc-bios.log | head -1 | cut -d: -f1)
+AL=$(grep -anF '[spin A]' /tmp/wc-bios.log | tail -1 | cut -d: -f1)
+B1=$(grep -anF '[spin B]' /tmp/wc-bios.log | head -1 | cut -d: -f1)
+BL=$(grep -anF '[spin B]' /tmp/wc-bios.log | tail -1 | cut -d: -f1)
+[ -n "$A1" ] && [ -n "$AL" ] && [ -n "$B1" ] && [ -n "$BL" ] \
+    || fail "spin markers vanished from the BIOS log"
+{ [ "$A1" -lt "$BL" ] && [ "$B1" -lt "$AL" ]; } \
+    || fail "spin processes did not interleave (no preemption?)"
+echo '    ok: preemption — timer switched a CPU-bound process'
 echo '    ok: BIOS boot — memory, interrupts, PCI, keyboard (sendkey), log ring'
 
 # 3) UEFI boot (OVMF), same contract minus the PIC-specific line.
@@ -198,6 +234,8 @@ else
                 "proc: spawned /bin/tick as pid 1" \
                 "\\[tick A\\] step 1 pid 1" "\\[tick B\\] step 1 pid 2" \
                 "step: scheduler ok (two processes, round-robin)" \
+                "\\[spin A\\] start pid 3" "\\[spin B\\] start pid 4" \
+                "step: preemption ok (timer switched a busy process)" \
                 "gfx: framebuffer" "gfx: desktop composited"; do
         grep -aq "$want" /tmp/wc-uefi.log || fail "UEFI log missing: $want"
     done

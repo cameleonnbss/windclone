@@ -18,6 +18,8 @@
 #include "timer.h"
 #include "keyboard.h"
 #include "mouse.h"
+#include "proc.h"
+#include "syscall.h"
 
 /* --- IDT descriptor layout (AMD64 vol.2, "Interrupt Descriptor") ---- */
 
@@ -242,6 +244,17 @@ void irq_handler(struct regs *r)
         mouse_irq();          /* PS/2 aux channel */
 
     pic_eoi(irq);
+
+    /* Preempt on the tick, but only after accounting and EOI are done: the
+     * switch may rewrite the return frame, and we must have already acked the
+     * PIC for this interrupt. struct regs is an exact prefix of struct
+     * syscall_frame, and a tick that interrupted ring 3 pushed user_rsp/user_ss
+     * like a syscall does, so the same layout proc.c expects is on the stack.
+     * Returns 0 (no-op) unless the scheduler is live and another process is
+     * runnable; when it returns non-zero, iretq in irq_common resumes the other
+     * process. */
+    if (irq == 0)
+        proc_timer_preempt((struct syscall_frame *)r);
 }
 
 /* --- init --------------------------------------------------------------- */

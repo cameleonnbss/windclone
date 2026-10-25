@@ -188,20 +188,53 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         the stack — the `syscall_stub`'s `iretq` then resumes *that* process.
         The single kernel IRQ stack is re-loaded from the TSS on every ring 3 →
         ring 0 entry, so nothing of a suspended process is stranded on it.
-        That is precisely why the switch is **cooperative** (taken inside a
-        syscall, `IF` already cleared by the `0xEE` gate) and why timer-driven
-        **preemption is the honest next step**, not something claimed here.
+        That is precisely why the *voluntary* switch is **cooperative** (taken
+        inside a syscall, `IF` already cleared by the `0xEE` gate). Timer-driven
+        **preemption** shipped afterwards — see the two bullets below; it was
+        deliberately not claimed until it had a proof only it could produce.
       - **Three new syscalls:** `getpid(7)`, `sched_yield(8)`, `spawn(9)`.
         Policy is round-robin over the READY set with a numeric priority as the
         tie-break (lower runs first). `wait(10)` is reserved in `wcabi.h` but
         deliberately **not wired** — it falls through to "unknown call" rather
         than pretending to block.
-      - **`/bin/tick` proves it, and so does CI.** The demo spawns two copies
-        of one binary with different `argv` labels; each prints a line and
-        yields in turn. The serial log comes out `A-1 B-1 A-2 B-2 A-3 B-3`,
-        each resuming its own counter after the other had the CPU, and
-        `local-test.sh` asserts that *order* (not just that the lines exist) —
-        a run-to-completion loop with extra steps could not produce it.
+      - **`/bin/tick` proves the cooperative switch, and so does CI.** The demo
+        spawns two copies of one binary with different `argv` labels; each
+        prints a line and yields in turn, each resuming its own counter after
+        the other had the CPU. `local-test.sh` asserts the two processes' line
+        ranges *cross* (each prints while the other still has lines left),
+        order-free — a run-to-completion loop with extra steps could not
+        produce that crossing, and which process prints first is timing luck
+        once the timer can also switch.
+      - **Timer-driven preemption (v0.1.4).** A tick that lands on a ring-3
+        process now switches it out *without being asked*, again with no new
+        assembly: for a ring-3-origin interrupt the CPU pushes `ss`/`rsp` on
+        the privilege change exactly like `int 0x80` does, and `irq_common`
+        saves the GPRs in the same order as `syscall_stub` — so the IRQ frame
+        *is* a `struct syscall_frame`. `proc_timer_preempt()`, called from
+        `irq_handler` after the PIC is acked, retires the running process
+        READY and copies the next process's frame over the one on the stack;
+        `irq_common`'s `iretq` resumes the other one. IRQ gates are `0x8E`
+        interrupt gates, so `IF` is clear during the frame surgery and no
+        second tick can re-enter it. A tick that lands on ring 0 (the kernel,
+        or a process inside a syscall) changes nothing — ring 0 is never
+        preempted here.
+      - **`/bin/spin` proves *that*, and only preemption can produce it.** Two
+        copies burn a 30-million-iteration counted loop per round and NEVER
+        call `sched_yield` — cooperative round-robin would run one all the way
+        to `done` before the other printed a line. Their output crossing in
+        the serial log is therefore the witness, asserted with the same
+        order-free line-range check.
+      - **Two real ABI bugs this surfaced, both fixed.** (1)
+        `usermode_enter()` / `user_exit_to_kernel()` stashed only `rsp`/`rbp`,
+        so a kernel pointer a C caller lived in `r14` across
+        `proc_run_all()` came back holding a dead process's context — the
+        ring-3 excursion obeys the SysV AMD64 ABI only if the asm handover
+        itself saves `rbx`/`r12`–`r15`, and now it does. (2) A tick landing
+        between two `write` syscalls tore a marker line across the other
+        process's output, so the demo programs compose each line in a buffer
+        and issue ONE write via new `wc_app_*` helpers — a syscall completes
+        unpreempted, which makes a single write atomic with respect to
+        process switches and keeps CI's greps line-based.
 
 ## Phase 6 — Language expansion ⏳
 *Goal: use the right tool per layer (the "asm/C/C++/Rust" promise).*

@@ -91,16 +91,20 @@ On boot the kernel:
    through `getdirent`, `cat /etc/issue` prints a file, `echo zzz` answers
    `zzz`, and whatever a program writes lands in the terminal. CI types the
    commands through the emulated keyboard and greps what they printed.
-14. runs **two programs at once**. Each process gets its own 4-level page
-   tables (`paging_clone_address_space()` shares the kernel's view, keeps the
-   user window private), so two images can sit at the same `0x400000` and never
-   see each other. A cooperative **round-robin scheduler** (`proc.c`) switches
-   between them by saving a process's `syscall_frame`, loading the next one's
-   `CR3`, and letting the stub's `iretq` resume it — no new assembly. The boot
-   spawns two copies of `/bin/tick` and CI asserts their output really
-   interleaves (`A-1 B-1 A-2 B-2 …`), which a run-to-completion loop cannot
-   fake. Preemption (the timer switching without being asked) is the next step
-   and is not claimed here.
+14. runs **two programs at once**, and now **interrupts them mid-compute**.
+   Each process gets its own 4-level page tables
+   (`paging_clone_address_space()` shares the kernel's view, keeps the user
+   window private), so two images can sit at the same `0x400000` and never
+   see each other. The **round-robin scheduler** (`proc.c`) switches between
+   them by saving a process's `syscall_frame`, loading the next one's `CR3`,
+   and letting the return frame's `iretq` resume it — no new assembly, twice:
+   a voluntary switch rides the `int 0x80` frame, and a timer tick landing on
+   ring 3 rides the IRQ frame, which the CPU builds with the *same* layout.
+   The boot spawns two copies of `/bin/tick` (print-and-yield) and two of
+   `/bin/spin` (a 30-million-iteration hot loop that never yields); CI
+   asserts the two processes' output line ranges *cross*, which a
+   run-to-completion loop cannot fake — for the spins it is the only way they
+   can interleave at all, so the tick really does preempt.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
@@ -146,11 +150,12 @@ git tag v0.1.0 && git push origin v0.1.0
 ```
 src/kernel/        C kernel: entry (kmain), console + memory managers,
                    IDT/PIC/PIT, PCI + PS/2 drivers, initrd/VFS, ELF64 loader,
-                   per-process page tables + round-robin scheduler (proc),
-                   interrupt stubs (NASM), string + port-I/O helpers
+                   per-process page tables + preemptive round-robin scheduler
+                   (proc), interrupt stubs (NASM), string + port-I/O helpers
 src/user/          the programs that run in ring 3 — hello, motd, ls, cat,
-                   echo, tick — with no libc of their own: a header of inline
-                   `int 0x80` wrappers and five static inline string helpers
+                   echo, tick, spin — with no libc of their own: a header of
+                   inline `int 0x80` wrappers and seven static inline string
+                   helpers
 src/boot/          hand-written NASM boot code (two-stage educational MBR)
 rootfs/            what goes into the initrd: packed to a ustar tar, loaded
                    by the bootloader as a module, read in place by the kernel
@@ -175,7 +180,8 @@ The full plan with checkboxes lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 3. ✅ Physical + virtual memory managers (`pmm`, own page tables, `kmalloc`)
 4. ✅ PS/2 keyboard, PCI enumeration
 5. ✅ Initrd, VFS, ELF64 processes, nine syscalls, `cat`/`ls`/`echo` as real
-   programs, and a round-robin scheduler running two processes at once
+   programs, and a preemptive round-robin scheduler running two processes at
+   once with the timer switching them
 6. ⏳ Shell in C, drivers starting to move to Rust
 7. ⏳ POSIX/Linux compatibility layer (ELF loader + Linux syscall subset)
 8. ⏳ Graphical "windows" shell — earning the *Wind* in WindClone

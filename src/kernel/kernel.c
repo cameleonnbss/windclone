@@ -535,6 +535,23 @@ void kmain(void)
                     proc_run_all();
                     serial_write("step: scheduler ok (two processes, round-robin)\n");
                 }
+
+                /* Preemption: the cooperative test above only switches where a
+                 * program asks. These two /bin/spin processes never yield —
+                 * they burn CPU in a hot loop — so the only way their output
+                 * can interleave is the timer interrupt forcing a switch out
+                 * from under a running process. If preemption were broken, one
+                 * would spin all the way to done before the other printed its
+                 * first line, and CI's order check catches exactly that. */
+                {
+                    const char *argv_s1[2] = { "spin", "A" };
+                    const char *argv_s2[2] = { "spin", "B" };
+                    serial_write("sched: two compute-heavy procs, no yields\n");
+                    proc_create("/bin/spin", 2, argv_s1, 0);
+                    proc_create("/bin/spin", 2, argv_s2, 0);
+                    proc_run_all();
+                    serial_write("step: preemption ok (timer switched a busy process)\n");
+                }
             }
             if ((int)(last_second / 100) >= dump_at_second) {
                 serial_write("log ring (most recent): ");

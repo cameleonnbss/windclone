@@ -323,6 +323,47 @@ void proc_yield(struct syscall_frame *f)
     sched_switch(f, 0, 0);
 }
 
+/* Timer-driven preemption — the step beyond the cooperative switch.
+ *
+ * A tick that lands on a ring-3 process interrupts it mid-instruction, and the
+ * IRQ stub has just saved a frame that is layout-identical to the one a syscall
+ * saves (same GPR order, and a privilege change pushed user_rsp/user_ss just
+ * like int 0x80 does). So the same move works: retire the *running* process by
+ * saving this frame and marking it READY, then resume another runnable one by
+ * loading its CR3 and copying its frame over the one on the stack; the stub's
+ * pop + iretq then returns into *that* process. Nothing here frees memory or
+ * touches the exit path — a preempted process stays fully alive.
+ *
+ * If the interrupted context is the kernel (RPL != 3), the scheduler is not
+ * driving the CPU, or this is the only runnable process, we change nothing and
+ * return 0 so the caller just goes back to the same process. We run with IF
+ * clear (IRQ0 is an 0x8E interrupt gate), so no second tick re-enters here. */
+int proc_timer_preempt(struct syscall_frame *f)
+{
+    if (!sched_active || current < 0 || (f->cs & 3) != 3)
+        return 0;
+
+    int c = current;
+    table[c].ctx = *f;
+    table[c].state = PROC_READY;
+
+    int n = pick_ready(rr);
+    if (n < 0 || n == c) {
+        /* Nobody else to run: give c its RUNNING state back and return. */
+        table[c].state = PROC_RUNNING;
+        return 0;
+    }
+
+    struct proc *q = &table[n];
+    current = n;
+    q->state = PROC_RUNNING;
+    rr = (n + 1) % PROC_MAX;
+    paging_set_working((uint64_t *)(uintptr_t)q->p4_virt);
+    paging_switch(q->cr3);
+    *f = q->ctx;
+    return 1;
+}
+
 void proc_exit(struct syscall_frame *f, int code)
 {
     if (current < 0) {
