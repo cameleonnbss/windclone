@@ -98,6 +98,25 @@ UEFI) and print the serial banner. That is the whole contract.
 * **The USER bit has to be on every level of the walk, not just the leaf.**
   A ring-3 access to a page whose P4/P3/P2 entries lack it faults even
   though the leaf looks correct.
+* **Fill the image first, protect it second.** Mapping `.text` read-only and
+  then copying the file into it is a kernel write to a read-only page: the
+  fault lands inside the loader, where there is no error to return. Same
+  family: with one address space and one page list, loading a *second*
+  program must release the first one's frames (unmap + `pmm_free_frame`)
+  before filling anything, or the second image is copied onto pages the first
+  left write-protected.
+* **A `static` nobody ever writes can vanish from the binary.** gcc folds a
+  read-only initialising variable into its use site, so the `.data` the test
+  was supposed to check does not exist and the test passes while proving
+  nothing. `/bin/motd`'s marker is `volatile` for exactly that reason — the
+  keyword is the test, not an optimisation.
+* **`-z noexec-stack` is not a flag.** ld prints *"warning: -z noexec-stack
+  ignored"* and links anyway; the spelling is `-z noexecstack`. A warning you
+  read as a style nit is a feature you do not have.
+* **A bracket in a grep pattern is a character class.** `grep -aq "[motd]
+  segments"` never matches the kernel line `[motd] segments`, so the smoke
+  test fails on a line that is plainly in the log. Escape it (`\\[motd\\]`)
+  when the literal is a shell string that feeds `grep` a BRE.
 * **Prove input headlessly with the QEMU monitor:** `-monitor
   unix:/tmp/wc-mon.sock,server,nowait` plus `sendkey a` injected after
   boot, then grep the serial log for the decoded character. That is how
