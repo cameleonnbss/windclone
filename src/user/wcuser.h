@@ -106,6 +106,24 @@ static inline long wc_spawn(const char *path)
     return wc_call1(SYS_SPAWN, (long)path);
 }
 
+/* The same, with a real command line: argc words from argv[] are copied into
+ * the child's address space by the kernel, so the strings may live in our own
+ * stack or .rodata — the child never points back at them. */
+static inline long wc_spawn_args(const char *path, long argc, char **argv)
+{
+    return wc_call3(SYS_SPAWN, (long)path, argc, (long)argv);
+}
+
+/* Block until one of our children exits, then reap it: returns the child's
+ * pid and, if code_out is not NULL, stores its exit code through code_out.
+ * -WC_ECHILD when there is no child to wait for. This is the call that makes
+ * the scheduler a *blocking* one — the CPU goes to another process while we
+ * sleep, and this line of user code resumes only when a child dies. */
+static inline long wc_wait(int *code_out)
+{
+    return wc_call1(SYS_WAIT, (long)code_out);
+}
+
 /* Does not come back: the kernel unwinds its own copy of this stack frame
  * instead of returning through it. The loop is for the compiler, not the CPU. */
 static inline void wc_exit(int code)

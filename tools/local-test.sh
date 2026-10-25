@@ -195,6 +195,46 @@ BL=$(grep -anF '[spin B]' /tmp/wc-bios.log | tail -1 | cut -d: -f1)
 { [ "$A1" -lt "$BL" ] && [ "$B1" -lt "$AL" ]; } \
     || fail "spin processes did not interleave (no preemption?)"
 echo '    ok: preemption — timer switched a CPU-bound process'
+
+# The trilogy's last act, its own program and its own proof. /bin/waiter
+# spawns /bin/exit 7 and /bin/exit 9 with real argv (a first: userland asked
+# for a spawn WITH a command line, shuttled through kernel bounce buffers),
+# then waits. The children's pids are NOT hardcoded on purpose: the waiter
+# itself takes a pid when the scheduler's exit path reaps it, and which pid
+# that is depends on how many demo blocks run before it — a static number here
+# would rot the next time the boot sequence moved. The spawn lines name the
+# pids, so the cross-checks READ them back and verify every hop of the trip:
+# spawned pid/code == child's own exit line == what wait() handed back.
+# Which child dies first is timing luck, so every assertion stays order-free.
+for want in "proc: one parent, two children, a blocking wait" \
+            "proc: spawned /bin/exit as pid" \
+            "\\[waiter\\] spawned pid" \
+            "\\[exit\\] code 7 pid" "\\[exit\\] code 9 pid" \
+            "\\[waiter\\] reaped pid" \
+            "\\[waiter\\] all children reaped" \
+            "step: wait ok (spawn with argv + blocking wait + reaping)"; do
+    grep -aq "$want" /tmp/wc-bios.log || fail "BIOS log missing: $want"
+done
+grep -acF '[waiter] spawned pid' /tmp/wc-bios.log | grep -qx 2 \
+    || fail "waiter did not spawn exactly two children"
+grep -acF '[waiter] reaped pid' /tmp/wc-bios.log | grep -qx 2 \
+    || fail "waiter did not reap exactly two children"
+# pid/code pairings straight off the waiter's own spawn lines:
+P7=$(grep -aF '[waiter] spawned pid' /tmp/wc-bios.log | grep -F 'code 7' | sed 's/.*pid \([0-9]*\).*/\1/')
+P9=$(grep -aF '[waiter] spawned pid' /tmp/wc-bios.log | grep -F 'code 9' | sed 's/.*pid \([0-9]*\).*/\1/')
+[ -n "$P7" ] && [ -n "$P9" ] || fail "waiter spawn lines lost their pid/code pairing"
+[ "$P7" != "$P9" ] || fail "both children report the same pid"
+grep -Fq "[exit] code 7 pid $P7" /tmp/wc-bios.log \
+    || fail "child $P7 did not print the exit code its argv carried"
+grep -Fq "[exit] code 9 pid $P9" /tmp/wc-bios.log \
+    || fail "child $P9 did not print the exit code its argv carried"
+grep -Fq "[waiter] reaped pid $P7 code 7" /tmp/wc-bios.log \
+    || fail "wait() did not return child $P7 with its exit code"
+grep -Fq "[waiter] reaped pid $P9 code 9" /tmp/wc-bios.log \
+    || fail "wait() did not return child $P9 with its exit code"
+{ grep -aq 'sched: deadlock' /tmp/wc-bios.log \
+  && fail "scheduler deadlocked — a waiter was never woken"; } || true
+echo '    ok: wait — spawn with argv, blocking wait, wake-up, zombie reaping'
 echo '    ok: BIOS boot — memory, interrupts, PCI, keyboard (sendkey), log ring'
 
 # 3) UEFI boot (OVMF), same contract minus the PIC-specific line.
@@ -236,9 +276,17 @@ else
                 "step: scheduler ok (two processes, round-robin)" \
                 "\\[spin A\\] start pid 3" "\\[spin B\\] start pid 4" \
                 "step: preemption ok (timer switched a busy process)" \
+                "proc: spawned /bin/exit as pid" \
+                "\\[waiter\\] spawned pid" \
+                "\\[exit\\] code 7 pid" "\\[exit\\] code 9 pid" \
+                "\\[waiter\\] reaped pid" \
+                "\\[waiter\\] all children reaped" \
+                "step: wait ok (spawn with argv + blocking wait + reaping)" \
                 "gfx: framebuffer" "gfx: desktop composited"; do
         grep -aq "$want" /tmp/wc-uefi.log || fail "UEFI log missing: $want"
     done
+    { grep -aq 'sched: deadlock' /tmp/wc-uefi.log \
+      && fail "UEFI run deadlocked — a waiter was never woken"; } || true
     echo '    ok: UEFI boot — same memory + device stack comes up identically'
 fi
 

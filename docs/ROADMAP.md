@@ -194,9 +194,9 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         deliberately not claimed until it had a proof only it could produce.
       - **Three new syscalls:** `getpid(7)`, `sched_yield(8)`, `spawn(9)`.
         Policy is round-robin over the READY set with a numeric priority as the
-        tie-break (lower runs first). `wait(10)` is reserved in `wcabi.h` but
-        deliberately **not wired** — it falls through to "unknown call" rather
-        than pretending to block.
+        tie-break (lower runs first). `wait(10)` was reserved in `wcabi.h` and
+        at first deliberately **not wired** — it fell through to "unknown call"
+        rather than pretending to block. It is now real; see the last bullets.
       - **`/bin/tick` proves the cooperative switch, and so does CI.** The demo
         spawns two copies of one binary with different `argv` labels; each
         prints a line and yields in turn, each resuming its own counter after
@@ -235,6 +235,40 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         and issue ONE write via new `wc_app_*` helpers — a syscall completes
         unpreempted, which makes a single write atomic with respect to
         process switches and keeps CI's greps line-based.
+      - **Blocking `wait()` + `spawn` with argv (v0.1.5)** — the process
+        trilogy closed. `spawn(9)` now takes `rsi=argc, rdx=argv`; because the
+        child gets a *private* address space, each argument string is copied
+        twice — out of ring 3 into a kernel bounce buffer (`static char
+        spawn_argbuf[USER_ARG_MAX][USER_PATH_MAX]`, validated per byte against
+        the *caller's* live tables) and from there onto the child's stack by
+        `proc_create`. `argc <= 0` keeps the old path-only contract. `wait(10)`
+        is the first syscall that does not return into its caller:
+        `proc_wait()` either reaps an existing zombie (pid + exit code, slot to
+        FREE, no switch) or, when there are only live children, saves the frame
+        and marks the parent `PROC_BLOCKED`; a new `SWITCH_BLOCK` arm of
+        `sched_switch` gives the CPU away. `proc_create` stamps each child's
+        `parent` from the running process, so only the real parent can reap it.
+        A child's exit wakes a blocked parent: its pid is planted in the
+        parent's saved `ctx.rax` (the yield arm's trick) and the exit code is
+        staged for `wakeup_deliver()`, which writes the parent's `int *status`
+        *after* the parent's `CR3` is loaded — the only moment that user page
+        is both mapped and writable. When nothing is READY but something is
+        BLOCKED the switch prints an honest `sched: deadlock` marker instead of
+        pretending the wait was satisfied. `WC_ECHILD (-10)` joined the frozen
+        error table.
+      - **A real double-reap bug the timer surfaced, and fixed.** Two children
+        can die before the parent's page tables next run, and the first design
+        let the second exit overwrite the wake the first had already planted —
+        so the parent got the *same* pid twice and the second child's zombie
+        stayed `EXITED` forever. The fix adds an `armed` flag: a wake marks the
+        exact zombie it speaks for, `proc_wait` skips armed slots (they are
+        already promised to a pending return), and a second exit finds the
+        parent no longer `PROC_BLOCKED` so it leaves its zombie unarmed — a
+        normal reap candidate for the next `wait()`. One promise per zombie.
+        CI reads the children's pids back from the log (they are not hardcoded,
+        so moving the demo does not rot the check) and asserts the spawn pid,
+        the child's own `[exit] code N pid P`, and the parent's `reaped pid P
+        code N` all agree for both children, order-free.
 
 ## Phase 6 — Language expansion ⏳
 *Goal: use the right tool per layer (the "asm/C/C++/Rust" promise).*

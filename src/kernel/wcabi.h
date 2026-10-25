@@ -90,6 +90,7 @@ struct wc_dirent {
 #define WC_EPERM    (-1)
 #define WC_ENOENT   (-2)
 #define WC_EBADF    (-9)
+#define WC_ECHILD   (-10)               /* no children to wait for   */
 #define WC_EFAULT   (-14)
 #define WC_EINVAL   (-22)
 #define WC_EMFILE   (-24)

@@ -157,11 +157,22 @@ static int64_t sys_getdirent(uint64_t index, uint64_t up)
     return 0;
 }
 
-/* spawn(path) — start another program from the archive and return its pid. The
- * name is copied out per byte exactly as open() does, so a program cannot move
- * the string under the kernel mid-call; the child gets its own address space
- * and simply becomes the next thing the scheduler runs. */
-static int64_t sys_spawn(uint64_t upath)
+/* spawn(path, argc, argv) — start another program from the archive and return
+ * its pid. The name is copied out per byte exactly as open() does, so a
+ * program cannot move the string under the kernel mid-call.
+ *
+ * argv arrives as a pointer array in the *caller's* address space, and the
+ * child gets a *private* one — so every string is copied twice: out of ring 3
+ * into these kernel bounce buffers (validated per byte against the caller's
+ * live tables), then from the buffers onto the child's stack by proc_create.
+ * A static arena rather than the stack because USER_ARG_MAX × USER_PATH_MAX
+ * is a KiB-scale request and a syscall handler should not grow that per call.
+ * argc <= 0 keeps the old path-only contract: the child runs as its own name,
+ * exactly like the boot demos' NULL argv. */
+static char spawn_argbuf[USER_ARG_MAX][USER_PATH_MAX];
+static const char *spawn_argv[USER_ARG_MAX];
+
+static int64_t sys_spawn(uint64_t upath, uint64_t argc, uint64_t uargv)
 {
     char path[USER_PATH_MAX];
 
@@ -187,7 +198,37 @@ static int64_t sys_spawn(uint64_t upath)
     if (i == 0)
         return WC_EINVAL;
 
-    int pid = proc_spawn_path(path);
+    int n = (int)argc;
+    if (n <= 0) {
+        int solo = proc_spawn_path(path);
+        return solo < 0 ? WC_ENOENT : (int64_t)solo;
+    }
+    if (n > USER_ARG_MAX)
+        return WC_EINVAL;
+    if (!user_ptr_ok(uargv, (uint64_t)n * 8, 0))
+        return WC_EFAULT;
+
+    for (int a = 0; a < n; a++) {
+        uint64_t ua = *(const uint64_t *)(uintptr_t)(uargv + (uint64_t)a * 8);
+        if (!user_ptr_ok(ua, 1, 0))
+            return WC_EFAULT;
+        size_t j = 0;
+        int done = 0;
+        for (; j + 1 < USER_PATH_MAX; j++) {
+            if (!user_ptr_ok(ua + j, 1, 0))
+                break;
+            spawn_argbuf[a][j] = *(const char *)(uintptr_t)(ua + j);
+            if (spawn_argbuf[a][j] == '\0') {
+                done = 1;
+                break;
+            }
+        }
+        if (!done)
+            return WC_EINVAL;      /* unterminated or over-long argument */
+        spawn_argv[a] = spawn_argbuf[a];
+    }
+
+    int pid = proc_create(path, n, spawn_argv, 0);
     return pid < 0 ? WC_ENOENT : (int64_t)pid;
 }
 
@@ -229,7 +270,15 @@ void syscall_handler(struct syscall_frame *f)
         break;
 
     case SYS_SPAWN:
-        f->rax = (uint64_t)sys_spawn(f->rdi);
+        f->rax = (uint64_t)sys_spawn(f->rdi, f->rsi, f->rdx);
+        break;
+
+    case SYS_WAIT:
+        /* The one call that may not return into the caller: proc_wait() either
+         * reaps a zombie right here (result in rax, ordinary return) or saves
+         * this frame and switches, so the iretq below resumes *another*
+         * process and this call "returns" only when a child's exit wakes it. */
+        f->rax = (uint64_t)proc_wait(f, f->rdi);
         break;
 
     case SYS_EXIT:

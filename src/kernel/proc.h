@@ -48,8 +48,16 @@ enum proc_state {
     PROC_FREE = 0,    /* slot unused                                       */
     PROC_READY,       /* runnable, waiting its turn                        */
     PROC_RUNNING,     /* owns the CPU now                                  */
-    PROC_EXITED       /* ran to exit(); reaped when the table slot is freed */
+    PROC_EXITED,      /* ran to exit(); the zombie, reaped by parent's wait */
+    PROC_BLOCKED      /* asleep in wait(): only a child's exit wakes it     */
 };
+
+/* The switch a syscall asks for, passed to the scheduler's one switch point:
+ * retire the caller as READY (yield), as EXITED (exit, with a code), or as
+ * BLOCKED (wait found no zombie yet and there are live children). */
+#define SWITCH_YIELD 0
+#define SWITCH_EXIT  1
+#define SWITCH_BLOCK 2
 
 /* One process. The context is a whole syscall_frame: for a process that has
  * already run it is what the stub will pop on resume; for one that has not run
@@ -66,6 +74,11 @@ struct proc {
     uint64_t tables[PROC_TABLES_MAX];        /* private page-table frames */
     unsigned ntables;
     int      exit_code;
+    int      parent;                /* pid that may reap this zombie; 0 = none  */
+    int      armed;                 /* 1 = a wait wake already promises this pid */
+    uint64_t wait_out;              /* blocked waiter's int *user pointer, or 0 */
+    int      wake_code;             /* exit code staged for that pointer        */
+    int      wake_pending;          /* 1 = deliver wake_code on next resume     */
     char     name[PROC_NAME_MAX];
 };
 
@@ -86,6 +99,14 @@ void proc_run_all(void);
  * back to proc_run_all() when there is none. proc_exit does not return. */
 void proc_yield(struct syscall_frame *f);
 void proc_exit(struct syscall_frame *f, int code);
+
+/* wait(int *code_out) from ring 3. Reaps a zombie child (slot back to FREE,
+ * child's exit code written to *code_out) and returns its pid; blocks the
+ * caller when it still has live children that have not exited; answers
+ * -WC_ECHILD when it has none. Blocking rewrites `f` like yield does, so the
+ * syscall "returns" only when a child's exit wakes this process. Only valid
+ * while the scheduler is driving the CPU. */
+int  proc_wait(struct syscall_frame *f, uint64_t uout);
 
 /* The pid of the running process, or 0 when the scheduler is not driving
  * anything (so the shell's own ring-3 runs report a plain, honest 0). */

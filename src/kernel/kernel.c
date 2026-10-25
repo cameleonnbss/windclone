@@ -552,6 +552,24 @@ void kmain(void)
                     proc_run_all();
                     serial_write("step: preemption ok (timer switched a busy process)\n");
                 }
+
+                /* The trilogy's last act: a parent that sleeps. /bin/waiter
+                 * spawns two /bin/exit children with real argv (7 and 9, shuttled
+                 * through kernel bounce buffers into a private address space),
+                 * then calls wait() — the first syscall in this kernel that does
+                 * not return into its caller. The parent goes BLOCKED, the CPU
+                 * goes to the children, and each child's exit wakes the parent
+                 * with that child's pid and code. The printed spawn/reap pairs
+                 * are the proof; CI checks them order-free, because whether the
+                 * parent blocks before or after the first child dies is tick
+                 * luck, while the reap pairs themselves are not. */
+                {
+                    const char *argv_w[1] = { "waiter" };
+                    serial_write("proc: one parent, two children, a blocking wait\n");
+                    proc_create("/bin/waiter", 1, argv_w, 0);
+                    proc_run_all();
+                    serial_write("step: wait ok (spawn with argv + blocking wait + reaping)\n");
+                }
             }
             if ((int)(last_second / 100) >= dump_at_second) {
                 serial_write("log ring (most recent): ");

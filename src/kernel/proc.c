@@ -13,6 +13,7 @@
 #include "serial.h"
 #include "string.h"
 #include "usermode.h"   /* USER_* window + the argv convention */
+#include "wcabi.h"       /* WC_ECHILD / WC_EFAULT for proc_wait */
 
 void panic(const char *why);
 
@@ -151,6 +152,23 @@ static void proc_free_space(struct proc *p)
     p->p4_virt = 0;
 }
 
+/* Is [addr, addr+len) a buffer the *running* process can write — mapped in
+ * the table we are switched into, user-accessible, writable? The short sibling
+ * of syscall.c's user_ptr_ok(): proc.c needs it for the four bytes wait() asks
+ * the kernel to fill in, and the walk must consult p4 (the working table), not
+ * trust that a user address is reachable just because the caller is ring 3. */
+static int user_write_ok(uint64_t addr, uint64_t len)
+{
+    if (!user_range_ok(addr, len))
+        return 0;
+    for (uint64_t page = addr & ~0xFFFULL; page < addr + len; page += 0x1000) {
+        uint64_t flags = paging_flags(page);
+        if (!(flags & PTE_PRESENT) || !(flags & PTE_USER) || !(flags & PTE_WRITE))
+            return 0;
+    }
+    return 1;
+}
+
 /* The next process to run: lowest priority number wins; among equals, the one
  * at or after the round-robin cursor, wrapping. -1 when nothing is READY. */
 static int pick_ready(int from)
@@ -246,6 +264,16 @@ int proc_create(const char *path, int argc, const char *const *argv,
     p->ctx.rdi = (uint64_t)argc;
     p->ctx.rsi = rsp + 8;
 
+    /* The reaper link: a process spawned while the scheduler runs belongs to
+     * the process that spawned it, so its zombie waits for *that* parent's
+     * wait() and nobody else's. Boot-created demo processes have no parent
+     * (current < 0 before proc_run_all) and simply die and get forgotten. */
+    p->parent = (sched_active && current >= 0) ? table[current].pid : 0;
+    p->armed = 0;
+    p->wait_out = 0;
+    p->wake_code = 0;
+    p->wake_pending = 0;
+
     p->priority = priority;
     p->exit_code = 0;
     p->pid = next_pid++;
@@ -272,27 +300,79 @@ int proc_spawn_path(const char *path)
 
 /* --- the scheduler ---------------------------------------------------- */
 
+/* A woken parent carries its exit code through the table, not through a
+ * register: the child that woke it may not run again for a while, and the
+ * parent's `int *status` is only writable under the *parent's* page tables.
+ * So the write is deferred to the moment of resume, when q's CR3 is live and
+ * the walker sees the stack slot wait() pointed at. A stale or unroutable
+ * pointer is dropped honestly — a switch is not an excuse for a fault. */
+static void wakeup_deliver(struct proc *q)
+{
+    if (!q->wake_pending)
+        return;
+    q->wake_pending = 0;
+    if (q->wait_out != 0 && user_write_ok(q->wait_out, sizeof(int)))
+        memcpy((void *)(uintptr_t)q->wait_out, &q->wake_code, sizeof(int));
+}
+
 /* The single switch point. Save the running context, retire the caller
- * (READY on yield, EXITED on exit), and either resume another process by
- * rewriting `f` for the stub's iretq, or — when none is left — load the kernel
- * table, reap the exit, and unwind to proc_run_all(). Interrupts are off here
- * (int 0x80 is an interrupt gate), so nothing re-enters mid-switch. */
-static void sched_switch(struct syscall_frame *f, int exiting, int code)
+ * (READY on yield, EXITED on exit, BLOCKED on wait), and either resume another
+ * process by rewriting `f` for the stub's iretq, or — when none is left —
+ * load the kernel table, reap the exit, and unwind to proc_run_all().
+ * Interrupts are off here (int 0x80 is an interrupt gate), so nothing re-enters
+ * mid-switch. */
+static void sched_switch(struct syscall_frame *f, int mode, int code)
 {
     int c = current;
     table[c].ctx = *f;
-    if (exiting) {
+    if (mode == SWITCH_EXIT) {
         table[c].exit_code = code;
         table[c].state = PROC_EXITED;
+    } else if (mode == SWITCH_BLOCK) {
+        table[c].state = PROC_BLOCKED;
     } else {
         table[c].state = PROC_READY;
         table[c].ctx.rax = 0;      /* sched_yield() returns 0 when resumed */
     }
 
+    /* The process trilogy's last edge: a child that exits while its parent
+     * sits in wait() wakes it. The zombie's table slot stays for the parent
+     * to reap — only its memory is given back below — and the pid is planted
+     * as the return value of the wait() call that blocked, exactly the way
+     * the yield arm returns 0. This happens BEFORE pick_ready so the woken
+     * parent is part of the set being chosen from.
+     *
+     * The armed flag is what makes this safe to attempt for *every* exit, not
+     * only exits that find a BLOCKED parent. A wake promises one specific
+     * zombie; if a second child dies while the first wake is still undelivered
+     * (the parent READY but a tick not yet resumed it), overwriting the
+     * promise would hand the parent the same pid twice — the first wake's
+     * numbers were already planted, and its zombie would still be sitting
+     * EXITED when the parent's next wait scanned the table. So the child a
+     * wake speaks for is armed, the scan below skips armed slots, and an exit
+     * whose parent is awake already leaves its zombie unarmed — an ordinary,
+     * fully-formed reap candidate. There is exactly one promise per zombie.
+     * This is a real bug this comment used to not exist for. */
+    if (mode == SWITCH_EXIT && table[c].parent != 0) {
+        for (int i = 0; i < PROC_MAX; i++) {
+            struct proc *pp = &table[i];
+            if (pp->pid != table[c].parent)
+                continue;
+            if (pp->state == PROC_BLOCKED && !pp->wake_pending) {
+                pp->state = PROC_READY;
+                pp->ctx.rax = (uint64_t)table[c].pid;
+                pp->wake_code = code;
+                pp->wake_pending = 1;
+                table[c].armed = 1;
+            }
+            break;
+        }
+    }
+
     int n = pick_ready(rr);
     if (n >= 0) {
         struct proc *q = &table[n];
-        if (exiting)
+        if (mode == SWITCH_EXIT)
             proc_free_space(&table[c]);   /* safe: leaving c's CR3 now */
         current = n;
         q->state = PROC_RUNNING;
@@ -300,13 +380,25 @@ static void sched_switch(struct syscall_frame *f, int exiting, int code)
         paging_set_working((uint64_t *)(uintptr_t)q->p4_virt);
         paging_switch(q->cr3);
         *f = q->ctx;
-        return;                            /* stub iretq resumes q */
+        wakeup_deliver(q);         /* parent's CR3 is live: deliver now */
+        return;                    /* stub iretq resumes q */
     }
 
-    /* Nobody runnable: the last process has exited. Return the kernel to its
-     * own view before freeing anything, then unwind to proc_run_all(). */
+    /* Nobody runnable. Either the last process exited (caller EXITED, every
+     * other slot already reaped long ago) — the honest end, unwind home — or
+     * the caller just blocked and nothing else can ever run: a cycle wait can
+     * only sleep through. Report that truthfully instead of pretending, then
+     * unwind; the blocked slot dies with the scheduler, which is exactly what
+     * "this demo would hang forever" means in words. */
+    int blocked = 0;
+    for (int i = 0; i < PROC_MAX; i++)
+        if (table[i].state == PROC_BLOCKED)
+            blocked = 1;
+    if (blocked)
+        serial_write("sched: deadlock — a process is waiting but nothing is runnable\n");
+
     paging_use_kernel();
-    if (exiting)
+    if (mode == SWITCH_EXIT)
         proc_free_space(&table[c]);
     current = -1;
     user_exit_to_kernel();
@@ -320,7 +412,7 @@ void proc_yield(struct syscall_frame *f)
         f->rax = 0;
         return;
     }
-    sched_switch(f, 0, 0);
+    sched_switch(f, SWITCH_YIELD, 0);
 }
 
 /* Timer-driven preemption — the step beyond the cooperative switch.
@@ -361,6 +453,7 @@ int proc_timer_preempt(struct syscall_frame *f)
     paging_set_working((uint64_t *)(uintptr_t)q->p4_virt);
     paging_switch(q->cr3);
     *f = q->ctx;
+    wakeup_deliver(q);
     return 1;
 }
 
@@ -371,7 +464,66 @@ void proc_exit(struct syscall_frame *f, int code)
         extern void usermode_exit(int code) __attribute__((noreturn));
         usermode_exit(code);
     }
-    sched_switch(f, 1, code);
+    sched_switch(f, SWITCH_EXIT, code);
+}
+
+/* wait(int *code_out) — the blocking half, and the only way a zombie dies.
+ *
+ * Three honest answers, in this order:
+ *
+ * 1. A child already EXITED (a zombie: memory returned at exit, table slot
+ *    kept precisely for this moment): hand its pid and exit code back, reap
+ *    the slot to FREE, and return without switching. Same-turn reaps matter —
+ *    the parent's first wait after the wake-up still has a second child's
+ *    zombie to take, and a real Unix behaves exactly the same way.
+ * 2. No zombie but a live child (READY/RUNNING/BLOCKED): save this frame the
+ *    way yield does, go BLOCKED, and switch. The call "returns" when a child
+ *    exits — sched_switch plants the pid in ctx.rax and stages the code for
+ *    wakeup_deliver() to write once this process's CR3 is live again.
+ * 3. No children at all: -WC_ECHILD, because wait() is not a sleep timer.
+ *
+ * The uout pointer is validated here against *this* process's page tables (we
+ * run under its CR3) and again at delivery, under the same one later. */
+int proc_wait(struct syscall_frame *f, uint64_t uout)
+{
+    if (!sched_active || current < 0)
+        return WC_ECHILD;          /* wait() outside the scheduler cannot block */
+
+    struct proc *p = &table[current];
+
+    for (int i = 0; i < PROC_MAX; i++) {
+        struct proc *z = &table[i];
+        if (z->state == PROC_EXITED && z->parent == p->pid && !z->armed) {
+            int pid = z->pid, code = z->exit_code;
+            if (uout != 0) {
+                if (!user_write_ok(uout, sizeof code))
+                    return WC_EFAULT;
+                memcpy((void *)(uintptr_t)uout, &code, sizeof code);
+            }
+            z->state = PROC_FREE;
+            z->parent = 0;
+            z->wait_out = 0;
+            z->wake_pending = 0;
+            return pid;
+        }
+    }
+
+    int live = 0;
+    for (int i = 0; i < PROC_MAX; i++)
+        if (table[i].parent == p->pid &&
+            (table[i].state == PROC_READY ||
+             table[i].state == PROC_RUNNING ||
+             table[i].state == PROC_BLOCKED))
+            live = 1;
+    if (!live)
+        return WC_ECHILD;
+
+    if (uout != 0 && !user_write_ok(uout, sizeof(int)))
+        return WC_EFAULT;
+    p->wait_out = uout;
+    sched_switch(f, SWITCH_BLOCK, 0);
+    /* the switch never returns to this frame */
+    return WC_ECHILD;
 }
 
 int proc_current_pid(void)

@@ -105,6 +105,16 @@ On boot the kernel:
    asserts the two processes' output line ranges *cross*, which a
    run-to-completion loop cannot fake — for the spins it is the only way they
    can interleave at all, so the tick really does preempt.
+15. lets a program **not come back from a syscall**. `wait()` is the first
+   call in this kernel that does not return into its caller: `/bin/waiter`
+   spawns `/bin/exit 7` and `/bin/exit 9` — spawn now carries a real `argv`
+   through kernel bounce buffers into the child's private address space —
+   then sleeps as `PROC_BLOCKED` while the children burn their turns, and
+   each child's exit wakes it with that child's pid, its exit code written
+   through the pointer under the *parent's* page tables. The zombie's table
+   slot survives until the parent reaps it, so `spawn → exit → wait → reap`
+   closes the process trilogy the way Unix does it; CI cross-checks the
+   pid/code pairs the parent saw against the ones the children printed.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
@@ -153,9 +163,9 @@ src/kernel/        C kernel: entry (kmain), console + memory managers,
                    per-process page tables + preemptive round-robin scheduler
                    (proc), interrupt stubs (NASM), string + port-I/O helpers
 src/user/          the programs that run in ring 3 — hello, motd, ls, cat,
-                   echo, tick, spin — with no libc of their own: a header of
-                   inline `int 0x80` wrappers and seven static inline string
-                   helpers
+                   echo, tick, spin, exit, waiter — with no libc of their
+                   own: a header of inline `int 0x80` wrappers and seven
+                   static inline string helpers
 src/boot/          hand-written NASM boot code (two-stage educational MBR)
 rootfs/            what goes into the initrd: packed to a ustar tar, loaded
                    by the bootloader as a module, read in place by the kernel
