@@ -35,6 +35,10 @@ Scenarios (each one asserts the serial markers the kernel prints):
                program's output to land strictly between two of its own rounds
                as a sub-screen flip - on v0.1.12 every such frame was the whole
                desktop
+    resize     prove a window resizes by dragging its border: raise the status
+               window, grow it from its bottom-right corner (width and height
+               follow the cursor and stay inside the desktop), then shrink it
+               far past the floor and require it to stop at the minimum size
 
 Exit status 0 = every step did what the serial log says it did.
 SPDX-License-Identifier: MIT
@@ -65,6 +69,26 @@ MENU_HEADER_H, MENU_ITEM_H, MENU_FOOTER_H, MENU_GAP = 30, 22, 26, 6
 # title_button() says for a window at that rect.
 PROG_W, PROG_H = 500, 240
 PROG_X0, PROG_Y0, PROG_STEP_X, PROG_STEP_Y = 150, 56, 24, 22
+# v0.1.14 window resizing. A border grab counts within RESIZE_EDGE pixels of
+# an edge, and a shrink stops at MIN_W x MIN_H. These mirror the kernel's
+# RESIZE_EDGE / MIN_W / MIN_H so the scenario can drive and assert against them.
+RESIZE_EDGE, MIN_W, MIN_H = 5, 200, 120
+
+
+def last_resized(marker="wm: window resized "):
+    """Return (w, h) from the LAST `wm: window resized WxH` line, or None. The
+    resize scenario produces two of them (a grow, then a shrink to the floor),
+    so the test reads the most recent one rather than matching the first."""
+    try:
+        with open(LOG, errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    hits = re.findall(r"wm: window resized (\d+)x(\d+)", text)
+    if not hits:
+        return None
+    w, h = hits[-1]
+    return (int(w), int(h))
 
 
 class Monitor:
@@ -403,6 +427,33 @@ def scenario_actions(sc, mon, W, H):
             raise SystemExit("a running program still repainted the whole screen")
         # let it reach its honest end so the log is clean for the reap marker
         wait_serial(r"shell: reaped pid %s code 5\n" % pid)
+    elif sc == "resize":
+        # v0.1.14: drag a border to resize a window. The status window (116,88,
+        # 400x300) has room to grow down-right, but the terminal overlaps its
+        # bottom-right corner, so raise the status window first by clicking a
+        # body point clear of the terminal — that is the front-to-back rule a
+        # user hits too. Everything the asserts check is read back from the
+        # kernel's own `wm: window resized WxH` line, never a guessed geometry.
+        sx, sy = 116, 88
+        mon.click(sx + 40, sy + TITLE_H + 40)          # raise the status window
+        mon.drag(sx + STATUS_W - 2, sy + STATUS_H - 2, 60, 50)  # grow the corner
+        m = last_resized()
+        if m is None:
+            raise SystemExit("dragging a border logged no resize")
+        w1, h1 = m
+        if not (w1 > STATUS_W and h1 > STATUS_H and w1 <= W - sx):
+            raise SystemExit("grow resize wrong: %dx%d from %dx%d (W=%d)"
+                             % (w1, h1, STATUS_W, STATUS_H, W))
+        # Shrink far past the floor: grab the now-larger corner and drag inward.
+        # The window must stop at MIN_W x MIN_H — proof of the min-size floor,
+        # not merely that it got smaller. Corner read from the size just measured.
+        mon.drag(sx + w1 - 2, sy + h1 - 2, -2000, -2000)
+        m = last_resized()
+        if m is None:
+            raise SystemExit("shrinking a border logged no resize")
+        if m != (MIN_W, MIN_H):
+            raise SystemExit("min size not enforced: got %dx%d, want %dx%d"
+                             % (m[0], m[1], MIN_W, MIN_H))
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -443,6 +494,9 @@ MARKERS = {
     # a sub-screen flip strictly between two hold rounds is asserted in the
     # scenario; these markers prove the back buffer and the flip log exist
     "progdamage": ["gfx: back buffer", "gfx: flip"],
+    # the grow/shrink-to-floor arithmetic is asserted in the scenario against
+    # the kernel's own resize line; this marker is what that line turns on
+    "resize":    ["wm: window resized"],
 }
 
 

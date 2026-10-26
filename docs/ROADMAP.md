@@ -490,6 +490,21 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
 - [x] Cursor + one draggable window: grab the title bar, the window follows,
       clamped to the desktop (a drag flips the whole screen; a bare cursor move
       is clipped to its damage band since the double-buffer work above)
+- [x] Window resizing (v0.1.14): grab a window's left, right or bottom edge —
+      or a bottom corner, which sets two bits of the same mask — and drag; the
+      grabbed edges follow the cursor while the opposite ones stay put, down to
+      a `MIN_W`×`MIN_H` floor and a clamp to the desktop. A border press raises
+      the window like any click, and only the window body reaches this — the
+      title bar and its minimise/maximise/close buttons live above `TITLE_H`,
+      so a grab never clashes with them. Proven headlessly by a real PS/2 border
+      drag: `tools/qemu-desktop.py resize` raises the status window, grows its
+      bottom-right corner, and reads the width/height back out of the kernel's own
+      `wm: window resized WxH` line to check it followed the cursor and stayed
+      inside the desktop, then shrinks it far past the floor and requires it to
+      stop at exactly `MIN_W`×`MIN_H`. Out of scope, and the honest next step:
+      the top edge and top corners (a top grab has to coexist with title-bar
+      dragging and the buttons), and a resize cursor that changes shape over a
+      border.
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
 

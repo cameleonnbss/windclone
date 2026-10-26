@@ -66,9 +66,15 @@
 #define TASK_X      132        /* first taskbar window button */
 #define TASK_W      168
 #define TASK_GAP    6
+#define RESIZE_EDGE 5          /* px band that counts as a border grab */
+#define MIN_W       200        /* floors: keep console/program text usable */
+#define MIN_H       120
 
 enum { WIN_STATUS, WIN_TRASH, WIN_TERM, WIN_PROGRAM };
 enum { BTN_MIN, BTN_MAX, BTN_CLOSE, BTN_NONE };
+/* Which borders a press grabbed, as a bitmask: a corner sets two bits. The
+ * body pass never produces RS_TOP (the title bar owns that edge this release). */
+enum { RS_NONE = 0, RS_LEFT = 1, RS_RIGHT = 2, RS_TOP = 4, RS_BOTTOM = 8 };
 
 /* Three windows are fixed (status, trash, terminal) and live at indices 0..2,
  * their kind equalling their index. Beyond them is a pool of program windows —
@@ -98,6 +104,7 @@ static struct window wins[WIN_TOTAL];
 static int order[WIN_TOTAL] = { WIN_STATUS, WIN_TERM, WIN_TRASH,
                                 3, 4, 5, 6, 7, 8 };  /* back -> front */
 static int dragging, grab_dx, grab_dy, drag_win;
+static int resizing, resize_win, resize_mask, resize_changed;
 static int prev_left;
 static int laid_out;
 
@@ -276,6 +283,21 @@ static int title_button_at(const struct window *w, int mx, int my)
             return BTN_CLOSE - i;
     }
     return BTN_NONE;
+}
+
+/* Is (mx,my) inside window w and within RESIZE_EDGE pixels of one of its
+ * borders? Returns the edge bitmask (a corner sets two bits). Called only
+ * from the window-body pass, so the title bar and its buttons are never in
+ * question here. */
+static int resize_edge_at(const struct window *w, int mx, int my)
+{
+    if (mx < w->x || mx >= w->x + w->w || my < w->y || my >= w->y + w->h)
+        return RS_NONE;
+    int m = RS_NONE;
+    if (mx < w->x + RESIZE_EDGE)         m |= RS_LEFT;
+    if (mx >= w->x + w->w - RESIZE_EDGE) m |= RS_RIGHT;
+    if (my >= w->y + w->h - RESIZE_EDGE) m |= RS_BOTTOM;
+    return m;
 }
 
 static void draw_logo(int x, int y, int pane, int gap)
@@ -785,7 +807,11 @@ static void handle_press(int mx, int my, int W, int H)
     }
 
     /* Window bodies: clicking one raises it. Focus without a drag, which
-     * is what makes two overlapping windows usable at all. */
+     * is what makes two overlapping windows usable at all. A press within
+     * RESIZE_EDGE pixels of a border instead starts a resize - the grab raises
+     * the window too, then the frame loop tracks the cursor. The title-bar
+     * loop above already owns everything inside TITLE_H, so the left/right/
+     * bottom bands that reach here never clash with a drag or a button. */
     for (int i = WIN_TOTAL - 1; i >= 0; i--) {
         int id = order[i];
         struct window *w = &wins[id];
@@ -795,6 +821,13 @@ static void handle_press(int mx, int my, int W, int H)
             my < w->y || my >= w->y + w->h)
             continue;
         raise_window(id);
+        int edge = w->max ? RS_NONE : resize_edge_at(w, mx, my);
+        if (edge) {
+            resizing = 1;
+            resize_win = id;
+            resize_mask = edge;
+            resize_changed = 0;
+        }
         return;
     }
 
@@ -930,14 +963,47 @@ void desktop_frame(void)
     int press = left && !prev_left;     /* edge, not level: one action per click */
     prev_left = left;
 
-    if (!left)
+    /* Release closes whichever gesture was live. A resize logs its final
+     * geometry once - and only if the size actually changed, so a stray grab
+     * with no move is silent. */
+    if (!left && (dragging || resizing)) {
+        if (resizing && resize_changed)
+            klog("wm: window resized %dx%d",
+                 wins[resize_win].w, wins[resize_win].h);
         dragging = 0;
+        resizing = 0;
+        resize_mask = 0;
+        resize_changed = 0;
+    }
 
     if (dragging) {
         struct window *w = &wins[drag_win];
         w->x = mx - grab_dx;
         w->y = my - grab_dy;
         clamp_to_desktop(w, W, H);
+    }
+
+    /* Resize: the grabbed edges follow the cursor, the opposite edges stay put.
+     * Floors keep the window usable; a desktop clamp stops it growing off the
+     * right/bottom or a left-drag past x=0. A maximised window never reaches
+     * here (handle_press returned RS_NONE for it). */
+    if (resizing) {
+        struct window *w = &wins[resize_win];
+        int right = w->x + w->w;          /* the edge a left-drag leaves fixed */
+        int nx = w->x, nw = w->w, nh = w->h;
+        if (resize_mask & RS_RIGHT)  nw = mx - w->x;
+        if (resize_mask & RS_BOTTOM) nh = my - w->y;
+        if (resize_mask & RS_LEFT)  { nx = mx; nw = right - mx; }
+        if (nw < MIN_W) { if (resize_mask & RS_LEFT) nx = right - MIN_W; nw = MIN_W; }
+        if (nx < 0) { nw -= -nx; nx = 0; }         /* a left-drag can't pass 0 */
+        if (nw < MIN_W) nw = MIN_W;
+        if (nw > W - nx) nw = W - nx;              /* clamp to the desktop */
+        if (nh < MIN_H) nh = MIN_H;
+        if (nh > H - TASKBAR_H - w->y) nh = H - TASKBAR_H - w->y;
+        if (nw != w->w || nh != w->h || nx != w->x) {
+            w->x = nx; w->w = nw; w->h = nh;
+            resize_changed = 1;
+        }
     }
 
     if (press)
@@ -953,6 +1019,7 @@ void desktop_frame(void)
     int full = !painted_once
             || press
             || dragging
+            || resizing
             || (menu_open != prev_menu_open)
             || !gfx_has_backbuffer();
 

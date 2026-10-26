@@ -649,6 +649,15 @@ python3 tools/qemu-desktop.py windclone.iso maxmax
 python3 tools/qemu-desktop.py windclone.iso close
 python3 tools/qemu-desktop.py windclone.iso start
 
+# v0.1.14: dragging a border resizes a window. The scenario grows the status
+# window from its bottom-right corner (the geometry read from the kernel's own
+# `wm: window resized WxH` line, checked to follow the cursor and stay inside
+# the desktop), then shrinks it far past the floor and requires it to stop at
+# MIN_W x MIN_H — so the min-size clamp is proven, not just that it got smaller.
+echo '==> window resizing (drag a border; min size; desktop clamp)'
+python3 tools/qemu-desktop.py windclone.iso resize \
+    || fail 'a window could not be resized by dragging its border'
+
 # v0.1.12: the double buffer + damage claim, measured. The scenario reads the
 # kernel's own "gfx: flip <n> rects, <area> px" lines and requires three things:
 # the boot frame flipped the whole screen, a pure mouse move flipped only a
