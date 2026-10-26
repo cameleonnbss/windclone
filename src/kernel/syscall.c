@@ -276,6 +276,16 @@ void syscall_handler(struct syscall_frame *f)
         f->rax = (uint64_t)proc_current_pid();
         break;
 
+    case SYS_GETPPID:
+        /* The parent as the table owns it at this instant, which is the point:
+         * a process whose parent died has been re-parented to the adopter by
+         * then (proc.c), so this answers with pid 1 instead of with the pid of
+         * something that no longer exists. It is the only call here whose result
+         * can change while a program runs, and no argument to validate — the
+         * answer is a number the caller cannot influence. */
+        f->rax = (uint64_t)proc_current_ppid();
+        break;
+
     case SYS_SCHED_YIELD:
         /* Cooperative switch: proc_yield() replaces *f with the next process's
          * context (and loads its CR3), so the stub's iretq resumes *that*

@@ -90,6 +90,16 @@ static inline long wc_getpid(void)
     return wc_call1(SYS_GETPID, 0);
 }
 
+/* The pid of whoever the table says owns us *right now*. It is the only number
+ * here that can change during a program's life: if the process that spawned us
+ * dies first, the kernel re-parents us to its adopter (the shell, pid 1) and this
+ * call starts answering that instead. An orphan is therefore able to witness its
+ * own adoption from ring 3 rather than take the kernel's log line on trust. */
+static inline long wc_getppid(void)
+{
+    return wc_call1(SYS_GETPPID, 0);
+}
+
 /* Give the CPU up and come back later. This is the cooperative half of the
  * scheduler: the kernel switches to the next runnable process and returns here
  * as if the call had simply finished. Returns 0. */

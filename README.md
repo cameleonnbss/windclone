@@ -157,6 +157,16 @@ On boot the kernel:
    because the shell genuinely is there. Typing `vanish` proves the other half:
    a program the shell starts can now be *killed*, so the `-9` arrives at the
    prompt and has to be reported as `-9` instead of a tidy, invented `0`.
+19. **adopts an orphan.** A parent that dies while its child still runs used to
+   leave that child pointing at a dead pid no `wait()` could ever name, so its
+   exit code went unread. When a slot reaches `EXITED` — by exit or by kill — the
+   scheduler now re-parents every one of its children onto an adopter (the shell
+   slot today, the seam left for a future `/bin/init`) before waking anyone, so
+   the adopter collects the code. `/bin/orphan` is the proof: it spawns
+   `/bin/nest`, exits without waiting, and `/bin/nest` re-reads the new
+   `getppid()` (`SYS_GETPPID`) each round to show, from inside the adopted
+   process, that its parent changed underneath it — then its exit code 7 comes
+   back through the shell's reap line.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
@@ -206,7 +216,7 @@ src/kernel/        C kernel: entry (kmain), console + memory managers,
                    (proc), interrupt stubs (NASM), string + port-I/O helpers
 src/user/          the programs that run in ring 3 — hello, motd, ls, cat,
                    echo, tick, spin, exit, waiter, bell, reaper, vanish,
-                   whoami — with no libc of their own: a header of inline
+                   whoami, orphan, nest — with no libc of their own: a header of inline
                    `int 0x80` wrappers and eight static inline string helpers
 src/boot/          hand-written NASM boot code (two-stage educational MBR)
 rootfs/            what goes into the initrd: packed to a ustar tar, loaded

@@ -594,6 +594,33 @@ void kmain(void)
                     proc_run_all();
                     serial_write("step: kill ok (SIGKILL ends a process, its parent reaps it)\n");
                 }
+
+                /* The direction the four verbs never covered. spawn, exit, wait
+                 * and kill all describe what a parent does *to* a child; none of
+                 * them says what happens to a child when the parent dies first.
+                 * Until now the answer was: nothing good. /bin/orphan spawns
+                 * /bin/nest and exits without waiting, so nest outlives the
+                 * process that made it, and the pair (its pid, its exit code 7)
+                 * used to sit in a slot whose parent pid pointed at somebody who
+                 * had already been reaped — unwaitable, unkillable, freed in
+                 * silence by the sweep at the end of the run.
+                 *
+                 * The scheduler does not stop for this: nest stays READY and runs
+                 * to its own ending, which is why the run is a proof and not a
+                 * hang. What changed is ownership. The shell's slot (pid 1, the
+                 * only process here that outlives every program it started) is
+                 * the adopter, so the kernel prints the re-parenting, nest reads
+                 * the new parent back through getppid() from ring 3, and the code
+                 * 7 arrives as "shell: reaped pid N code 7" — a sentence this
+                 * kernel could not write before. tools/local-test.sh ties the four
+                 * numbers together rather than trusting any one of them. */
+                {
+                    const char *argv_o[1] = { "orphan" };
+                    serial_write("proc: a parent that dies before its child does\n");
+                    proc_create("/bin/orphan", 1, argv_o, 0);
+                    proc_run_all();
+                    serial_write("step: adoption ok (an orphan is re-parented and its exit code comes back)\n");
+                }
             }
             if ((int)(last_second / 100) >= dump_at_second) {
                 serial_write("log ring (most recent): ");

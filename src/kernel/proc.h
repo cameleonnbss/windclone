@@ -37,6 +37,18 @@
  * spawn/wait/kill at all and lets the shell reap them instead of having the
  * end-of-run sweep forget them. See proc_shell_start() and proc_run_program().
  *
+ * Parenthood has a second half, and it is the one a process tree only shows when
+ * somebody dies too early: a parent that exits before its children does not take
+ * them with it, and it must not leave them ownerless either. The shell slot is
+ * therefore also the *adopter* — every orphan's `parent` is rewritten to pid 1 at
+ * the moment of the death, whether the child was running or already a zombie, and
+ * the exit code it will leave becomes collectable by somebody instead of written
+ * into a slot no wait() could ever name. kill() does the same for its victim's
+ * children; there are only two ways a process ends and both of them place the
+ * leftovers. The claim is testable from both sides of the boundary at once: the
+ * kernel prints the re-parenting, and the adopted program reads the new pid back
+ * through getppid().
+ *
  * SPDX-License-Identifier: MIT
  */
 #ifndef WINDCLONE_PROC_H
@@ -56,7 +68,9 @@ enum proc_state {
     PROC_FREE = 0,    /* slot unused                                       */
     PROC_READY,       /* runnable, waiting its turn                        */
     PROC_RUNNING,     /* owns the CPU now                                  */
-    PROC_EXITED,      /* ran to exit(); the zombie, reaped by parent's wait */
+    PROC_EXITED,      /* ran to exit(); the zombie, reaped by parent's wait —
+                      * unless the wake that carried its pid and code already
+                      * answered that wait, in which case it ends here       */
     PROC_BLOCKED,     /* asleep in wait(): only a child's exit wakes it     */
     PROC_KERNEL       /* a slot owned by kernel code, not by a CPU context:
                        * the desktop shell's own entry. It has no address
@@ -89,10 +103,11 @@ struct proc {
     unsigned ntables;
     int      exit_code;
     int      parent;                /* pid that may reap this zombie; 0 = none  */
-    int      armed;                 /* 1 = a wait wake already promises this pid */
     uint64_t wait_out;              /* blocked waiter's int *user pointer, or 0 */
     int      wake_code;             /* exit code staged for that pointer        */
-    int      wake_pending;          /* 1 = deliver wake_code on next resume     */
+    int      wake_pending;          /* 1 = a child's death has already promised
+                                     * this wait() its pid; also the guard that
+                                     * keeps a second death from overwriting it  */
     char     name[PROC_NAME_MAX];
 };
 
@@ -151,6 +166,13 @@ int  proc_kill(int pid, int sig, struct syscall_frame *f);
  * which has no table entry; a program the desktop shell starts now has one, so
  * it answers with a real pid. */
 int  proc_current_pid(void);
+
+/* The pid of the running process's parent, or 0 when it has none (a process the
+ * kernel started for a boot demo) or when the scheduler is not driving anything.
+ * This is the parent as the table owns it *now*, so a program that was adopted
+ * when its parent died answers with the adopter's pid — the ring-3 half of the
+ * evidence that adoption happened. */
+int  proc_current_ppid(void);
 
 /* Non-zero while proc_run_all() owns the exit path — the flag that tells
  * SYS_EXIT to route through the scheduler instead of unwinding to the shell's

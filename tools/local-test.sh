@@ -95,18 +95,21 @@ sleep 6
 # `ls` enumerates the archive through SYS_GETDIRENT, `echo zzz` proves the
 # command line reached _start (the word comes back verbatim), and `cat
 # /etc/issue` prints bytes that exist nowhere else in this log. `spc` is
-# what this QEMU's monitor calls the space bar. The last three words are the
+# what this QEMU's monitor calls the space bar. The last four words are the
 # process table seen from a keyboard: `reaper` runs a real child, kills it and
-# reaps it, `whoami` reports its own pid and tries to kill the shell, and
-# `vanish` kills *itself* so the prompt has to report a -9 that it did not
-# invent.
+# reaps it, `whoami` reports its own pid and tries to kill the shell, `vanish`
+# kills *itself* so the prompt has to report a -9 that it did not invent, and
+# `orphan` is the one that leaves somebody behind: it
+# spawns /bin/nest and exits without waiting, so the prompt is the place where a
+# child outlives its parent and the process table has to have an answer for that.
 send_keys /tmp/wc-biosmon a b ret h e l l o ret \
     l s ret \
     e c h o spc z z z ret \
     c a t spc slash e t c slash i s s u e ret \
     r e a p e r ret \
     w h o a m i ret \
-    v a n i s h ret
+    v a n i s h ret \
+    o r p h a n ret
 wait $BIOPID 2>/dev/null || true
 for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "vga: text console live" "kmalloc selftest ok" "step: heap ok" \
@@ -137,7 +140,14 @@ for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "shell: running 'cat'" "0.0.4 - initrd live" \
             "shell: cat ran and returned" "shell: cat exited with 0" \
             "shell: running 'reaper'" \
-            "shell: reaper ran and returned"; do
+            "shell: reaper ran and returned" \
+            "proc: a parent that dies before its child does" \
+            "step: adoption ok (an orphan is re-parented and its exit code comes back)" \
+            "adopted by pid" \
+            "shell: running 'orphan'" \
+            "shell: orphan ran and returned" \
+            "\\[orphan\\] leaving now, I will not wait" \
+            "\\[nest\\] exiting pid"; do
     grep -aq "$want" /tmp/wc-bios.log || fail "BIOS log missing: $want"
 done
 
@@ -215,6 +225,54 @@ done
 { printf '%s\n' "$VSEG" | grep -aqF '[vanish] STILL HERE' \
   && fail "a prompt-started vanish survived its own kill()"; } || true
 echo '    ok: -9 arrives whole — a killed program is not reported as an exit 0'
+
+# A child outlives its parent, and four numbers have to agree about what the
+# process table did about that. `orphan` spawns /bin/nest and exits without
+# waiting: before this release the survivor kept the pid of a dead process in its
+# `parent` field, so no wait() could ever name it and its exit code 7 was written
+# into a slot nobody would read — the sweep freed the memory and the relationship
+# was forgotten. Now the adopter (the shell, pid 1) is handed the child, the
+# kernel says so, the child reads the new parent back through the twelfth
+# syscall, and the code comes out of the shell.
+#
+# Nothing here is hardcoded: the shell's pid comes from the line that claims it,
+# the two program pids from the spawn lines inside this run, and every check reads
+# one of those numbers back out of a *different* witness. The order check is the
+# one that makes it an adoption rather than an accident — the re-parenting has to
+# land before the child's own ending, or nothing ever outlived anything.
+OSEG=$(awk "/shell: running .orphan./{f=1} f" /tmp/wc-bios.log)
+SHELL_PID=$(grep -aF 'proc: shell is pid' /tmp/wc-bios.log | sed -n '1s/.*pid \([0-9]*\).*/\1/p')
+OPID=$(printf '%s\n' "$OSEG" | grep -aF 'proc: spawned /bin/orphan as pid' | sed -n 's/.*pid \([0-9-]*\).*/\1/p')
+NPID=$(printf '%s\n' "$OSEG" | grep -aF 'proc: spawned /bin/nest as pid' | sed -n 's/.*pid \([0-9-]*\).*/\1/p')
+[ -n "$SHELL_PID" ] || fail 'the shell never said which pid it claimed'
+[ -n "$OPID" ] && [ -n "$NPID" ] || fail 'the typed orphan produced no spawn lines'
+[ "$OPID" != "$NPID" ] || fail 'orphan spawned itself as its own child'
+[ "$OPID" != "$SHELL_PID" ] || fail 'the shell started a program under its own pid'
+for want in "[orphan] pid $OPID ppid $SHELL_PID child $NPID" \
+            "proc: pid $NPID adopted by pid $SHELL_PID (parent $OPID is gone)" \
+            "shell: reaped pid $OPID code 0" \
+            "shell: reaped pid $NPID code 7" \
+            "shell: orphan exited with 0"; do
+    printf '%s\n' "$OSEG" | grep -aqF "$want" \
+        || fail "a child that outlived its parent was not accounted for: $want"
+done
+# The adopted process's side of the same fact. Which round the adoption landed in
+# is scheduling luck — a tick may hand the CPU to nest before or after the parent's
+# exit — so the claim stays "some round reported the adopter's pid", not "round 2
+# did". A getppid() that never changed would mean the kernel wrote a line about a
+# re-parenting the table did not actually perform.
+printf '%s\n' "$OSEG" | grep -aF '[nest] round' \
+    | grep -aqF "pid $NPID ppid $SHELL_PID" \
+    || fail 'the adopted process never read its new parent back through getppid()'
+ADOPT_LN=$(printf '%s\n' "$OSEG" | grep -anF "proc: pid $NPID adopted by pid $SHELL_PID" | head -1 | cut -d: -f1)
+EXIT_LN=$(printf '%s\n' "$OSEG" | grep -anF "[nest] exiting pid $NPID" | head -1 | cut -d: -f1)
+[ -n "$ADOPT_LN" ] && [ -n "$EXIT_LN" ] \
+    || fail 'adoption left no order to check — the re-parenting line or the child ending is missing'
+[ "$ADOPT_LN" -lt "$EXIT_LN" ] \
+    || fail 'the child ended before its parent was placed — nobody outlived anybody'
+{ printf '%s\n' "$OSEG" | grep -aqF 'sched: deadlock' \
+  && fail "the adoption run deadlocked — an orphan was never scheduled"; } || true
+echo '    ok: adoption — a child outlives its parent and the adopter collects its exit code'
 
 # The scheduler demo runs on its own once the timer is up: two copies of
 # /bin/tick, each with its own address space and pid, printing a line and
@@ -445,6 +503,11 @@ else
                 "\\[reaper\\] child killed and reaped" \
                 "\\[vanish\\] bye pid" \
                 "step: kill ok (SIGKILL ends a process, its parent reaps it)" \
+                "proc: a parent that dies before its child does" \
+                "adopted by pid" \
+                "\\[orphan\\] leaving now, I will not wait" \
+                "\\[nest\\] exiting pid" \
+                "step: adoption ok (an orphan is re-parented and its exit code comes back)" \
                 "gfx: framebuffer" "gfx: desktop composited"; do
         grep -aq "$want" /tmp/wc-uefi.log || fail "UEFI log missing: $want"
     done
@@ -455,6 +518,22 @@ else
       && fail "UEFI: the bell finished on its own — kill() did not stop it"; } || true
     { grep -aqF '[vanish] STILL HERE' /tmp/wc-uefi.log \
       && fail "UEFI: self-kill returned instead of ending the process"; } || true
+    # Adoption, on the other firmware. The BIOS run above does the full
+    # cross-boundary arithmetic; UEFI only has to prove the same kernel story is
+    # not firmware-dependent: the survivor was re-parented by the pid the boot
+    # claimed, and the code it exited with was collected by that adopter rather
+    # than dropped by the sweep.
+    USHELL_PID=$(grep -aF 'proc: shell is pid' /tmp/wc-uefi.log | sed -n '1s/.*pid \([0-9]*\).*/\1/p')
+    UNPID=$(grep -aF 'proc: spawned /bin/nest as pid' /tmp/wc-uefi.log | sed -n '1s/.*pid \([0-9-]*\).*/\1/p')
+    [ -n "$USHELL_PID" ] && [ -n "$UNPID" ] \
+        || fail 'UEFI: no shell pid or no orphan child to follow'
+    grep -Fq "proc: pid $UNPID adopted by pid $USHELL_PID" /tmp/wc-uefi.log \
+        || fail "UEFI: the kernel never re-parented pid $UNPID"
+    grep -Fq "shell: reaped pid $UNPID code 7" /tmp/wc-uefi.log \
+        || fail "UEFI: the adopter never collected the orphan's exit code 7"
+    printf '%s\n' "$(grep -aF '[nest] round' /tmp/wc-uefi.log)" \
+        | grep -qF "pid $UNPID ppid $USHELL_PID" \
+        || fail 'UEFI: the adopted process never read its new parent back'
     { grep -aq 'sched: deadlock' /tmp/wc-uefi.log \
       && fail "UEFI run deadlocked — a waiter was never woken"; } || true
     echo '    ok: UEFI boot — same memory + device stack comes up identically'

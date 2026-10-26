@@ -297,7 +297,6 @@ int proc_create(const char *path, int argc, const char *const *argv,
         p->parent = table[current].pid;
     else
         p->parent = adopt_pid;
-    p->armed = 0;
     p->wait_out = 0;
     p->wake_code = 0;
     p->wake_pending = 0;
@@ -391,22 +390,26 @@ static void wakeup_deliver(struct proc *q)
 }
 
 /* A child died — by its own exit() or by somebody's kill() — and its parent may
- * be sitting in wait(). The zombie's table slot stays for the parent to reap
- * (only the memory is given back by the caller) and the pid is planted as the
- * return value of the wait() call that blocked, exactly the way the yield arm
- * returns 0. Called BEFORE pick_ready so a woken parent is part of the set the
- * scheduler chooses from.
+ * be sitting in wait(). When it is, the pid and the code are planted as the
+ * return value of the call that blocked, exactly the way the yield arm returns
+ * 0, and the zombie's slot is retired here: the wake *is* the reap. Called
+ * BEFORE pick_ready so a woken parent is part of the set the scheduler chooses
+ * from.
  *
- * The armed flag is what makes this safe to attempt for *every* exit, not only
- * exits that find a BLOCKED parent. A wake promises one specific zombie; if a
- * second child dies while the first wake is still undelivered (the parent READY
- * but a tick not yet resumed it), overwriting the promise would hand the parent
- * the same pid twice — the first wake's numbers were already planted, and its
- * zombie would still be sitting EXITED when the parent's next wait scanned the
- * table. So the child a wake speaks for is armed, proc_wait's scan skips armed
- * slots, and an exit whose parent is awake already leaves its zombie unarmed —
- * an ordinary, fully-formed reap candidate. There is exactly one promise per
- * zombie. This is a real bug this comment used to not exist for. */
+ * One promise per parent is the invariant, and `wake_pending` is what holds it.
+ * A second child that dies while the first wake is still undelivered (the parent
+ * READY, a tick not yet resumed it) must not overwrite the planted pid, so this
+ * refuses it — and that second death leaves its zombie EXITED, an ordinary reap
+ * candidate for the parent's next wait().
+ *
+ * The table used to keep a second copy of that promise, an `armed` flag on the
+ * zombie a wake spoke for, and proc_wait's scan had to skip armed slots so a
+ * parent could not collect one pid twice. The cost was invisible and real: a
+ * woken parent had already been *answered* but had not reaped anything, so its
+ * child's slot stayed EXITED with no process able to name it again, and burned a
+ * table slot until the sweep. With the retirement below there is only ever one
+ * place a promise lives — the parent that holds it — so the flag is gone rather
+ * than kept as a decoration. */
 static void wake_parent(int c, int code)
 {
     struct proc *cc = &table[c];
@@ -417,13 +420,102 @@ static void wake_parent(int c, int code)
         if (pp->pid != cc->parent)
             continue;
         if (pp->state == PROC_BLOCKED && !pp->wake_pending) {
+            int pid = cc->pid;
             pp->state = PROC_READY;
-            pp->ctx.rax = (uint64_t)cc->pid;
+            pp->ctx.rax = (uint64_t)pid;
             pp->wake_code = code;
             pp->wake_pending = 1;
-            cc->armed = 1;
+
+            /* The promise has been made, so the zombie has been answered.
+             * Everything a slot kept alive for — its pid and its exit code — is
+             * on its way to the one process allowed to collect them. */
+            cc->state = PROC_FREE;
+            cc->parent = 0;
+            cc->exit_code = 0;
+            cc->wait_out = 0;
+            cc->wake_pending = 0;
+            cc->wake_code = 0;
+            cc->name[0] = '\0';
         }
         break;
+    }
+}
+
+/* --- adoption ----------------------------------------------------------
+ *
+ * A process that dies while its children are still alive leaves something
+ * behind, and until now that something had no owner: the child kept the pid of
+ * a dead parent in its `parent` field, which meant no wait() could ever name it,
+ * no kill() could be blamed on it, and its exit code — the one number a dead
+ * process still carries — was written into a slot nobody would read. The end-of
+ * run sweep freed the memory and the table forgot the relationship ever existed.
+ * That is the hole Unix closes by having a process that never dies adopt what is
+ * left, and this kernel now has one: the shell's slot, pid 1.
+ *
+ * One role, one function, so the answer can change without touching the rule.
+ * The shell is the adopter because it is the only process in this system that
+ * outlives every program it starts — it is kernel code, it cannot be killed
+ * (proc_kill answers -WC_EPERM for its slot), and it is claimed before a single
+ * key can be typed. A future /bin/init that really is pid 1 in ring 3 takes over
+ * by being what this returns; nothing else about adoption would change.
+ */
+static int proc_adopter_pid(void)
+{
+    return shell_pid;
+}
+
+/* Place every child of the process at `c` with the adopter. Called at the moment
+ * of death — from the exit arm of the switch and from the in-place arm of kill(),
+ * which are the only two ways a process ends — and never anywhere else, so a
+ * parent cannot lose a child by any route the table does not already witness.
+ *
+ * Three details are load-bearing:
+ *
+ *  - a zombie is moved too, not only a live child. A parent can die between the
+ *    moment a child exits and the moment it would have been waited for, and the
+ *    pair (pid, exit code) is the whole reason the slot still exists — dropping
+ *    the relationship there would lose the one number the child left behind.
+ *  - the adopter's own slot is skipped, and so is PROC_KERNEL: nothing here can
+ *    make the shell anybody's child, and a live process is never adopted by the
+ *    parent it already has.
+ *  - when there is no adopter at all (before shell_init() has claimed its slot),
+ *    the relationship is reported rather than silently dropped. The boot demos
+ *    run after that claim, so this branch is not expected to print — but "we
+ *    invented no parent" is the honest alternative to a line that would lie.
+ */
+static void proc_adopt_children(int c)
+{
+    int dead = table[c].pid;
+    int adopter = proc_adopter_pid();
+
+    if (dead == 0)
+        return;
+
+    for (int i = 0; i < PROC_MAX; i++) {
+        struct proc *p = &table[i];
+        if (p->state == PROC_FREE || p->state == PROC_KERNEL)
+            continue;
+        if (p->parent != dead)
+            continue;
+
+        if (adopter == 0) {
+            serial_write("proc: pid ");
+            serial_write_dec((uint64_t)p->pid);
+            serial_write(" outlived its parent ");
+            serial_write_dec((uint64_t)dead);
+            serial_write(" and no adopter exists\n");
+            continue;
+        }
+
+        p->parent = adopter;
+
+        serial_write("proc: pid ");
+        serial_write_dec((uint64_t)p->pid);
+        serial_write(" adopted by pid ");
+        serial_write_dec((uint64_t)adopter);
+        serial_write(" (parent ");
+        serial_write_dec((uint64_t)dead);
+        serial_write(" is gone)\n");
     }
 }
 
@@ -449,9 +541,17 @@ static void sched_switch(struct syscall_frame *f, int mode, int code)
 
     /* The trilogy's last edge, and the kill's: a child that dies while its
      * parent sits in wait() wakes it. See wake_parent() for why exactly one
-     * promise per zombie is the thing that makes this safe to attempt always. */
-    if (mode == SWITCH_EXIT)
+     * promise per zombie is the thing that makes this safe to attempt always.
+     *
+     * Adoption goes first, because the wake below may retire this very slot: the
+     * children have to be placed while the parent they belong to is still
+     * describable. A process that dies does not take its children with it —
+     * they keep running, and somebody now owns the exit code they will each
+     * leave behind. */
+    if (mode == SWITCH_EXIT) {
+        proc_adopt_children(c);
         wake_parent(c, code);
+    }
 
     int n = pick_ready(rr);
     if (n >= 0) {
@@ -559,7 +659,10 @@ void proc_exit(struct syscall_frame *f, int code)
  *    kept precisely for this moment): hand its pid and exit code back, reap
  *    the slot to FREE, and return without switching. Same-turn reaps matter —
  *    the parent's first wait after the wake-up still has a second child's
- *    zombie to take, and a real Unix behaves exactly the same way.
+ *    zombie to take, and a real Unix behaves exactly the same way. The zombie
+ *    whose death *woke* this call is not on this list: it was retired by
+ *    wake_parent() when it planted the pid and the code, so the slot is already
+ *    FREE by the time the parent resumes.
  * 2. No zombie but a live child (READY/RUNNING/BLOCKED): save this frame the
  *    way yield does, go BLOCKED, and switch. The call "returns" when a child
  *    exits — sched_switch plants the pid in ctx.rax and stages the code for
@@ -577,7 +680,7 @@ int proc_wait(struct syscall_frame *f, uint64_t uout)
 
     for (int i = 0; i < PROC_MAX; i++) {
         struct proc *z = &table[i];
-        if (z->state == PROC_EXITED && z->parent == p->pid && !z->armed) {
+        if (z->state == PROC_EXITED && z->parent == p->pid) {
             int pid = z->pid, code = z->exit_code;
             if (uout != 0) {
                 if (!user_write_ok(uout, sizeof code))
@@ -627,13 +730,11 @@ int proc_wait(struct syscall_frame *f, uint64_t uout)
  * Killing yourself is the one case that is not in-place: it goes through the
  * exit arm of the switch, so it does not return.
  *
- * A victim's own children are NOT re-parented. The shell slot now exists, so
- * re-parenting to it is possible — but nothing has been *shown* to need it or
- * to exercise it, and a claim about orphans is a claim about a program that
- * outlives its parent, which this kernel does not yet have. So an orphan's
- * zombie still keeps a parent pid nobody will wait with, and the sweep at the
- * end of a run is what frees it. Writing that down is the honest half; the
- * proof belongs to whoever adds the program that orphans itself. */
+ * A victim's own children are not killed with it, and they are not left ownerless
+ * either: proc_adopt_children() places them with the adopter before the victim's
+ * parent is told, which is what makes an exit code that nobody was going to read
+ * into one the shell reaps and prints. A kill that ends a parent is therefore not
+ * an excuse for losing a grandchild — see the adoption block above. */
 int proc_kill(int pid, int sig, struct syscall_frame *f)
 {
     if (!sched_active || current < 0)
@@ -683,10 +784,10 @@ int proc_kill(int pid, int sig, struct syscall_frame *f)
     struct proc *v = &table[t];
     v->state = PROC_EXITED;
     v->exit_code = -sig;
-    v->armed = 0;
     v->wait_out = 0;
     v->wake_pending = 0;        /* a sleeper's pending wake dies with it */
     proc_free_space(v);         /* safe: the victim's CR3 is not loaded */
+    proc_adopt_children(t);     /* same order as the exit arm: place, then tell */
     wake_parent(t, -sig);
     return 0;
 }
@@ -696,32 +797,45 @@ int proc_current_pid(void)
     return current >= 0 ? table[current].pid : 0;
 }
 
+/* The parent as the table sees it *now*, which is the interesting part: an only
+ * child of a program that died answers with the adopter's pid from that moment
+ * on, not with the pid it was born under. A program can therefore report, from
+ * ring 3, the very re-parenting the kernel performed on its behalf — and a test
+ * can require the two numbers to agree across the boundary instead of trusting
+ * either side alone. 0 when there is no table entry (the boot self-check's
+ * single-program path) or when nothing owns this process (a kernel-started demo). */
+int proc_current_ppid(void)
+{
+    return current >= 0 ? table[current].parent : 0;
+}
+
 int proc_scheduler_active(void)
 {
     return sched_active;
 }
 
 /* Every leftover in the table at the end of a run is a dead end: an EXITED slot
- * whose parent is gone as well (a boot demo, or an orphan), or a BLOCKED sleeper
- * the deadlock report already named. Nobody can reap them — wait() only works
- * from a running process — so without this sweep those slots are burned for the
- * rest of the session, and the boot demos alone (tick, spin, waiter, reaper)
- * would run PROC_MAX dry halfway through. Memory needs no ceremony here: an
- * EXITED slot gave its frames back at exit, a BLOCKED one still holds them and
- * proc_free_space() hands those over. next_pid is deliberately NOT reset: pids
- * are never reused, so a program holding an old pid can never point at a new
- * process by accident.
+ * nobody was ever the parent of (a boot demo, which the kernel started with no
+ * adopter to name), or a BLOCKED sleeper the deadlock report already named.
+ * Nobody can reap them — wait() only works from a running process — so without
+ * this sweep those slots are burned for the rest of the session, and the boot
+ * demos alone (tick, spin, waiter, reaper) would run PROC_MAX dry halfway
+ * through. Memory needs no ceremony here: an EXITED slot gave its frames back at
+ * exit, a BLOCKED one still holds them and proc_free_space() hands those over.
+ * next_pid is deliberately NOT reset: pids are never reused, so a program holding
+ * an old pid can never point at a new process by accident.
  *
- * Two slots are handled differently, and both reasons are load-bearing. The
+ * Three slots are handled differently, and each reason is load-bearing. The
  * shell's own entry is not a leftover of this run — it is what starts the next
- * one — so it is skipped entirely. And a zombie whose parent *is* the shell is
- * not swept in silence either: the shell is its parent, and a parent taking
- * note of its child's death is called a reap, so the line says what happened
- * ("shell: reaped pid P code C") and the code travels back to
- * proc_run_program() through run_code. Before the shell had a slot this pass
- * was the only reaper the desktop ever had; now it is the one for processes the
- * shell could not be the parent of, which is a much smaller claim — and that is
- * the point of writing it down. */
+ * one — so it is skipped entirely. A zombie that an exiting parent handed over by
+ * adoption is no longer one of the dead ends above: it arrived here as the
+ * shell's child, so the line says what happened ("shell: reaped pid P code C")
+ * and the code travels back to proc_run_program() through run_code. And a slot
+ * already retired by the wake that answered it (wake_parent) is simply FREE, so
+ * this pass never sees it. Before the shell had a slot this sweep was the only
+ * reaper the desktop ever had, and before adoption an orphan reached this point
+ * ownerless and was freed in silence — which is the claim that stopped being
+ * true, and the reason it is written down here rather than left to the log. */
 static void proc_table_sweep(void)
 {
     for (int i = 0; i < PROC_MAX; i++) {
@@ -744,7 +858,6 @@ static void proc_table_sweep(void)
         proc_free_space(p);
         p->state = PROC_FREE;
         p->parent = 0;
-        p->armed = 0;
         p->wait_out = 0;
         p->wake_pending = 0;
         p->name[0] = '\0';

@@ -66,6 +66,13 @@
 #define SYS_SPAWN   9
 #define SYS_WAIT   10
 #define SYS_KILL   11
+/* getppid() — the twelfth call, and the only one whose answer can change during a
+ * program's life: it names whoever the table says owns the caller *now*, so when
+ * the process that spawned it dies first, the answer becomes the adopter's pid
+ * (pid 1, the shell). A program can therefore report the re-parenting the kernel
+ * performed on its behalf, which is the half of an orphan story the kernel's own
+ * log line cannot testify to. */
+#define SYS_GETPPID 12
 
 /* --- signals ------------------------------------------------------------ */
 /* Only SIGKILL exists so far, and only as the argument of kill(): there is no

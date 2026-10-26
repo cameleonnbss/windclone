@@ -299,9 +299,12 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         `-WC_EINVAL` for a signal that does not exist, `-WC_ECHILD` for a
         `wait()` with nothing left to wait for.
       - **The table gets swept, or the boot demos would have run it dry.**
-        An `EXITED` slot whose parent is gone as well (a boot-spawned process,
-        or an orphan — nothing re-parents yet) can never be reaped, and
-        `PROC_MAX` is 8: four demo blocks each leaking two or three slots
+        An `EXITED` slot whose parent is gone as well can never be reaped by a
+        `wait()` — and before v0.1.9 an orphan's zombie had exactly that problem,
+        because nothing re-parented it. Adoption (see the v0.1.9 bullet) now moves
+        every orphan onto the shell slot, so a leftover here is a genuinely
+        parent-less boot-spawned process, and `PROC_MAX` is 8: four demo blocks
+        each leaking two or three slots
         exhausts the table mid-boot. `proc_run_all()` calls
         `proc_table_sweep()` on the way home, freeing every leftover (an
         orphaned `BLOCKED` sleeper still owns its pages) while deliberately
@@ -354,12 +357,35 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
           to run, so a long program holds the screen, exactly as a long `spin`
           does. A window that owns a *live* process, so the desktop keeps
           painting while a program works, is the rest of this phase.
-      - **What is still not wired: re-parenting, and an `init` that adopts.**
-        The shell slot makes re-parenting possible in a way it was not before,
-        but no program has yet been shown to outlive its parent, so nothing is
-        claimed: an orphan's zombie keeps a parent pid nobody will wait with and
-        the sweep frees it. The proof belongs to whoever writes the program that
-        orphans itself.
+      - **Re-parenting, and the shell that adopts (v0.1.9).** The bullet this
+        replaces said no program had been shown to outlive its parent; `/bin/orphan`
+        is that program — it spawns `/bin/nest`, prints its own pid, its parent and
+        the child, then exits *without waiting*, which is the whole point: a parent
+        that reaps its own children never touches the adoption path. When a slot
+        reaches `EXITED` (by normal exit or by kill) the scheduler now re-parents
+        every live or zombie child of the dying pid onto an adopter before it wakes
+        anyone (`proc_adopt_children()` → `proc_adopter_pid()`, currently the shell
+        slot, with the seam left for a future `/bin/init` to take the role), so
+        `proc: pid C adopted by pid A (parent P is gone)` names a parent that will
+        actually come back for the code. `/bin/nest` is the witness from inside the
+        adopted process: it re-reads `getppid()` each round, so the new
+        syscall, `SYS_GETPPID` (12), is the ring-3 proof that a program's parent
+        changed underneath it — the only answer in the ABI that can move during a
+        process's life. An adoption landed in which round is scheduling luck, so
+        nest only observes and the test only requires that *some* round reports the
+        adopter and that the line precedes the child's own exit — no fragile
+        round-number assert.
+        - A latent leak surfaced on the way and was fixed, not papered over:
+          `wake_parent()` used to leave the zombie it had just answered sitting in
+          the table behind an `armed` flag that `proc_wait()`'s scan then skipped,
+          so a woken parent could never reap the very child that woke it and the
+          slot burned until the sweep. The wake *is* the reap now — the promise and
+          the retirement happen in one call — which made `armed` dead code, so the
+          field is gone from `struct proc` entirely.
+        - The cost, honestly: pid 1 stays the sole adopter, so an orphan's exit
+          code is collected by the shell rather than by a dedicated `init`, and the
+          run is still synchronous. Deeper orphans (a child whose grandparent also
+          dies) and a real `/bin/init` are Phase 6+ work, not claimed here.
 
 ## Phase 6 — Language expansion ⏳
 *Goal: use the right tool per layer (the "asm/C/C++/Rust" promise).*
