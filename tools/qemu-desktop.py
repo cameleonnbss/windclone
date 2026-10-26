@@ -30,6 +30,11 @@ Scenarios (each one asserts the serial markers the kernel prints):
                the whole screen, a pure mouse move after it flips only a
                cursor-sized band (a fraction of the pixels), and a click on a
                window body is structural and flips the whole screen again
+    progdamage prove a *running program* repaints only its own window: launch
+               /bin/hold from the menu, then require a whole-screen-sized
+               program's output to land strictly between two of its own rounds
+               as a sub-screen flip - on v0.1.12 every such frame was the whole
+               desktop
 
 Exit status 0 = every step did what the serial log says it did.
 SPDX-License-Identifier: MIT
@@ -355,6 +360,49 @@ def scenario_actions(sc, mon, W, H):
         full = wait_flip_after(mark, lambda n, a: n == 1 and a >= W * H)
         if full is None:
             raise SystemExit("a click on a window did not repaint the whole screen")
+    elif sc == "progdamage":
+        # v0.1.13: a *running program's* output must repaint only its own window,
+        # not the whole desktop. The distinguishing witness is not merely "a
+        # sub-screen flip happened" (the terminal body was already sub-screen in
+        # v0.1.12) but "a sub-screen flip landed strictly between two of hold's
+        # own rounds" - those are exactly the frames hold's output caused, and on
+        # v0.1.12 every one of them was a full W*H flip. Same interleave idea as
+        # the live scenario, now measuring the flip's area. Nothing is hardcoded:
+        # pid from the spawn line, W*H from the composited banner.
+        text = open(LOG, errors="replace").read()
+        if "gfx: back buffer" not in text:
+            raise SystemExit("no back buffer was allocated - direct-to-framebuffer fallback")
+        flips = [(int(n), int(a)) for n, a in
+                 re.findall(r"gfx: flip (\d+) rects, (\d+) px", text)]
+        if not flips:
+            raise SystemExit("the compositor never reported a flip")
+        n0, area0 = flips[0]
+        if n0 != 1 or area0 != W * H:
+            raise SystemExit("boot flip was not the whole screen: %d rects, %d px"
+                             % (n0, area0))
+        # launch /bin/hold from the menu (the launch click is a full flip - fine)
+        mon.click(START_X + START_W // 2, H - TASKBAR_H + 22)
+        idx = int(wait_serial(r"wm: menu row (\d+) hold\n").group(1))
+        mon.click(MENU_X + MENU_W // 2, menu_row_y(H, idx))
+        pid = wait_serial(r"proc: spawned /bin/hold as pid (\d+)").group(1)
+        wait_serial(r"\[hold\] round 2 pid %s\n" % pid)   # a between-rounds gap exists
+        deadline = time.time() + 20
+        between = False
+        while time.time() < deadline:
+            t = open(LOG, errors="replace").read()
+            rounds = [m.start() for m in
+                      re.finditer(r"\[hold\] round \d+ pid %s\n" % pid, t)]
+            subs = [m.start() for m in
+                    re.finditer(r"gfx: flip \d+ rects, (\d+) px", t)
+                    if 0 < int(m.group(1)) < W * H]
+            if any(r0 < s < r1 for s in subs for r0, r1 in zip(rounds, rounds[1:])):
+                between = True
+                break
+            time.sleep(0.2)
+        if not between:
+            raise SystemExit("a running program still repainted the whole screen")
+        # let it reach its honest end so the log is clean for the reap marker
+        wait_serial(r"shell: reaped pid %s code 5\n" % pid)
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -392,6 +440,9 @@ MARKERS = {
     # the small-band vs full-screen arithmetic is asserted in the scenario against
     # the measured areas; these are the two marker lines the claim turns on
     "damage":    ["gfx: back buffer", "gfx: flip"],
+    # a sub-screen flip strictly between two hold rounds is asserted in the
+    # scenario; these markers prove the back buffer and the flip log exist
+    "progdamage": ["gfx: back buffer", "gfx: flip"],
 }
 
 

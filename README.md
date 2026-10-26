@@ -225,6 +225,21 @@ On boot the kernel:
    degraded, never blank. Each painted frame logs `gfx: flip N rects, AREA px`,
    and the tests read that number to prove a mouse move really costs a fraction
    of a full screen instead of trusting the claim.
+23. lets a **running program repaint only its own window.** The back buffer made
+   a mouse move cheap, but a program streaming output still forced a whole-screen
+   flip: `desktop_frame` counted *any* program's new bytes as a structural change.
+   Now each program surface carries its own dirty flag, and the compositor turns
+   a dirty window into a single damage rectangle — the same trick the terminal
+   body already used. The full layer stack is recomposed clipped to that box, so
+   a window partly hidden behind another is still composited correctly, and only
+   the window's rect is pushed to the screen. A running `/bin/hold` now turns
+   over its 500x240 body instead of all 786 432 pixels. Because per-window damage
+   means more rectangles per frame, the damage set grew and gained an overflow
+   path: a frame that wants more rects than fit blits the whole union box at once
+   — always correct (the pixels outside it are last frame's, unchanged), just a
+   larger blit. The `progdamage` scenario proves it the honest way: it requires a
+   sub-screen flip to land *strictly between two of hold's own rounds*, which is
+   exactly the frame its output caused and which used to be full-screen.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

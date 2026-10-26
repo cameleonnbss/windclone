@@ -367,6 +367,17 @@ int shell_program_dirty_any(void)
     return 0;
 }
 
+/* Whether *this* program's surface changed since it was last painted. The
+ * compositor uses it to damage only the window whose text moved, rather than
+ * repainting the whole desktop because some program somewhere produced output.
+ * 0 for a free or out-of-range slot, so a window bound to a stale slot is safe. */
+int shell_program_dirty_slot(int slot)
+{
+    if (slot < 0 || slot >= SHELL_PROG_MAX || !prog[slot].used)
+        return 0;
+    return prog[slot].s.dirty;
+}
+
 void shell_program_clear_dirty_all(void)
 {
     for (int i = 0; i < SHELL_PROG_MAX; i++)

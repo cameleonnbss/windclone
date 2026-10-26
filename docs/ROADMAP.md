@@ -422,7 +422,10 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
 - [x] Damage tracking + double buffer: the desktop composes into a RAM back
       buffer and flips it in one pass, and a mouse move now recomputes and blits
       only a cursor-sized band instead of the whole screen (proven by a QEMU
-      scenario that reads the `gfx: flip N rects, AREA px` the kernel logs)
+      scenario that reads the `gfx: flip N rects, AREA px` the kernel logs).
+      Since v0.1.13 the damage is per-window too: a running program repaints
+      only its own window's rect, not the desktop (proven by a scenario that
+      finds a sub-screen flip strictly between two of the program's rounds).
 - [x] Start menu, and a launcher that starts programs from the initrd. The
       rows are not written in `desktop.c`: opening the panel enumerates the
       archive through `vfs_dirent()` and keeps the `bin/` entries, so a program

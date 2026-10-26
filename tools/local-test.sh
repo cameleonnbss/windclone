@@ -659,6 +659,14 @@ echo '==> double buffer + damage (mouse move repaints a band, not the screen)'
 python3 tools/qemu-desktop.py windclone.iso damage \
     || fail 'a mouse move did not repaint only a small region of the screen'
 
+# v0.1.13: the same damage idea applied to a *running program*. Launch /bin/hold
+# from the menu and require its output to repaint only its own window: a
+# sub-screen flip landing strictly between two of hold's rounds. On v0.1.12 every
+# such frame was the whole desktop, so this is the exact claim of the release.
+echo '==> a running program repaints its own window, not the screen'
+python3 tools/qemu-desktop.py windclone.iso progdamage \
+    || fail 'a running program still repainted the whole screen'
+
 # 6) the start menu is the archive, not a picture of it. Every program the
 #    build puts into /bin must appear as a row (the kernel writes one
 #    "wm: menu row <n> <name>" line per entry), and clicking a row must run

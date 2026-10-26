@@ -71,6 +71,10 @@ void shell_program_draw(int slot, int x, int y, int width);
 int  shell_program_dirty_any(void);
 void shell_program_clear_dirty_all(void);
 
+/* Non-zero when *this* slot's surface changed since it was last painted, so the
+ * compositor can damage only the window whose text moved (0 for a free slot). */
+int  shell_program_dirty_slot(int slot);
+
 /* The user closed the window: free its slot. Does not touch the process. */
 void shell_program_close(int slot);
 

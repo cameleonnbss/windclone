@@ -13,9 +13,12 @@
  *
  * Hit testing runs front to back and stops at the first window that owns
  * the click — that single rule is what makes overlapping windows behave
- * the way people expect. There is still no damage tracking and no double
- * buffer: a mouse move repaints everything, which is the next thing to
- * fix, not the thing to hide.
+ * the way people expect. The scene is composed into a RAM back buffer and
+ * pushed in one flip, and only the damaged rectangles are recomputed: the
+ * band the cursor swept, a title strip it hovered, the terminal body, and
+ * each program window whose own output changed. A full-screen repaint is
+ * left for the genuinely structural moments - the first frame, a click, a
+ * drag, or the start menu opening or closing.
  *
  * The DEMARRER button is a start menu, and the menu is a launcher: its rows
  * are the /bin entries of the initrd, read back through the VFS every time
@@ -111,12 +114,13 @@ static int painted_once;
 
 /* A frame's damage: a handful of rectangles and the bounding box they union
  * into. The recompose clips to the union (so it redraws only that band), then
- * each rectangle is blitted to the screen. Six is plenty for the cursor's old
- * and new boxes plus a title bar and the terminal; anything that would exceed
- * it is a structural change and repaints whole-screen instead. */
+ * each rectangle is blitted to the screen. The room is one per window plus the
+ * cursor's two boxes and a title strip or two; if a frame ever wants more than
+ * fits, dmg_add keeps growing the union but flags the overflow, and the flip
+ * then pushes the whole union box as one rect (correct, just blits more). */
 struct drect { int x, y, w, h; };
-static struct drect dmg[6];
-static int dmg_n, dmg_x0, dmg_y0, dmg_x1, dmg_y1;
+static struct drect dmg[WIN_TOTAL + 4];
+static int dmg_n, dmg_overflow, dmg_x0, dmg_y0, dmg_x1, dmg_y1;
 
 static void dmg_add(int W, int H, int x, int y, int w, int h)
 {
@@ -130,6 +134,12 @@ static void dmg_add(int W, int H, int x, int y, int w, int h)
         dmg[dmg_n].x = x0; dmg[dmg_n].y = y0;
         dmg[dmg_n].w = x1 - x0; dmg[dmg_n].h = y1 - y0;
         dmg_n++;
+    } else {
+        /* No room to record it, but the union still has to cover it: the
+         * recompose is clipped to the union, so a dropped rect that widened
+         * the box is recomposed - the overflow flag makes the flip push the
+         * whole box, so it is never left unblitted. */
+        dmg_overflow = 1;
     }
     if (x0 < dmg_x0) dmg_x0 = x0;
     if (y0 < dmg_y0) dmg_y0 = y0;
@@ -934,19 +944,20 @@ void desktop_frame(void)
         handle_press(mx, my, W, H);
 
     /* Decide what changed since the last flip. A structural change - the first
-     * frame, a click, a drag, the menu opening or closing, a program's output
-     * arriving, or a machine with no back buffer to update - repaints the whole
-     * desktop. Anything else is the cursor having moved, and only the band it
-     * swept needs recomputing: which is the entire point, because a mouse move
-     * used to redraw all 1024x768 pixels of wallpaper behind it. */
+     * frame, a click, a drag, the menu opening or closing, or a machine with no
+     * back buffer to update - repaints the whole desktop. Everything else is a
+     * small set of damage rectangles: the band the cursor swept, any title strip
+     * it hovered, the terminal body if its text moved, and each program window
+     * whose own output changed. A running program used to force a full-screen
+     * flip; now it dirties only its window's rect. */
     int full = !painted_once
             || press
             || dragging
             || (menu_open != prev_menu_open)
-            || shell_program_dirty_any()
             || !gfx_has_backbuffer();
 
     dmg_n = 0;
+    dmg_overflow = 0;
     if (!full) {
         dmg_x0 = dmg_y0 = 1 << 30;
         dmg_x1 = dmg_y1 = 0;
@@ -969,11 +980,24 @@ void desktop_frame(void)
                 dmg_add(W, H, w->x, w->y, w->w, TITLE_H);
         }
 
-        /* The terminal's text changed: its body is the damage (a running
-         * program's window would be full, handled above). */
+        /* The terminal's text changed: its body is the damage. */
         if (shell_dirty())
             dmg_add(W, H, wins[WIN_TERM].x, wins[WIN_TERM].y,
                     wins[WIN_TERM].w, wins[WIN_TERM].h);
+
+        /* Each program window whose own surface gained output since the last
+         * paint. This is the whole point of the release: a running program used
+         * to force a full-screen flip, and now it dirties only its window's rect
+         * - the clipped recompose redraws the layer stack over that box, so a
+         * window partly hidden behind another is still composited correctly. A
+         * minimized window is skipped (nothing visible changed; its restore is a
+         * click, which repaints full), and a maximized one damages the desktop. */
+        for (int i = WIN_FIXED; i < WIN_TOTAL; i++) {
+            struct window *w = &wins[i];
+            if (w->open && !w->min && w->kind == WIN_PROGRAM &&
+                shell_program_dirty_slot(w->slot))
+                dmg_add(W, H, w->x, w->y, w->w, w->h);
+        }
 
         gfx_set_clip(dmg_x0, dmg_y0, dmg_x1 - dmg_x0, dmg_y1 - dmg_y0);
     } else {
@@ -1002,12 +1026,17 @@ void desktop_frame(void)
 
     /* Push the recomputed region to the display in one pass, and say how big
      * that region was - the honest number the tests read. A structural frame
-     * flips the whole screen; a cursor move blits only the few rectangles of its
-     * band, so its area is a rounding error against width*height. */
+     * flips the whole screen; otherwise each damage rect is blitted, and a frame
+     * that wanted more rects than fit pushes the whole union box instead (the
+     * recompose already covered it, and bb outside the box is last frame's
+     * unchanged content, so one big rect is correct - just blits more). */
     uint64_t area;
     int n;
     if (full) {
         area = gfx_flip();
+        n = 1;
+    } else if (dmg_overflow) {
+        area = gfx_flip_rect(dmg_x0, dmg_y0, dmg_x1 - dmg_x0, dmg_y1 - dmg_y0);
         n = 1;
     } else {
         area = 0;
