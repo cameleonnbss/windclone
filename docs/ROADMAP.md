@@ -456,6 +456,19 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       the idle loop visits), and the shell stays the single adopter and anchor
       these visits unwind to. A window that owns its *own* process is the next
       step.
+- [x] A window that owns its *own* process (v0.1.11). The console sink is now a
+      **router**: it dispatches a running program's `write(1)` on
+      `proc_current_pid()` into that program's own text surface, while the
+      shell's lines, the boot demos and un-launched children fall through to the
+      terminal as before (serial still sees every byte, so no marker moves). Each
+      surface is a real window — drag, minimise, maximise, close, taskbar — folded
+      into the same `wins[]`/`order[]` arrays the fixed windows use, and it
+      **outlives its process**: `shell_program_pump()` records the exit code by the
+      never-reused pid, paints `EXIT n`, and the window stays until the user closes
+      it. `/bin/hold`'s rounds and exit code 5 stream into its own window and it is
+      still open after the process is reaped. Out of scope here: per-window *input*
+      (the keyboard is still owned by the shell's line editor) — this release is
+      about where a program's output goes, not about giving each program focus.
 - [x] One version string. `src/kernel/version.h` is what the status window, the
       taskbar and `about` all draw, and the kernel says it on the boot log —
       which the test reads back out of that header, so a number a release left

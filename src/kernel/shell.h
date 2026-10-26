@@ -42,4 +42,36 @@ void shell_draw(int x, int y, int width);
 int  shell_dirty(void);
 void shell_clear_dirty(void);
 
+/* --- a program's own window ------------------------------------------
+ * Each launched program gets a text surface of its own, bound to the pid the
+ * shell was given. The console sink routes that running program's write(1) here
+ * instead of into the terminal, so its output belongs to a window the user can
+ * move, overlap and — once it finishes — close. The desktop drives the window
+ * chrome; the shell owns the text and the pid binding. See shell.c. */
+
+/* Give the just-launched program a surface. Returns its slot id (0..), or -1
+ * when all are still held by windows not yet closed. Called from the launch
+ * path before the window is opened. */
+int  shell_program_open(const char *name, int pid);
+
+/* Once a frame: notice any window whose process stopped owning a CPU, record its
+ * exit code, mark it finished (the window stays), and log the fact. */
+void shell_program_pump(void);
+
+/* The window's read-only view of a program surface, by slot id. */
+const char *shell_program_name(int slot);
+int  shell_program_live(int slot);
+int  shell_program_exit_code(int slot);
+
+/* Paint a program's surface into a window body (no prompt, no cursor). */
+void shell_program_draw(int slot, int x, int y, int width);
+
+/* Non-zero when any program surface changed since it was last painted, so a
+ * running program repaints the desktop on its own — exactly as the terminal does. */
+int  shell_program_dirty_any(void);
+void shell_program_clear_dirty_all(void);
+
+/* The user closed the window: free its slot. Does not touch the process. */
+void shell_program_close(int slot);
+
 #endif

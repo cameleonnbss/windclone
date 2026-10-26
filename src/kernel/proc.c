@@ -45,6 +45,29 @@ static int rr;              /* round-robin cursor: next index to try */
 static int sched_active;    /* non-zero while proc_run_all drives the CPU */
 static int shell_pid;       /* the shell's own slot, 0 until it is claimed */
 
+/* A dead process is not a window's owner, but a window outlives the process it
+ * was born for (see shell.c). So the exit code has to be findable *after* the
+ * slot that held it is reaped — and reaping zeroes the slot's exit_code before a
+ * window could ever ask. This small append-only log is the answer: the moment a
+ * slot becomes EXITED, whatever its reason (an exit() or a kill that named it),
+ * its (pid, code) pair is recorded here, keyed by a pid that is never reused. A
+ * window's pump then reads the code by that unique pid long after the slot is
+ * free. 16 entries is generous for a session; on overflow it wraps, and a window
+ * looks its code up on the frame the process dies, when the entry is certainly
+ * still in view. */
+struct exit_record { int pid; int code; };
+#define EXIT_LOG_MAX 16
+static struct exit_record exit_log[EXIT_LOG_MAX];
+static unsigned exit_log_n;
+
+static void record_exit(int pid, int code)
+{
+    unsigned i = exit_log_n % EXIT_LOG_MAX;
+    exit_log[i].pid = pid;
+    exit_log[i].code = code;
+    exit_log_n++;
+}
+
 /* The parent for a process created *outside* the scheduler. proc_create() is
  * called from kernel code when the shell starts a program, and "who is the
  * running process" has no answer there — so the launch path names the parent
@@ -548,6 +571,7 @@ static void sched_switch(struct syscall_frame *f, int mode, int code)
     if (mode == SWITCH_EXIT) {
         table[c].exit_code = code;
         table[c].state = PROC_EXITED;
+        record_exit(table[c].pid, code);
     } else if (mode == SWITCH_BLOCK) {
         table[c].state = PROC_BLOCKED;
     } else {
@@ -821,6 +845,7 @@ int proc_kill(int pid, int sig, struct syscall_frame *f)
     struct proc *v = &table[t];
     v->state = PROC_EXITED;
     v->exit_code = -sig;
+    record_exit(v->pid, -sig);
     v->wait_out = 0;
     v->wake_pending = 0;        /* a sleeper's pending wake dies with it */
     proc_free_space(v);         /* safe: the victim's CR3 is not loaded */
@@ -832,6 +857,42 @@ int proc_kill(int pid, int sig, struct syscall_frame *f)
 int proc_current_pid(void)
 {
     return current >= 0 ? table[current].pid : 0;
+}
+
+/* Is this pid still one the scheduler would run? A window asks this once a
+ * frame to notice the moment its program stopped. EXITED (a zombie awaiting a
+ * wait or this visit's reap) and FREE mean "gone", so a window finalises exactly
+ * when the process stops owning a CPU, not when its slot is later recycled. The
+ * shell's own slot is never the answer — a launched program is. */
+int proc_pid_live(int pid)
+{
+    if (pid <= 0)
+        return 0;
+    for (int i = 0; i < PROC_MAX; i++) {
+        struct proc *p = &table[i];
+        if (p->pid != pid)
+            continue;
+        return p->state == PROC_READY || p->state == PROC_RUNNING ||
+               p->state == PROC_BLOCKED;
+    }
+    return 0;
+}
+
+/* The exit code a window owes its reader, looked up by the unique pid the window
+ * was bound to. Found in the append-only log (which is why it survives the slot
+ * being reaped and its exit_code zeroed). 0 = wrote *code_out, -1 = no record
+ * (the process never got to EXITED, or the log wrapped past it). */
+int proc_exit_status(int pid, int *code_out)
+{
+    for (unsigned k = 0; k < exit_log_n && k < EXIT_LOG_MAX * 2; k++) {
+        unsigned i = (exit_log_n - 1 - k) % EXIT_LOG_MAX;
+        if (exit_log[i].pid == pid) {
+            if (code_out != NULL)
+                *code_out = exit_log[i].code;
+            return 0;
+        }
+    }
+    return -1;
 }
 
 /* The parent as the table sees it *now*, which is the interesting part: an only

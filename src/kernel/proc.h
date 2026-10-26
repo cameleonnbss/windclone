@@ -177,6 +177,19 @@ int  proc_kill(int pid, int sig, struct syscall_frame *f);
  * it answers with a real pid. */
 int  proc_current_pid(void);
 
+/* Is `pid` still a process the scheduler would run (READY/RUNNING/BLOCKED)? Used
+ * by a program's window to notice, once a frame, that the process it was born for
+ * has stopped — so it can finalise (record the exit code, mark the window
+ * finished) at the exact moment ownership ends rather than whenever a slot
+ * happens to be recycled. Non-zero while live, 0 when gone or unknown. */
+int  proc_pid_live(int pid);
+
+/* The exit code a finished `pid` left, looked up by its never-reused pid in a
+ * small append-only log the kernel writes at the moment a slot turns EXITED. So
+ * a window can still read the code after the process slot has been reaped (which
+ * zeroes the slot's own copy). 0 = wrote *code_out; -1 = no record for that pid. */
+int  proc_exit_status(int pid, int *code_out);
+
 /* The pid of the running process's parent, or 0 when it has none (a process the
  * kernel started for a boot demo) or when the scheduler is not driving anything.
  * This is the parent as the table owns it *now*, so a program that was adopted

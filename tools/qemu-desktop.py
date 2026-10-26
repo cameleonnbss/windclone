@@ -22,6 +22,10 @@ Scenarios (each one asserts the serial markers the kernel prints):
     menuproc   click /bin/whoami and follow its pid through the log: the pid
                the kernel gave at spawn, the one the program read back with
                getpid(), and the reap the shell owed it
+    progwin    click /bin/hold and prove its output belongs to *its own*
+               window, the window outlives the process (it finalises with the
+               exit code but stays open), and closing it is the click that
+               finally dismisses it
 
 Exit status 0 = every step did what the serial log says it did.
 SPDX-License-Identifier: MIT
@@ -47,6 +51,11 @@ START_X, START_W = 12, 110
 ICON_X, ICON_W = 28, 52
 MENU_X, MENU_W = START_X, 236
 MENU_HEADER_H, MENU_ITEM_H, MENU_FOOTER_H, MENU_GAP = 30, 22, 26, 6
+# A program window as wm_open_program() cascades it: the first one lands at
+# (150,56) and is PROG_W wide (clamped to W-40), so its close button is where
+# title_button() says for a window at that rect.
+PROG_W, PROG_H = 500, 240
+PROG_X0, PROG_Y0, PROG_STEP_X, PROG_STEP_Y = 150, 56, 24, 22
 
 
 class Monitor:
@@ -262,6 +271,34 @@ def scenario_actions(sc, mon, W, H):
         # could not have known at click time
         wait_serial(r"\[hold\] exiting pid %s code 5\n" % pid)
         wait_serial(r"shell: reaped pid %s code 5\n" % pid)
+    elif sc == "progwin":
+        # v0.1.11: a launched program's output belongs to *its own* window, and
+        # the window outlives the process. Click /bin/hold; read its pid; then
+        # prove the three claims the release makes, all naming that same pid:
+        # a window was opened for it, the console router sent its bytes there
+        # (not to the terminal), and when the process died the window finalised
+        # with its exit code and the byte count it received — but is still open.
+        # Only the close click may dismiss it, so the "closed" marker must be
+        # absent until we click it, and present after. Geometry comes from the
+        # kernel's own cascade, not a guessed coordinate: the first program
+        # window sits at (150,56), PROG_W wide, close packed against its corner.
+        mon.click(START_X + START_W // 2, H - TASKBAR_H + 22)
+        idx = int(wait_serial(r"wm: menu row (\d+) hold\n").group(1))
+        mon.click(MENU_X + MENU_W // 2, menu_row_y(H, idx))
+        pid = wait_serial(r"proc: spawned /bin/hold as pid (\d+)").group(1)
+        wait_serial(r"wm: program window opened 'hold' pid %s\n" % pid)
+        wait_serial(r"wm: routed output pid %s\n" % pid)
+        # the finish line carries the exit code and the routed byte count; a
+        # running program's output never reaches the terminal, so bytes > 0 here
+        m = wait_serial(r"wm: program window pid %s finished code 5, (\d+) bytes\n" % pid)
+        if int(m.group(1)) <= 0:
+            raise SystemExit("hold's window recorded no routed bytes")
+        if "wm: program window closed 'hold'" in open(LOG, errors="replace").read():
+            raise SystemExit("hold's window closed itself before it was clicked")
+        pw = min(PROG_W, W - 40)
+        cx, cy = title_button((PROG_X0, PROG_Y0, pw, PROG_H), 2)   # BTN_CLOSE
+        mon.click(cx, cy)
+        wait_serial(r"wm: program window closed 'hold' pid %s\n" % pid)
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -290,6 +327,12 @@ MARKERS = {
     "live":      ["shell: launched 'hold' from the start menu",
                   "shell: hold started, pid",
                   "shell: reaped pid", "shell: hold exited with 5"],
+    # the open / route / finish / survive-then-close ordering is asserted in the
+    # scenario against the dynamic pid; these are the marker lines it turns on
+    "progwin":   ["wm: program window opened 'hold' pid",
+                  "wm: routed output pid",
+                  "wm: program window pid",
+                  "wm: program window closed 'hold'"],
 }
 
 

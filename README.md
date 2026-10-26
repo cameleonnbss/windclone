@@ -186,6 +186,25 @@ On boot the kernel:
    before the idle loop ever visits — and the output still goes to the one
    existing terminal window: a window that owns *its own* process is the next
    step, not this one.
+21. gives a launched program **a window of its own.** The whole kernel used to
+   have one console sink, so every program's `write(1)` landed in the single
+   terminal grid. That sink is now a **router**: it reads `proc_current_pid()`,
+   and the bytes a running program writes go to *that program's* text surface
+   instead of the terminal, while the shell's own lines, the boot demos and any
+   un-launched child still fall through to the terminal exactly as before (the
+   serial port has already received every byte, so no `wm:` assertion changes).
+   Each surface is a full desktop window — the same draggable title bar,
+   minimise / maximise / close, and taskbar button the fixed windows use,
+   because the program windows live in the very same `wins[]` / `order[]` arrays.
+   And the window **outlives its process**: when the program stops owning a CPU,
+   `shell_program_pump()` looks up its exit code by the never-reused pid, paints
+   `EXIT n` under its final output, and logs `wm: program window pid P finished
+   code C, N bytes`. The window stays on screen until the user clicks its close
+   button, which frees the text slot — so dismissing a window is a choice, never
+   a signal, and it does not touch the process. `/bin/hold` again is the witness:
+   its twenty rounds and its exit code 5 stream into its own window, which is
+   still open after the process is gone. Six such windows fit; the seventh launch
+   still runs, its output just falls back to the terminal rather than vanishing.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

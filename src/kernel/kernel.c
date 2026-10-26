@@ -472,7 +472,18 @@ void kmain(void)
          * flag, so it joins the reasons to paint: the terminal a program is
          * streaming into has to turn over between visits, not only when the
          * next key happens to arrive. */
-        int redraw = mouse_take_dirty() || shell_dirty();
+
+        /* Finalise any program window whose process just stopped *before* the
+         * repaint decision, so a program that finishes quietly still gets its
+         * "finished code" line and its EXIT row painted even when nothing else
+         * set a dirty flag. It runs from the idle loop, not desktop_frame(), for
+         * exactly that reason: the frame is only drawn when redraw is already
+         * true, and the death of a process is one of the things that must make
+         * it true. */
+        shell_program_pump();
+
+        int redraw = mouse_take_dirty() || shell_dirty()
+                                     || shell_program_dirty_any();
         int ch;
         while ((ch = keyboard_take_char()) >= 0) {
             shell_key(ch);
@@ -481,6 +492,7 @@ void kmain(void)
         if (gfx_up && redraw) {
             desktop_frame();
             shell_clear_dirty();
+            shell_program_clear_dirty_all();
             /* The witness that the compositor actually turned over. Written
              * straight to the serial line rather than the log ring so it is
              * ordered against a live process's own output: when a [hold] round

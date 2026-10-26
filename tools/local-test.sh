@@ -308,6 +308,39 @@ for want in "[hold] round 1 pid $HPID" \
     printf '%s\n' "$HSEG" | grep -aqF "$want" \
         || fail "the live /bin/hold did not reach its async end: $want"
 done
+
+# v0.1.11: a launched program's output belongs to *its own* window, not the
+# shared terminal, and that window outlives the process. The keyboard run types
+# nine programs and, headless, nothing ever clicks a close button — so the six
+# window slots fill with finished-but-still-open windows and the later launches
+# (vanish, orphan, hold) correctly fall back to the terminal: the documented,
+# honest edge of "a launched program gets a window", not "every process does".
+# The lifecycle claim is therefore checked against the FIRST program that really
+# did get a window, and every marker names the same dynamic pid and name read
+# back out of the kernel's own open line — nothing here is hardcoded.
+WOPEN=$(grep -aF 'wm: program window opened' /tmp/wc-bios.log | head -1)
+WPID=$(printf '%s\n' "$WOPEN" | sed -n 's/.*pid \([0-9]*\).*/\1/p')
+WNAME=$(printf '%s\n' "$WOPEN" | sed -n "s/.*opened '\([^']*\)'.*/\1/p")
+[ -n "$WPID" ] && [ -n "$WNAME" ] \
+    || fail 'not one program in the keyboard run got a window of its own'
+grep -aqF "wm: program window opened '$WNAME' pid $WPID" /tmp/wc-bios.log \
+    || fail "a launched program opened no window bound to pid $WPID"
+grep -aqF "wm: routed output pid $WPID" /tmp/wc-bios.log \
+    || fail "$WNAME's output was not routed to its own window (pid $WPID)"
+grep -aqF "wm: program window pid $WPID finished code" /tmp/wc-bios.log \
+    || fail "$WNAME's window did not record the exit code its process left"
+# The window outlives its process: nothing was clicked closed in this run, so no
+# closed marker may exist — a finished program's window is dismissed by the user.
+grep -aqF "wm: program window closed '$WNAME'" /tmp/wc-bios.log \
+    && fail "$WNAME's window closed itself after the process died — it must survive"
+# And the overflow is real, not silent: hold is past the six slots, so its output
+# falls back to the terminal — which is also why its rounds still interleave with
+# repaints in the block above. The router caused the earlier windows; this proves
+# the fallback is what happens when there is no window room.
+grep -aqF "wm: no window room, 'hold' output to terminal" /tmp/wc-bios.log \
+    || fail 'the seventh+ launch did not fall back to the terminal as documented'
+echo "    ok: $WNAME ran in a window of its own that outlived the process (pid $WPID)"
+
 { printf '%s\n' "$HSEG" | grep -aqF 'sched: deadlock' \
   && fail 'the idle-driven visit deadlocked a live process'; } || true
 echo '    ok: a launch is live — a running program interleaves with repaints, reaps late'
@@ -630,6 +663,15 @@ python3 tools/qemu-desktop.py windclone.iso menuproc \
 echo '==> live process in a window (async launch, mouse)'
 python3 tools/qemu-desktop.py windclone.iso live \
     || fail 'a menu-launched program did not keep the desktop painting'
+
+# v0.1.11: the mouse path to a window that is *the program's own*. Click /bin/hold,
+# read its pid, and require the four claims to name that same pid — a window opened
+# for it, its output routed there (not the terminal), the window finalised with its
+# exit code after the process died, and it still open until the close click. A
+# program whose output never reaches the terminal is the point of the release.
+echo '==> a program window of its own (routed output, outlives the process)'
+python3 tools/qemu-desktop.py windclone.iso progwin \
+    || fail 'a launched program did not run in a window that outlived its process'
 
 # 7) kernel text console: the "vga: text console live" marker (checked in
 #    the BIOS + UEFI logs above) proves the kernel mapped 0xB8000 through

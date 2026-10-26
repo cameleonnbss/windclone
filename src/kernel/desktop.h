@@ -15,4 +15,14 @@
 
 void desktop_frame(void);
 
+/* Open a real window on the desktop for a program the shell just launched, bound
+ * to its surface slot and pid. It is a full window — draggable title bar,
+ * minimise / maximise / close, a taskbar button — whose body is that program's
+ * own text (shell_program_draw). The window is created here and owned by the
+ * desktop, but it *outlives the process*: when the program finishes the window
+ * stays, showing the exit code, until the user closes it. `slot < 0` is a no-op
+ * (the shell had no window room and told the program to use the terminal). Called
+ * from the shell's launch path, never from an IRQ. */
+void wm_open_program(int slot, int pid);
+
 #endif

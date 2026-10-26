@@ -29,32 +29,48 @@
 #include "string.h"
 #include "timer.h"
 #include "version.h"
+#include "desktop.h"
 
 #define SHELL_ROWS 17
 #define SHELL_COLS 62
 #define LINE_H     11
 
-static char rows[SHELL_ROWS][SHELL_COLS + 1];
-static int  next_row;                 /* where the next line goes        */
+/* One scrollback grid, and the code that writes and paints it, lifted out of
+ * the terminal so it can be shared. The terminal is one instance; every
+ * launched program gets another (see `struct program` below). Text stays cells
+ * rather than pixels for the reason a real terminal does: a window can be
+ * dragged, overlapped and repainted as often as it likes and the scrollback is
+ * still there. */
+struct surface {
+    char rows[SHELL_ROWS][SHELL_COLS + 1];
+    int  next_row;                    /* where the next line goes        */
+    char pending[SHELL_COLS + 1];     /* the line still being assembled  */
+    int  pending_len;
+    int  dirty;                       /* this surface changed since paint */
+};
+
+static struct surface term;           /* the shell's own window */
+
 static char input[SHELL_COLS + 1];
 static int  input_len;
-static int  dirty = 1;
 
-/* --- grid helpers ----------------------------------------------------- */
+/* --- surface helpers -------------------------------------------------- */
 
-static void grid_clear(void)
+static void surf_clear(struct surface *s)
 {
     for (int r = 0; r < SHELL_ROWS; r++)
-        memset(rows[r], 0, sizeof rows[r]);
-    next_row = 0;
+        memset(s->rows[r], 0, sizeof s->rows[r]);
+    s->next_row = 0;
+    s->pending_len = 0;
+    s->dirty = 1;
 }
 
-static void scroll_up(void)
+static void surf_scroll(struct surface *s)
 {
     for (int r = 1; r < SHELL_ROWS; r++)
-        memcpy(rows[r - 1], rows[r], SHELL_COLS + 1);
-    memset(rows[SHELL_ROWS - 1], 0, SHELL_COLS + 1);
-    next_row = SHELL_ROWS - 1;
+        memcpy(s->rows[r - 1], s->rows[r], SHELL_COLS + 1);
+    memset(s->rows[SHELL_ROWS - 1], 0, SHELL_COLS + 1);
+    s->next_row = SHELL_ROWS - 1;
 }
 
 /* The 5x7 font has no lowercase: fold on the way into the grid so the
@@ -64,21 +80,22 @@ static char upper(char c)
     return (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
 }
 
-static void put_line(const char *s)
+static void surf_put_line(struct surface *s, const char *str)
 {
-    if (next_row >= SHELL_ROWS)
-        scroll_up();
+    if (s->next_row >= SHELL_ROWS)
+        surf_scroll(s);
 
     int c = 0;
-    for (; s[c] != '\0' && c < SHELL_COLS; c++)
-        rows[next_row][c] = upper(s[c]);
-    rows[next_row][c] = '\0';
-    next_row++;
-    dirty = 1;
+    for (; str[c] != '\0' && c < SHELL_COLS; c++)
+        s->rows[s->next_row][c] = upper(str[c]);
+    s->rows[s->next_row][c] = '\0';
+    s->next_row++;
+    s->dirty = 1;
 }
 
-/* "TEXT" + decimal, without dragging printf into the shell. */
-static void put_line_num(const char *prefix, uint64_t value)
+/* "TEXT" + decimal, without dragging printf in. */
+static void surf_put_line_num(struct surface *s, const char *prefix,
+                              uint64_t value)
 {
     char buf[SHELL_COLS + 1];
     int n = 0;
@@ -96,8 +113,59 @@ static void put_line_num(const char *prefix, uint64_t value)
         buf[n++] = digits[--d];
 
     buf[n] = '\0';
-    put_line(buf);
+    surf_put_line(s, buf);
 }
+
+/* "EXIT -9" into a program's surface: signed, because a killed process is a
+ * whole reason a window exists and a minus sign must survive to the screen. */
+static void surf_put_exit(struct surface *s, int code)
+{
+    char buf[24];
+    int n = 0;
+    for (const char *p = "EXIT "; *p != '\0'; p++)
+        buf[n++] = *p;
+
+    unsigned u;
+    if (code < 0) {
+        buf[n++] = '-';
+        u = (unsigned)(-code);
+    } else {
+        u = (unsigned)code;
+    }
+    char dig[12];
+    int d = 0;
+    do {
+        dig[d++] = (char)('0' + (u % 10));
+        u /= 10;
+    } while (u != 0 && d < 12);
+    while (d > 0)
+        buf[n++] = dig[--d];
+
+    buf[n] = '\0';
+    surf_put_line(s, buf);
+}
+
+/* Paint a surface's rows at (x,y). Shared by the terminal and every program
+ * window; neither knows the other's cells. */
+static void surf_draw(const struct surface *s, int x, int y)
+{
+    for (int r = 0; r < SHELL_ROWS; r++)
+        if (s->rows[r][0] != '\0')
+            gfx_text(x, y + r * LINE_H, s->rows[r], gfx_rgb(0x22, 0xC5, 0x5E), 1);
+}
+
+/* The terminal's own line writer: every banner, echo, help and prompt line in
+ * this file still calls these, they just route into the terminal surface. */
+static void put_line(const char *str)
+{
+    surf_put_line(&term, str);
+}
+
+static void put_line_num(const char *prefix, uint64_t value)
+{
+    surf_put_line_num(&term, prefix, value);
+}
+
 
 /* --- commands --------------------------------------------------------- */
 
@@ -123,40 +191,215 @@ static void cmd_help(void)
     put_line_num("PARENT = LE SHELL, PID ", (uint64_t)proc_shell_pid());
 }
 
-/* --- a program's stdout, wired into the grid -------------------------
- * The kernel hands write(1)/write(2) bytes here whenever a program runs.
- * They arrive in whatever chunks the program chose - half a line, a whole
- * file, forty bytes at a time - so there is a pending row that only gets
- * flushed on a newline, at the end of a line that filled up, or when the
- * program exits without one. */
-static char pending[SHELL_COLS + 1];
-static int  pending_len;
+/* --- a program's own window ------------------------------------------
+ * A launched program gets a surface of its own, bound to the pid the shell was
+ * handed. The console router below sends a *running* program's write(1) bytes
+ * into that surface instead of the shared terminal, so the program truly owns
+ * its window: the compositor paints it, the user drags / minimises / closes it,
+ * and it stays on screen after the process is reaped — showing the exit code the
+ * process left and its final output — until the user closes it. A program's own
+ * children (a reaper's bell) were never launched by a click or a word, so their
+ * output still lands in the terminal: that is the honest edge of "a launched
+ * program gets a window", not "every process does".
+ *
+ * A bound pid is collision-proof because pids are never reused (proc.c's
+ * next_pid only climbs), so a window can key itself to one forever. */
+#define SHELL_PROG_MAX 6
 
-static void sink_put_pending(void)
+struct program {
+    int      used;           /* slot holds a window (live or finished)   */
+    int      live;           /* 1 while its process still owns a CPU     */
+    int      finished;       /* 1 once the process stopped               */
+    int      pid;
+    int      exit_code;
+    uint64_t bytes;          /* output routed to this window (the claim) */
+    int      routed_logged;  /* emit "wm: routed output" only once       */
+    char     name[PROC_NAME_MAX];
+    struct surface s;
+};
+
+static struct program prog[SHELL_PROG_MAX];
+
+static struct program *program_for_pid(int pid)
 {
-    if (pending_len == 0)
-        return;
-    pending[pending_len] = '\0';
-    put_line(pending);
-    pending_len = 0;
+    if (pid <= 0)
+        return NULL;
+    for (int i = 0; i < SHELL_PROG_MAX; i++)
+        if (prog[i].used && prog[i].live && prog[i].pid == pid)
+            return &prog[i];
+    return NULL;
 }
 
-static void shell_sink(const char *data, uint64_t len)
+/* Assemble a chunk of output into a surface's rows. Bytes arrive in whatever
+ * sizes the program chose — half a line, a whole file, forty at a time — so a
+ * pending row fills until a newline or a full line forces it out. */
+static void surf_write(struct surface *s, const char *data, uint64_t len)
 {
     for (uint64_t i = 0; i < len; i++) {
         char c = data[i];
         if (c == '\r')
             continue;
-        if (c == '\n' || pending_len >= SHELL_COLS) {
-            sink_put_pending();
+        if (c == '\n' || s->pending_len >= SHELL_COLS) {
+            if (s->pending_len > 0) {
+                s->pending[s->pending_len] = '\0';
+                surf_put_line(s, s->pending);
+                s->pending_len = 0;
+            }
             if (c != '\n')
-                pending[pending_len++] = c;   /* wrap: keep the byte */
+                s->pending[s->pending_len++] = c;   /* wrap: keep the byte */
             continue;
         }
-        pending[pending_len++] = c;
+        s->pending[s->pending_len++] = c;
     }
-    dirty = 1;
+    s->dirty = 1;
 }
+
+/* The one console sink the kernel calls for a program's write(1)/write(2). It
+ * decides by *whose* bytes these are: proc_current_pid() is that program while
+ * it owns the CPU, so they go to its window; when the writer is the shell, a
+ * boot demo, or an un-launched child, they go to the terminal instead. The
+ * serial port has already received every byte before this is ever reached (see
+ * vfs.c), so routing changes only what a human sees, never what CI greps. */
+static void console_router(const char *data, uint64_t len)
+{
+    struct program *pr = program_for_pid(proc_current_pid());
+    if (pr != NULL) {
+        if (!pr->routed_logged) {
+            pr->routed_logged = 1;
+            serial_write("wm: routed output pid ");
+            serial_write_dec((uint64_t)pr->pid);
+            serial_write("\n");
+        }
+        pr->bytes += len;
+        surf_write(&pr->s, data, len);
+        return;
+    }
+    surf_write(&term, data, len);
+}
+
+/* Claim a surface for a just-launched program. Returns its slot (which becomes
+ * the window's content id) or -1 when all six hold windows nobody has closed
+ * yet — in which case the launch still runs, its output just falls back to the
+ * terminal rather than being silently dropped. */
+int shell_program_open(const char *name, int pid)
+{
+    for (int i = 0; i < SHELL_PROG_MAX; i++) {
+        struct program *pr = &prog[i];
+        if (pr->used)
+            continue;
+        pr->used = 1;
+        pr->live = 1;
+        pr->finished = 0;
+        pr->pid = pid;
+        pr->exit_code = 0;
+        pr->bytes = 0;
+        pr->routed_logged = 0;
+        int n = 0;
+        for (; name[n] != '\0' && n + 1 < PROC_NAME_MAX; n++)
+            pr->name[n] = name[n];
+        pr->name[n] = '\0';
+        surf_clear(&pr->s);
+        pr->s.dirty = 0;          /* opening a window is not new output */
+        return i;
+    }
+    return -1;
+}
+
+/* Once per desktop frame: a window bound to a pid that has stopped owning a CPU
+ * is finished. Read the exit code by that never-reused pid, say so on the serial
+ * line the tests grep, and leave the window open showing "EXIT n" under its
+ * output. Closing it stays the user's decision, not the kernel's. */
+void shell_program_pump(void)
+{
+    for (int i = 0; i < SHELL_PROG_MAX; i++) {
+        struct program *pr = &prog[i];
+        if (!pr->used || !pr->live)
+            continue;
+        if (proc_pid_live(pr->pid))
+            continue;
+
+        pr->live = 0;
+        pr->finished = 1;
+        int code = 0;
+        if (proc_exit_status(pr->pid, &code) == 0)
+            pr->exit_code = code;
+
+        serial_write("wm: program window pid ");
+        serial_write_dec((uint64_t)pr->pid);
+        serial_write(" finished code ");
+        serial_write_signed(pr->exit_code);
+        serial_write(", ");
+        serial_write_dec(pr->bytes);
+        serial_write(" bytes\n");
+
+        surf_put_exit(&pr->s, pr->exit_code);
+    }
+}
+
+const char *shell_program_name(int slot)
+{
+    if (slot < 0 || slot >= SHELL_PROG_MAX || !prog[slot].used)
+        return "";
+    return prog[slot].name;
+}
+
+int shell_program_live(int slot)
+{
+    if (slot < 0 || slot >= SHELL_PROG_MAX || !prog[slot].used)
+        return 0;
+    return prog[slot].live;
+}
+
+int shell_program_exit_code(int slot)
+{
+    if (slot < 0 || slot >= SHELL_PROG_MAX || !prog[slot].used)
+        return 0;
+    return prog[slot].exit_code;
+}
+
+/* Any program surface changed since it was last painted — the reason a running
+ * program's window repaints on its own, exactly as the terminal does. */
+int shell_program_dirty_any(void)
+{
+    for (int i = 0; i < SHELL_PROG_MAX; i++)
+        if (prog[i].used && prog[i].s.dirty)
+            return 1;
+    return 0;
+}
+
+void shell_program_clear_dirty_all(void)
+{
+    for (int i = 0; i < SHELL_PROG_MAX; i++)
+        prog[i].s.dirty = 0;
+}
+
+void shell_program_draw(int slot, int x, int y, int width)
+{
+    (void)width;
+    if (slot < 0 || slot >= SHELL_PROG_MAX || !prog[slot].used)
+        return;
+    surf_draw(&prog[slot].s, x, y);
+}
+
+/* The user closed the window. Free the slot so its six- window pool has room
+ * again; the process it belonged to is already gone or already on its way, and
+ * nothing here kills it — a window being dismissed is not a signal. */
+void shell_program_close(int slot)
+{
+    if (slot < 0 || slot >= SHELL_PROG_MAX)
+        return;
+    prog[slot].used = 0;
+    prog[slot].live = 0;
+    prog[slot].finished = 0;
+    prog[slot].pid = 0;
+    prog[slot].exit_code = 0;
+    prog[slot].bytes = 0;
+    prog[slot].routed_logged = 0;
+    prog[slot].name[0] = '\0';
+    surf_clear(&prog[slot].s);
+    prog[slot].s.dirty = 0;
+}
+
 
 /* --- running a program ----------------------------------------------- */
 #define PROGRAM_PATH_MAX 64
@@ -224,8 +467,28 @@ static int launch(int argc, const char *const *argv,
      * the program ended and froze the desktop until then; now launch() makes no
      * such claim. The exit code arrives later, on a visit that runs the process
      * to its end, through proc_reap_live()'s "ran and returned" / "exited with"
-     * lines, and the program's own output streams into this terminal the whole
-     * time while the compositor keeps painting between slices. */
+     * lines. And the program no longer shares the terminal's grid: it is given a
+     * window of its own (a surface the console router streams its output into,
+     * painted and driven by the desktop), so the compositor keeps painting
+     * between slices *and* the program's text belongs to something the user can
+     * move, overlap and — after it finishes — close. */
+    int slot = shell_program_open(argv[0], pid);
+    if (slot >= 0) {
+        wm_open_program(slot, pid);
+        serial_write("wm: program window opened '");
+        serial_write(argv[0]);
+        serial_write("' pid ");
+        serial_write_dec((uint64_t)pid);
+        serial_write("\n");
+    } else {
+        /* All six windows are still open on finished programs. The launch is not
+         * refused for that — the process runs and its output falls back to the
+         * terminal rather than vanishing, and the log says which happened. */
+        serial_write("wm: no window room, '");
+        serial_write(argv[0]);
+        serial_write("' output to terminal\n");
+    }
+
     serial_write("shell: ");
     serial_write(argv[0]);
     serial_write(" started, pid ");
@@ -317,21 +580,21 @@ static void execute(void)
         else if (strcmp(argv[0], "about") == 0)
             cmd_about();
         else if (strcmp(argv[0], "clear") == 0)
-            grid_clear();
+            surf_clear(&term);
         else
             cmd_program(argc, argv);
     }
 
     input_len = 0;
     input[0] = '\0';
-    dirty = 1;
+    term.dirty = 1;
 }
 
 /* --- public ------------------------------------------------------------ */
 
 void shell_init(void)
 {
-    grid_clear();
+    surf_clear(&term);
 
     /* The shell takes its place in the process table before anything can be
      * typed, and the claim it makes is the one the rest of this file depends
@@ -341,15 +604,18 @@ void shell_init(void)
      * belongs to this subsystem and nothing else needs it. */
     proc_shell_start();
 
-    /* From here on, whatever a program writes to fd 1 or 2 is typed into this
-     * grid. The serial port still receives every byte - that is what CI
-     * greps - but a user at the screen only has this window. */
-    vfs_set_console_sink(shell_sink);
+    /* The one console sink the kernel calls for a running program's write(1)/
+     * write(2). It is a router, not a writer: a launched program's bytes go to
+     * that program's own window, and everyone else's (the shell's own lines, the
+     * boot demos, an un-launched child) go to this terminal. The serial port has
+     * already received every byte before the router is ever reached — that is
+     * what CI greps — so this changes only what a human at the screen sees. */
+    vfs_set_console_sink(console_router);
 
     put_line("WINDCLONE - INVITE DE COMMANDES");
     put_line("TAPE HELP POUR LA LISTE DES COMMANDES.");
     put_line("");
-    dirty = 1;
+    term.dirty = 1;
 }
 
 void shell_key(int c)
@@ -361,13 +627,13 @@ void shell_key(int c)
     if (c == '\b') {
         if (input_len > 0)
             input[--input_len] = '\0';
-        dirty = 1;
+        term.dirty = 1;
         return;
     }
     if (c >= 32 && c < 127 && input_len < SHELL_COLS - 1) {
         input[input_len++] = (char)c;
         input[input_len] = '\0';
-        dirty = 1;
+        term.dirty = 1;
     }
 }
 
@@ -375,11 +641,10 @@ void shell_draw(int x, int y, int width)
 {
     (void)width;
 
-    for (int r = 0; r < SHELL_ROWS; r++)
-        if (rows[r][0] != '\0')
-            gfx_text(x, y + r * LINE_H, rows[r], gfx_rgb(0x22, 0xC5, 0x5E), 1);
+    surf_draw(&term, x, y);
 
-    /* Prompt + the line being typed, with a block cursor. */
+    /* Prompt + the line being typed, with a block cursor. Only the terminal
+     * has these; a program's window is pure scrollback (shell_program_draw). */
     int py = y + SHELL_ROWS * LINE_H + 2;
     gfx_text(x, py, ">", gfx_rgb(0xEF, 0x44, 0x44), 1);
     gfx_text(x + 12, py, input, gfx_rgb(0xF8, 0xFA, 0xFC), 1);
@@ -389,10 +654,10 @@ void shell_draw(int x, int y, int width)
 
 int shell_dirty(void)
 {
-    return dirty;
+    return term.dirty;
 }
 
 void shell_clear_dirty(void)
 {
-    dirty = 0;
+    term.dirty = 0;
 }

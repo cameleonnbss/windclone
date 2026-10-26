@@ -64,22 +64,36 @@
 #define TASK_W      168
 #define TASK_GAP    6
 
-enum { WIN_STATUS, WIN_TRASH, WIN_TERM, WIN_COUNT };
+enum { WIN_STATUS, WIN_TRASH, WIN_TERM, WIN_PROGRAM };
 enum { BTN_MIN, BTN_MAX, BTN_CLOSE, BTN_NONE };
+
+/* Three windows are fixed (status, trash, terminal) and live at indices 0..2,
+ * their kind equalling their index. Beyond them is a pool of program windows —
+ * one per launched program, at indices WIN_FIXED.. — that reuse every piece of
+ * chrome below (drag, minimise, maximise, close, taskbar) because they live in
+ * the very same wins[]/order[] arrays the hit-test and compositing loops walk.
+ * WC_PROG_WIN_MAX matches SHELL_PROG_MAX in shell.c: the shell hands out one
+ * text slot at a time, and this is where the window that shows it lives. */
+#define WIN_FIXED        3
+#define WC_PROG_WIN_MAX  6
+#define WIN_TOTAL        (WIN_FIXED + WC_PROG_WIN_MAX)
 
 struct window {
     int x, y, w, h;            /* current geometry                     */
     int rx, ry, rw, rh;        /* geometry to restore when un-maximising */
     const char *title;         /* title bar                            */
     const char *task;          /* taskbar button                       */
-    int kind;
+    int kind;                  /* WIN_STATUS/TRASH/TERM/PROGRAM        */
     int open;                  /* closed windows leave until an icon reopens them */
     int min;                   /* minimised: open, hidden, taskbar only */
     int max;                   /* maximised: fills the desktop          */
+    int slot;                  /* program surface id, or -1 for a fixed window */
+    int pid;                   /* the launched program's pid (window marker) */
 };
 
-static struct window wins[WIN_COUNT];
-static int order[WIN_COUNT] = { WIN_STATUS, WIN_TERM, WIN_TRASH }; /* back -> front */
+static struct window wins[WIN_TOTAL];
+static int order[WIN_TOTAL] = { WIN_STATUS, WIN_TERM, WIN_TRASH,
+                                3, 4, 5, 6, 7, 8 };  /* back -> front */
 static int dragging, grab_dx, grab_dy, drag_win;
 static int prev_left;
 static int laid_out;
@@ -108,19 +122,28 @@ static const char *const cursor_shape[] = {
 /* Raising is a rotation: the focused window is always the last one drawn. */
 static void raise_window(int id)
 {
-    for (int i = 0; i < WIN_COUNT; i++) {
+    for (int i = 0; i < WIN_TOTAL; i++) {
         if (order[i] != id)
             continue;
-        for (int j = i; j < WIN_COUNT - 1; j++)
+        for (int j = i; j < WIN_TOTAL - 1; j++)
             order[j] = order[j + 1];
-        order[WIN_COUNT - 1] = id;
+        order[WIN_TOTAL - 1] = id;
         return;
     }
 }
 
+/* The topmost window that is actually on screen. Closed and minimised windows
+ * are skipped, so with a pool of program windows — some of them closed — the
+ * "front" highlight and the taskbar's toggle still mean what a user sees. -1
+ * when nothing is open at all. */
 static int focused(void)
 {
-    return order[WIN_COUNT - 1];
+    for (int i = WIN_TOTAL - 1; i >= 0; i--) {
+        struct window *w = &wins[order[i]];
+        if (w->open && !w->min)
+            return order[i];
+    }
+    return -1;
 }
 
 static void clamp_to_desktop(struct window *w, int W, int H)
@@ -297,20 +320,21 @@ static void draw_trash_content(const struct window *w)
     gfx_text(tx, ty, "- OUVERTE DEPUIS SON ICONE.", C_INK, 1);
 }
 
-static void draw_window(const struct window *w)
+static void draw_window(const struct window *w, int focus)
 {
     int mx = mouse_x();
     int my = mouse_y();
-    int front = (w == &wins[focused()]);
-    uint32_t border = w->kind == WIN_TERM ? gfx_rgb(0x2B, 0x36, 0x48)
-                                          : gfx_rgb(0xCE, 0xD5, 0xE0);
+    int front = (focus >= 0 && w == &wins[focus]);
+    int console = (w->kind == WIN_TERM || w->kind == WIN_PROGRAM);
+    uint32_t border = console ? gfx_rgb(0x2B, 0x36, 0x48)
+                              : gfx_rgb(0xCE, 0xD5, 0xE0);
 
     /* Shadow only when there is room behind the window: a maximised one
      * has no behind, and the extra 6 px would poke into the taskbar. */
     if (!w->max)
         gfx_fill(w->x + 6, w->y + 6, w->w, w->h, gfx_rgb(0x0A, 0x1E, 0x45));
 
-    gfx_fill(w->x, w->y, w->w, w->h, w->kind == WIN_TERM ? C_CONSOLE : C_BODY);
+    gfx_fill(w->x, w->y, w->w, w->h, console ? C_CONSOLE : C_BODY);
     gfx_fill(w->x, w->y, w->w, TITLE_H, front ? C_TITLE_HOT : C_TITLE);
     gfx_fill(w->x, w->y, 4, TITLE_H, front ? C_ACCENT : gfx_rgb(0x47, 0x55, 0x69));
 
@@ -323,6 +347,8 @@ static void draw_window(const struct window *w)
         draw_status_content(w);
     else if (w->kind == WIN_TRASH)
         draw_trash_content(w);
+    else if (w->kind == WIN_PROGRAM)
+        shell_program_draw(w->slot, w->x + 14, w->y + TITLE_H + 12, w->w - 28);
     else
         shell_draw(w->x + 14, w->y + TITLE_H + 12, w->w - 28);
 
@@ -531,7 +557,7 @@ static void draw_taskbar(int W, int H)
     gfx_text(START_X + 34, y + 17, "DEMARRER", C_WHITE, 1);
 
     int x = TASK_X;
-    for (int id = 0; id < WIN_COUNT; id++) {
+    for (int id = 0; id < WIN_TOTAL; id++) {
         struct window *w = &wins[id];
         if (!w->open)
             continue;
@@ -556,7 +582,7 @@ static int task_button_at(int mx, int my, int H)
     if (my < H - TASKBAR_H || my >= H)
         return -1;
     int x = TASK_X;
-    for (int id = 0; id < WIN_COUNT; id++) {
+    for (int id = 0; id < WIN_TOTAL; id++) {
         if (!wins[id].open)
             continue;
         if (mx >= x && mx < x + TASK_W)
@@ -571,11 +597,11 @@ static int task_button_at(int mx, int my, int H)
 static void toggle_show_desktop(void)
 {
     int anything_shown = 0;
-    for (int i = 0; i < WIN_COUNT; i++)
+    for (int i = 0; i < WIN_TOTAL; i++)
         if (wins[i].open && !wins[i].min)
             anything_shown = 1;
 
-    for (int i = 0; i < WIN_COUNT; i++)
+    for (int i = 0; i < WIN_TOTAL; i++)
         if (wins[i].open)
             wins[i].min = anything_shown;
 
@@ -659,7 +685,7 @@ static void handle_press(int mx, int my, int W, int H)
 
     /* Title bars, front to back: the first one under the pointer owns the
      * press, buttons included. That is the whole hit test. */
-    for (int i = WIN_COUNT - 1; i >= 0; i--) {
+    for (int i = WIN_TOTAL - 1; i >= 0; i--) {
         int id = order[i];
         struct window *w = &wins[id];
         if (!w->open || w->min)
@@ -671,6 +697,21 @@ static void handle_press(int mx, int my, int W, int H)
         raise_window(id);
         switch (title_button_at(w, mx, my)) {
         case BTN_CLOSE:
+            /* A program window is more than a rectangle: closing it frees the
+             * text slot behind it (shell.c) so the six-window pool has room
+             * again, and says which program's window went away. The process is
+             * not touched — dismissing a window is not a signal. Fixed windows
+             * just hide until an icon or the taskbar brings them back. */
+            if (w->kind == WIN_PROGRAM) {
+                serial_write("wm: program window closed '");
+                serial_write(w->title);
+                serial_write("' pid ");
+                serial_write_dec((uint64_t)w->pid);
+                serial_write("\n");
+                shell_program_close(w->slot);
+                w->slot = -1;
+                w->pid = 0;
+            }
             w->open = 0; w->min = 0; w->max = 0;
             klog("wm: window closed");
             return;
@@ -695,7 +736,7 @@ static void handle_press(int mx, int my, int W, int H)
 
     /* Window bodies: clicking one raises it. Focus without a drag, which
      * is what makes two overlapping windows usable at all. */
-    for (int i = WIN_COUNT - 1; i >= 0; i--) {
+    for (int i = WIN_TOTAL - 1; i >= 0; i--) {
         int id = order[i];
         struct window *w = &wins[id];
         if (!w->open || w->min)
@@ -756,12 +797,70 @@ static void layout(void)
     wins[WIN_TRASH].kind  = WIN_TRASH;
     wins[WIN_TRASH].open  = 0;
 
-    for (int i = 0; i < WIN_COUNT; i++) {
+    /* The program-window pool starts empty. `slot = -1` marks an unused entry
+     * (0 is a real surface id, so it cannot be the default of a zeroed array);
+     * they are closed until wm_open_program() gives one a geometry, a name and a
+     * pid. Being closed, they are skipped by every hit-test and paint loop. */
+    for (int i = WIN_FIXED; i < WIN_TOTAL; i++) {
+        wins[i].kind  = WIN_PROGRAM;
+        wins[i].open  = 0;
+        wins[i].slot  = -1;
+        wins[i].pid   = 0;
+        wins[i].title = "";
+        wins[i].task  = "";
+    }
+
+    for (int i = 0; i < WIN_TOTAL; i++) {
         wins[i].rx = wins[i].x;  wins[i].ry = wins[i].y;
         wins[i].rw = wins[i].w;  wins[i].rh = wins[i].h;
     }
 
     laid_out = 1;
+}
+
+/* A program window's body is a 62-column scrollback (see SHELL_COLS), so it
+ * needs that much width plus margins; short enough to leave room to cascade. */
+#define PROG_W 500
+#define PROG_H 240
+
+/* Open a window for a program the shell just launched: claim an unused entry in
+ * the pool, cascade it so several are tellable apart, bind it to the shell's
+ * text slot and the program's pid, and raise it. From here the compositor does
+ * the rest — this window is drawn, dragged, minimised, maximised and closed
+ * exactly like a fixed one, because it lives in the same arrays. It also
+ * *outlives* the process: shell_program_pump() finalises it (exit code, the
+ * "finished" line) when the program stops, and only its close button removes it. */
+void wm_open_program(int slot, int pid)
+{
+    if (!gfx_ready() || slot < 0)
+        return;
+
+    int id = -1;
+    for (int i = WIN_FIXED; i < WIN_TOTAL; i++)
+        if (wins[i].slot == -1) { id = i; break; }
+    if (id < 0)
+        return;                    /* pool full; shell.c already logged the fallback */
+
+    int W = gfx_width();
+    int H = gfx_height();
+    int n = id - WIN_FIXED;
+    struct window *w = &wins[id];
+
+    w->w = PROG_W;  w->h = PROG_H;
+    if (w->w > W - 40) w->w = W - 40;
+    w->x = 150 + n * 24;
+    w->y = 56 + n * 22;
+    clamp_to_desktop(w, W, H);
+    w->rx = w->x; w->ry = w->y; w->rw = w->w; w->rh = w->h;
+    w->title = shell_program_name(slot);
+    w->task  = shell_program_name(slot);
+    w->kind  = WIN_PROGRAM;
+    w->slot  = slot;
+    w->pid   = pid;
+    w->open  = 1;
+    w->min   = 0;
+    w->max   = 0;
+    raise_window(id);
 }
 
 void desktop_frame(void)
@@ -798,10 +897,11 @@ void desktop_frame(void)
     for (int i = 0; i < (int)(sizeof icons / sizeof icons[0]); i++)
         draw_icon(icons[i].label, icons[i].y);
 
-    for (int i = 0; i < WIN_COUNT; i++) {
+    int focus = focused();
+    for (int i = 0; i < WIN_TOTAL; i++) {
         struct window *w = &wins[order[i]];
         if (w->open && !w->min)
-            draw_window(w);
+            draw_window(w, focus);
     }
 
     draw_taskbar(W, H);
