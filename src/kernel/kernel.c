@@ -468,15 +468,36 @@ void kmain(void)
         /* Input-driven redraw: the drivers only queue state, the idle loop
          * decides when to repaint. It has to happen on every wake-up, not
          * once a second — a cursor that updates at 1 Hz is worse than no
-         * cursor at all. */
-        int redraw = mouse_take_dirty();
+         * cursor at all. A live process's output sets the shell's own dirty
+         * flag, so it joins the reasons to paint: the terminal a program is
+         * streaming into has to turn over between visits, not only when the
+         * next key happens to arrive. */
+        int redraw = mouse_take_dirty() || shell_dirty();
         int ch;
         while ((ch = keyboard_take_char()) >= 0) {
             shell_key(ch);
             redraw = 1;
         }
-        if (gfx_up && redraw)
+        if (gfx_up && redraw) {
             desktop_frame();
+            shell_clear_dirty();
+            /* The witness that the compositor actually turned over. Written
+             * straight to the serial line rather than the log ring so it is
+             * ordered against a live process's own output: when a [hold] round
+             * and this line interleave in the log, the loop painted *while* the
+             * process was still running — the screen no longer freezes behind it. */
+            serial_write("wm: frame painted\n");
+        }
+
+        /* A program the shell launched is live, not an excursion. Give the
+         * runnable set one bounded slice here and come back, so the next
+         * iteration repaints and polls input before the process advances again.
+         * proc_live_count() is the cheap guard: while only the boot demos or the
+         * idle shell exist it is zero and this does nothing at all. The boot
+         * demo block below still runs its own synchronous proc_run_all() to
+         * completion — it finishes before a visit ever has something to run. */
+        if (proc_live_count() > 0)
+            proc_sched_visit();
 
         uint64_t ticks = timer_ticks();
         if (ticks >= last_second + 100) {

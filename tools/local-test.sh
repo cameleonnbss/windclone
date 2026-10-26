@@ -109,7 +109,8 @@ send_keys /tmp/wc-biosmon a b ret h e l l o ret \
     r e a p e r ret \
     w h o a m i ret \
     v a n i s h ret \
-    o r p h a n ret
+    o r p h a n ret \
+    h o l d ret
 wait $BIOPID 2>/dev/null || true
 for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "vga: text console live" "kmalloc selftest ok" "step: heap ok" \
@@ -273,6 +274,43 @@ EXIT_LN=$(printf '%s\n' "$OSEG" | grep -anF "[nest] exiting pid $NPID" | head -1
 { printf '%s\n' "$OSEG" | grep -aqF 'sched: deadlock' \
   && fail "the adoption run deadlocked — an orphan was never scheduled"; } || true
 echo '    ok: adoption — a child outlives its parent and the adopter collects its exit code'
+
+# A launch that is *live*, not an excursion — the whole point of v0.1.10. The
+# programs above are short: they finish inside one visit, so the old synchronous
+# markers still describe them (proc_reap_live prints the very same "ran and
+# returned" / "exited with" lines, late instead of at launch). `hold` is built to
+# run long — twenty rounds, each a yield and a busy stretch — so it stays READY
+# across several idle-loop visits while its output streams into the terminal. The
+# claim that separates this from the old run-to-completion launch is not that a
+# paint happened (the boot paints for free) but that a paint landed *strictly
+# between two of hold's own rounds*. Nothing is hardcoded: the pid comes from the
+# spawn line, the check is order-free, and the exit code 5 arrives later than the
+# "started, pid P (running)" line on the reap.
+HSEG=$(awk "/shell: running .hold./{f=1} f" /tmp/wc-bios.log)
+HPID=$(printf '%s\n' "$HSEG" | grep -aF 'proc: spawned /bin/hold as pid' | sed -n 's/.*pid \([0-9-]*\).*/\1/p')
+[ -n "$HPID" ] || fail 'the shell never gave the live /bin/hold a pid'
+# the honest async launch line, before any round has run
+printf '%s\n' "$HSEG" | grep -aqF "shell: hold started, pid $HPID (running)" \
+    || fail 'the async launch did not report a started-but-still-running pid'
+R1=$(printf '%s\n' "$HSEG" | grep -anF "[hold] round" | head -1 | cut -d: -f1)
+RN=$(printf '%s\n' "$HSEG" | grep -anF "[hold] round" | tail -1 | cut -d: -f1)
+[ -n "$R1" ] && [ -n "$RN" ] && [ "$R1" -lt "$RN" ] \
+    || fail '/bin/hold left no run of rounds to interleave a paint into'
+PAINT=$(printf '%s\n' "$HSEG" | grep -anF 'wm: frame painted' \
+    | awk -F: -v a="$R1" -v b="$RN" '$1>a && $1<b {print $1; exit}')
+[ -n "$PAINT" ] \
+    || fail 'no repaint landed between two live hold rounds — the screen still froze'
+for want in "[hold] round 1 pid $HPID" \
+            "[hold] exiting pid $HPID code 5" \
+            "shell: hold ran and returned" \
+            "shell: hold exited with 5" \
+            "shell: reaped pid $HPID code 5"; do
+    printf '%s\n' "$HSEG" | grep -aqF "$want" \
+        || fail "the live /bin/hold did not reach its async end: $want"
+done
+{ printf '%s\n' "$HSEG" | grep -aqF 'sched: deadlock' \
+  && fail 'the idle-driven visit deadlocked a live process'; } || true
+echo '    ok: a launch is live — a running program interleaves with repaints, reaps late'
 
 # The scheduler demo runs on its own once the timer is up: two copies of
 # /bin/tick, each with its own address space and pid, printing a line and
@@ -584,6 +622,14 @@ grep -aqE 'wm: menu rows [0-9]+, hidden 0$' "$MENU_LOG" \
 # invokes is a screenshot of a test, not a test.
 python3 tools/qemu-desktop.py windclone.iso menuproc \
     || fail 'the start menu did not launch a real process'
+
+# The mouse path to the same live claim: click /bin/hold, and the desktop keeps
+# painting while it runs. The scenario reads the hold row's index and the pid
+# from the kernel's own lines and requires a repaint strictly between two of
+# hold's rounds — the proof the screen no longer freezes behind a running program.
+echo '==> live process in a window (async launch, mouse)'
+python3 tools/qemu-desktop.py windclone.iso live \
+    || fail 'a menu-launched program did not keep the desktop painting'
 
 # 7) kernel text console: the "vga: text console live" marker (checked in
 #    the BIOS + UEFI logs above) proves the kernel mapped 0xB8000 through

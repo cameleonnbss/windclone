@@ -606,9 +606,12 @@ static void handle_press(int mx, int my, int W, int H)
             return;
         }
 
-        /* Copy the name: shell_launch() does not return until the program has
-         * exited, and the panel must already be gone by then — a menu left on
-         * screen during a run would be a picture of a state that ended. */
+        /* Copy the name before launching. shell_launch() is now asynchronous —
+         * it places the process in the table and returns while it still runs —
+         * so the panel is dismissed here rather than waiting on a program that
+         * may not be finished for a while. The copy keeps this row's name safe
+         * regardless: a repaint during the run can rebuild the menu, and the
+         * launch must carry the exact row the user clicked, not a later one. */
         char name[MENU_NAME_MAX];
         for (int i = 0; i < MENU_NAME_MAX; i++) {
             name[i] = menu_names[row][i];

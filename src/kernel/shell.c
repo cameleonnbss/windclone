@@ -99,28 +99,6 @@ static void put_line_num(const char *prefix, uint64_t value)
     put_line(buf);
 }
 
-/* The same with a sign. A program the shell starts can now be killed - that
- * is what this release is - and a killed process exits with -SIGKILL, so the
- * number after "CODE DE SORTIE:" carries the difference between "it finished"
- * and "it was ended". Printing -9 as an unsigned value would not be a
- * slightly wrong number, it would be a different claim entirely. */
-static void put_line_signed(const char *prefix, int value)
-{
-    char buf[SHELL_COLS + 2];
-    int n = 0;
-
-    for (; prefix[n] != '\0' && n < SHELL_COLS - 21; n++)
-        buf[n] = prefix[n];
-    if (value < 0)
-        buf[n++] = '-';
-    buf[n] = '\0';
-
-    unsigned long magnitude = value < 0
-        ? (unsigned long)(0LL - (long long)value)
-        : (unsigned long)value;
-    put_line_num(buf, (uint64_t)magnitude);
-}
-
 /* --- commands --------------------------------------------------------- */
 
 static void cmd_help(void)
@@ -231,9 +209,8 @@ static int launch(int argc, const char *const *argv,
     serial_write(origin);
     serial_write("\n");
 
-    int code = -1;
-    int rc = proc_run_program(path, argc, argv, &code);
-    if (rc == -1) {
+    int pid = 0;
+    if (proc_spawn_async(path, argc, argv, &pid) == -1) {
         put_line("IMPOSSIBLE DE LANCER CE PROGRAMME");
         serial_write("shell: failed to run ");
         serial_write(path);
@@ -241,31 +218,19 @@ static int launch(int argc, const char *const *argv,
         return -1;
     }
 
-    /* Whatever the program printed that had no trailing newline is still in
-     * `pending` - a screen that lost a program's last words would look like
-     * the program never said them. */
-    sink_put_pending();
-
-    if (rc == -2) {
-        /* The scheduler came home with this program still un-exited - it was
-         * blocked when nothing could wake it. There is no exit code to report,
-         * and inventing one is the kind of claim this project does not make. */
-        put_line("PROGRAMME JAMAIS REVENU (BLOQUE)");
-        serial_write("shell: ");
-        serial_write(argv[0]);
-        serial_write(" never returned\n");
-        return -1;
-    }
-
-    put_line_signed("CODE DE SORTIE: ", code);
+    /* Honest about what just happened, and about what did not: this placed the
+     * program in the table as the shell's child and returned while it is still
+     * about to work. The old synchronous launch claimed a completion the instant
+     * the program ended and froze the desktop until then; now launch() makes no
+     * such claim. The exit code arrives later, on a visit that runs the process
+     * to its end, through proc_reap_live()'s "ran and returned" / "exited with"
+     * lines, and the program's own output streams into this terminal the whole
+     * time while the compositor keeps painting between slices. */
     serial_write("shell: ");
     serial_write(argv[0]);
-    serial_write(" ran and returned\n");
-    serial_write("shell: ");
-    serial_write(argv[0]);
-    serial_write(" exited with ");
-    serial_write_signed(code);
-    serial_write("\n");
+    serial_write(" started, pid ");
+    serial_write_dec((uint64_t)pid);
+    serial_write(" (running)\n");
     return 0;
 }
 

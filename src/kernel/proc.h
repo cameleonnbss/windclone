@@ -35,7 +35,17 @@
  * it has is *parenthood*. Every program the prompt starts or the start menu
  * clicks is created as its child, which is what lets those programs use
  * spawn/wait/kill at all and lets the shell reap them instead of having the
- * end-of-run sweep forget them. See proc_shell_start() and proc_run_program().
+ * end-of-run sweep forget them. See proc_shell_start() and proc_sched_visit().
+ *
+ * A program the shell starts is now *live*, not an excursion. The launch path
+ * (proc_spawn_async) only places it in the table and returns; the idle loop then
+ * drives the CPU in bounded slices (proc_sched_visit), so the compositor keeps
+ * painting and the terminal keeps receiving output for as long as the process
+ * runs. That is what "a window owns a live process" means here, and it is the
+ * reason the visit resumes through a saved frame (usermode_resume) rather than
+ * restarting a program at its entry point the way the synchronous boot demos
+ * still do — those finish before the idle loop ever visits, so both models share
+ * one table and one exit anchor without ever colliding.
  *
  * Parenthood has a second half, and it is the one a process tree only shows when
  * somebody dies too early: a parent that exits before its children does not take
@@ -198,18 +208,38 @@ int  proc_shell_start(void);
 /* The shell slot's pid, or 0 before proc_shell_start() has run. */
 int  proc_shell_pid(void);
 
-/* Start `path` as a child of the shell, run its whole process group to
- * completion (the scheduler owns the CPU until nothing is runnable), then reap
- * what the shell is owed and hand back the started program's exit code —
- * which may be negative, because a program the shell starts can now be killed.
- * 0 = it ran and came back (`*exit_code` is its code); -1 = the program could
- * not be built; -2 = it was started but never returned, so there is no code to
- * report and inventing one would be reporting a death this kernel did not
- * witness. This is what the shell's launch path calls instead of
- * usermode_run(). Only valid from kernel context — a process cannot start a
- * sibling's session. */
-int  proc_run_program(const char *path, int argc, const char *const *argv,
-                      int *exit_code);
+/* --- the shell running a program, without freezing the screen -----------
+ * The old path, proc_run_program(), entered ring 3 and did not come back until
+ * the program and everything it spawned had exited. That is why a menu click or
+ * a typed word froze the desktop: the idle loop, and with it every repaint, was
+ * stuck behind the call. These three replace it, and the difference is that a
+ * launch no longer *runs* — it only *places* a process in the table, and the
+ * idle loop keeps the machine painting while the scheduler visits it. */
+
+/* Start `path` as a child of the shell's slot and return its pid immediately,
+ * without running it. This is what the prompt and the start menu call; the
+ * process enters the READY set and the next proc_sched_visit() gives it the CPU
+ * for a slice. Claims the shell slot if it somehow has not been, and returns -1
+ * when the program cannot be built or there is no room in the table. The caller
+ * gets a pid, not an exit code — the code arrives later, when the process
+ * actually finishes, through the reap line the visit prints. Only valid from
+ * kernel context, and never while the scheduler is already driving the CPU. */
+int  proc_spawn_async(const char *path, int argc, const char *const *argv,
+                      int *pid_out);
+
+/* One bounded slice of the scheduler, driven by the idle loop. If nothing is
+ * runnable it returns at once; otherwise it resumes the live processes (each
+ * through its saved frame — the reason the visit can continue a program that a
+ * tick interrupted mid-loop rather than restarting it), and hands the CPU back
+ * after a few switches so the idle loop repaints and polls input before the
+ * next visit. On the way home it reaps whatever finished. Not re-entrant: the
+ * boot demos run their own synchronous proc_run_all() to completion before this
+ * is ever called, so the two never share the exit anchor. */
+void proc_sched_visit(void);
+
+/* How many table slots are neither FREE nor the shell's own — the cheap test
+ * the idle loop uses to skip the visit entirely when no program is live. */
+int  proc_live_count(void);
 
 /* Timer-driven preemption. Called from the IRQ0 path with the interrupted
  * frame after the tick is accounted and EOI'd. Returns non-zero only when it

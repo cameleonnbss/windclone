@@ -28,7 +28,7 @@ mkdir -p "$(dirname "$OUT")"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin"
 cp -a "$ROOT"/. "$STAGE"/
-for prog in hello motd ls cat echo tick spin exit waiter bell reaper vanish whoami orphan nest; do
+for prog in hello motd ls cat echo tick spin exit waiter bell reaper vanish whoami orphan nest hold; do
     if [ ! -f "build/$prog" ]; then
         echo "[mkinitrd] WARNING: build/$prog is missing, /bin/$prog will not exist" >&2
         continue

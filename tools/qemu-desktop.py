@@ -223,6 +223,45 @@ def scenario_actions(sc, mon, W, H):
         pid = m.group(1)
         wait_serial(r"\[whoami\] pid %s\n" % pid)
         wait_serial(r"shell: reaped pid %s code 0\n" % pid)
+    elif sc == "live":
+        # A click must start a process that is *still running* when the launch
+        # returns, and the desktop must keep painting underneath it. /bin/hold
+        # prints a round per yield across several idle-loop visits, so the claim
+        # is not "a paint happened" (the boot paints for free) but "a paint
+        # landed strictly between two of hold's own rounds" — the screen turned
+        # over while the program worked. Row index from the menu's own log line,
+        # pid from the spawn line: nothing here is hardcoded, and the ordering
+        # check stays order-free like the keyboard one further up the suite.
+        mon.click(START_X + START_W // 2, H - TASKBAR_H + 22)
+        idx = int(wait_serial(r"wm: menu row (\d+) hold\n").group(1))
+        mon.click(MENU_X + MENU_W // 2, menu_row_y(H, idx))
+        pid = wait_serial(r"proc: spawned /bin/hold as pid (\d+)").group(1)
+        # honest async launch: started, pid P, still running — no exit code yet
+        wait_serial(r"shell: hold started, pid %s \(running\)\n" % pid)
+        # a real PS/2 move while hold is mid-run gives the loop a fresh reason
+        # to repaint; the interleave itself is read out of the accumulated log
+        time.sleep(0.4)
+        mon.move_rel(40, 30)
+        deadline = time.time() + 20
+        interleaved = False
+        while time.time() < deadline:
+            with open(LOG, errors="replace") as fh:
+                text = fh.read()
+            rounds = [mm.start() for mm in
+                      re.finditer(r"\[hold\] round \d+ pid %s\n" % pid, text)]
+            paints = [mm.start() for mm in
+                      re.finditer(r"wm: frame painted", text)]
+            if any(any(r < p for r in rounds) and any(r > p for r in rounds)
+                   for p in paints):
+                interleaved = True
+                break
+            time.sleep(0.2)
+        if not interleaved:
+            raise SystemExit("no repaint landed between two live hold rounds")
+        # and it reaches its async end later, reaped with the code the launch
+        # could not have known at click time
+        wait_serial(r"\[hold\] exiting pid %s code 5\n" % pid)
+        wait_serial(r"shell: reaped pid %s code 5\n" % pid)
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -246,6 +285,11 @@ MARKERS = {
     # what the program printed); these are the two claims around it
     "menuproc":  ["shell: launched 'whoami' from the start menu",
                   "proc: refused to kill pid 1 (the shell owns it)"],
+    # the interleave itself is asserted in the scenario (a paint strictly
+    # between two live rounds); these are the honest async lines around it
+    "live":      ["shell: launched 'hold' from the start menu",
+                  "shell: hold started, pid",
+                  "shell: reaped pid", "shell: hold exited with 5"],
 }
 
 

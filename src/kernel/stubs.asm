@@ -271,6 +271,62 @@ user_exit_to_kernel:
     sti
     ret
 
+; --- resume a process from a saved frame (the idle-driven scheduler) ---
+; proc_run_all() starts a program through usermode_enter(), which pushes a
+; fresh iretq frame whose rip is the entry point. The idle-driven visit cannot
+; do that: a process it preempted partway through is not at its entry, it is
+; wherever the last switch left it, and the only faithful way back is to reload
+; the exact frame that was saved. `rdi` points at a struct syscall_frame (a
+; process's stored `ctx`), whose layout is byte-for-byte what the syscall_stub
+; epilogue pops and iretq's below — the GPRs in this order, then vector +
+; error_code, then the CPU-pushed rip/cs/rflags/rsp/ss. So `mov rsp, rdi` and
+; running that same epilogue resumes the process exactly where it stopped.
+;
+; The kernel side is stashed into the SAME single anchor slots usermode_enter
+; uses, and that single slot is what makes this safe. Every resume is issued
+; from the one scheduler visit in the idle loop, so every later
+; user_exit_to_kernel() lands back on that one anchor frame: the boot demos run
+; to completion and get home before the idle loop ever visits, and a visit
+; returns before the next one begins. There is never a second, nested visit to
+; collide with the slot.
+;
+; rax must not be clobbered by the ring-3 segment setup — its saved value is the
+; very result the process resumes with (0 from sched_yield, a pid from wait) —
+; so DS/ES are set to the ring-3 data selector BEFORE rax is popped off the
+; frame. iretq loads cs/ss/rsp but never ds/es, so a ring-3 process left
+; pointing DS at the kernel's DPL0 data selector would fault on its first
+; memory access; setting 0x1B here is what keeps it addressable.
+global usermode_resume
+usermode_resume:
+    mov [rel user_kernel_rsp], rsp
+    mov [rel user_kernel_rbp], rbp
+    mov [rel user_saved_rbx], rbx
+    mov [rel user_saved_r12], r12
+    mov [rel user_saved_r13], r13
+    mov [rel user_saved_r14], r14
+    mov [rel user_saved_r15], r15
+    mov ax, 0x1B
+    mov ds, ax
+    mov es, ax
+    mov rsp, rdi
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rbp
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    add  rsp, 16
+    iretq
+
 ; --- int 0x80: the system call gate ---------------------------------
 ; Same frame shape as the ISR stubs (vector + dummy error code, then the
 ; GPRs), so struct regs still applies; syscall.c reads it as

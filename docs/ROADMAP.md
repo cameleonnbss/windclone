@@ -438,10 +438,24 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       `/bin/whoami` and requires the pid the kernel gave at spawn, the pid the
       program read back through `getpid()`, and the reap the shell owed it to be
       the same process, from the mouse
-- [ ] A window that owns a live process — right now a menu click or a typed word
-      runs the program to completion before the desktop paints again, so a long
-      program freezes the screen. Per-process windows (and a stdout that keeps
-      arriving) is what turns this from a launcher into a desktop
+- [x] A *live* process that no longer freezes the screen (v0.1.10). A menu click
+      or a typed word used to run the program to completion before the desktop
+      painted again, so a long program held the whole desktop on its last frame.
+      An interactive launch is now asynchronous: `proc_spawn_async()` places the
+      process in the table as the shell's child and returns while it still has
+      work to do, and the idle loop drives the CPU in bounded slices
+      (`proc_sched_visit()`), resuming each live process from its saved frame
+      (`usermode_resume()`) and handing the CPU back so the compositor paints
+      between them. `/bin/hold` proves the interleave from the serial log: rounds
+      of `[hold] round R pid P` before a `wm: frame painted` and after it, with
+      the same pid, and its exit code arriving later on the reap. What was *not*
+      done, and is the remaining half of this box: the live output still goes to
+      the **one** existing terminal window (a stdout that keeps arriving, but not
+      yet a window *per process*), the boot demos deliberately keep the
+      synchronous `proc_run_program()`/`proc_run_all()` path (they finish before
+      the idle loop visits), and the shell stays the single adopter and anchor
+      these visits unwind to. A window that owns its *own* process is the next
+      step.
 - [x] One version string. `src/kernel/version.h` is what the status window, the
       taskbar and `about` all draw, and the kernel says it on the boot log —
       which the test reads back out of that header, so a number a release left

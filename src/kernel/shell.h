@@ -23,13 +23,16 @@ void shell_init(void);
 void shell_key(int c);
 
 /* Start /bin/<name> as the shell's own child: the same lookup, the same
- * terminal as its stdout and the same exit-code line as a word typed at the
- * prompt — only the log says who asked. This is what the desktop's start menu
- * calls, so a mouse click runs a program instead of describing one. Blocks
- * until the scheduler has run that program's whole group to the end: it is
- * called from the idle loop, never from an IRQ. 0 = the program ran and came
- * back (its code, -9 included, is what the shell printed); -1 = no such
- * program, the loader refused it, or it never returned. */
+ * terminal as its stdout and the same pid/exit-code lines as a word typed at
+ * the prompt — only the log says who asked. This is what the desktop's start
+ * menu calls, so a mouse click runs a program instead of describing one. It is
+ * *asynchronous*: it places the process in the table and returns while the
+ * program is still running, so the idle loop keeps painting and the terminal
+ * keeps receiving the program's output; the exit-code line arrives later, from
+ * the visit that runs it to its end. Called from the idle loop, never from an
+ * IRQ. 0 = the program was launched (the code is not known yet, only the pid);
+ * -1 = no such program, the loader refused it, or there was no room in the
+ * table. */
 int shell_launch(const char *name);
 
 /* Paint the grid at (x,y); `width` is for wrapping the input line. */

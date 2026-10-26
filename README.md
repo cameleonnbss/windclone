@@ -167,6 +167,25 @@ On boot the kernel:
    `getppid()` (`SYS_GETPPID`) each round to show, from inside the adopted
    process, that its parent changed underneath it — then its exit code 7 comes
    back through the shell's reap line.
+20. **launches without freezing the screen.** A menu click or a typed word used
+   to enter ring 3 and not come back until the program — and everything it
+   spawned — had exited, so a program that kept running kept the whole desktop
+   on its last frame: no repaint, no cursor, nothing. An interactive launch is
+   now *asynchronous*: `proc_spawn_async()` places the process in the table as
+   the shell's child and returns while it is still about to work, and the idle
+   loop drives the CPU in bounded slices (`proc_sched_visit()`), resuming each
+   live process from its *saved* frame (`usermode_resume()`) rather than
+   restarting it, then hands the CPU back so the compositor paints before the
+   next slice. `/bin/hold` is the witness: twenty rounds of `[hold] round R pid P`,
+   each a yield and a short busy stretch, so its output streams into the terminal
+   across several visits, and the serial log shows a `[hold]` round, then a
+   `wm: frame painted`, then a later round of the same pid — the screen turned
+   over *while* the process ran. The exit code arrives later than the launch, on
+   the visit that finally runs it to its end, through the reap line. The boot
+   demos keep the old synchronous `proc_run_all()` path untouched — they finish
+   before the idle loop ever visits — and the output still goes to the one
+   existing terminal window: a window that owns *its own* process is the next
+   step, not this one.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

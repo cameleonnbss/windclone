@@ -20,9 +20,14 @@ void panic(const char *why);
 /* The privilege handover, provided by stubs.asm. usermode_enter() stashes the
  * kernel's rsp/rbp and iretq's into ring 3; user_exit_to_kernel() restores them
  * so a syscall can unwind back to whoever entered — the mechanism proc_run_all()
- * uses to get home once the last process exits. */
+ * uses to get home once the last process exits. usermode_resume() is the
+ * idle-driven scheduler's way in: it reloads a *saved* frame rather than
+ * starting a program at its entry point, so a visit can continue a process a
+ * tick left mid-loop. All three share the one kernel anchor slot, which is safe
+ * because the synchronous boot runs and the idle visits never overlap. */
 extern void usermode_enter(uint64_t entry, uint64_t user_rsp,
                            uint64_t argc, uint64_t argv);
+extern void usermode_resume(struct syscall_frame *ctx);
 extern void user_exit_to_kernel(void) __attribute__((noreturn));
 
 /* Ring-3 selectors, matching the GDT layout in gdt.c and the values
@@ -48,14 +53,25 @@ static int shell_pid;       /* the shell's own slot, 0 until it is claimed */
  * meaning, and only what the shell launches gets a real owner. */
 static int adopt_pid;
 
-/* proc_run_program() asks for one specific child's exit code back; the sweep
- * that runs at the end of the group is the pass that holds it, so the answer
- * travels through these rather than through a second scan of the table. */
-static int run_watch;
-static int run_code;
-static int run_done;   /* the watched pid was seen exiting — a code of -1 is a
-                        * perfectly legal exit status, so "did it come back"
-                        * cannot be folded into "what did it come back with" */
+/* The idle-driven scheduler. proc_run_all() owns the exit anchor for the boot
+ * demos, which run to completion before the idle loop ever touches ring 3; a
+ * visit is a different, shorter stay that must give the CPU back so the
+ * compositor can paint. sched_idle_driven marks "we are inside a visit," and the
+ * two switch points (sched_switch and the tick's preempt) read it to decide
+ * whether to resume another process or unwind to the visit's anchor instead.
+ * visit_slices counts how many times this visit has handed off the CPU; once it
+ * reaches WC_VISIT_SLICES the process is left exactly where it stands (READY,
+ * still alive, memory intact) and control returns to the idle loop, so a busy
+ * process cannot starve input or a repaint. A few slices keeps a short program
+ * finishing inside one visit — where it behaves just like the synchronous path —
+ * while guaranteeing the screen turns over for anything longer. */
+static int sched_idle_driven;
+static int visit_slices;
+#define WC_VISIT_SLICES 6
+
+/* Defined with the async block below, but used by the switch and the tick's
+ * preempt, so it is forward-declared here. */
+static void sched_unwind_to_idle(int free_idx);
 
 /* --- helpers ---------------------------------------------------------- */
 
@@ -553,6 +569,18 @@ static void sched_switch(struct syscall_frame *f, int mode, int code)
         wake_parent(c, code);
     }
 
+    /* The idle-driven visit runs on a budget. Once it has handed the CPU off
+     * WC_VISIT_SLICES times it stops picking a successor and unwinds to the
+     * visit, so the idle loop repaints and polls the keyboard/mouse before
+     * resuming whoever is READY — this is the whole reason a busy program no
+     * longer freezes the screen. The caller's state was saved above, so leaving
+     * here loses nothing: a READY process resumes on the next visit, and an
+     * EXITED one is freed here exactly as the successor path frees it (after
+     * paging away from its CR3), then named by proc_reap_live() once we are back
+     * in the kernel. */
+    if (sched_idle_driven && ++visit_slices >= WC_VISIT_SLICES)
+        sched_unwind_to_idle(mode == SWITCH_EXIT ? c : -1);
+
     int n = pick_ready(rr);
     if (n >= 0) {
         struct proc *q = &table[n];
@@ -622,6 +650,15 @@ int proc_timer_preempt(struct syscall_frame *f)
     int c = current;
     table[c].ctx = *f;
     table[c].state = PROC_READY;
+
+    /* The budget check here is what makes the release true for a process that
+     * never calls sched_yield: the tick is its only hand-off point, so once the
+     * visit has spent its slices the CPU goes back to the idle loop — leaving
+     * this process READY and fully alive (nobody exits on a preempt, so nothing
+     * is freed) — to repaint before resuming it on the next visit. Without this
+     * the compositor would still freeze behind a compute loop. */
+    if (sched_idle_driven && ++visit_slices >= WC_VISIT_SLICES)
+        sched_unwind_to_idle(-1);
 
     int n = pick_ready(rr);
     if (n < 0 || n == c) {
@@ -830,7 +867,10 @@ int proc_scheduler_active(void)
  * one — so it is skipped entirely. A zombie that an exiting parent handed over by
  * adoption is no longer one of the dead ends above: it arrived here as the
  * shell's child, so the line says what happened ("shell: reaped pid P code C")
- * and the code travels back to proc_run_program() through run_code. And a slot
+ * before the slot is returned. The interactive launches the shell starts now
+ * run through the idle-driven visit instead and are named by proc_reap_live();
+ * this sweep only still clears the boot demos' leftovers and any orphan they
+ * adopted once proc_run_all() unwinds for good. And a slot
  * already retired by the wake that answered it (wake_parent) is simply FREE, so
  * this pass never sees it. Before the shell had a slot this sweep was the only
  * reaper the desktop ever had, and before adoption an orphan reached this point
@@ -849,10 +889,6 @@ static void proc_table_sweep(void)
             serial_write(" code ");
             serial_write_signed(p->exit_code);
             serial_write("\n");
-            if (run_watch != 0 && p->pid == run_watch) {
-                run_code = p->exit_code;
-                run_done = 1;
-            }
         }
 
         proc_free_space(p);
@@ -891,41 +927,105 @@ void proc_run_all(void)
     serial_write("sched: all processes exited\n");
 }
 
-/* The shell's way of running something — and the difference it makes is not
- * cosmetic. The path this replaces, usermode_run(), loads one image into the
- * kernel's own address space, enters ring 3, and comes back when the program
- * calls exit(); the program has no pid, so the process verbs have nothing to
- * work with and must refuse. Here the program goes through proc_create() as a
- * child of the shell's slot, so it has an address space, a pid, a parent that
- * reaps it, and a scheduler that will actually run anything it spawns.
- *
- * The run ends when the scheduler finds nothing READY — the started program and
- * everything it spawned have finished (or one of them blocked with nobody left
- * to wake it, which sched_switch reports honestly as a deadlock). Then the
- * sweep reaps the shell's children, and the code of the one this call started
- * comes back through run_code.
- *
- * Returns 0 with an exit code, -1 when the program could not be built at all,
- * and -2 when it was started but never came back: three different answers to
- * three different things that can go wrong, and a shell that printed "exit 0"
- * for the third would be reporting a death it did not witness. */
-int proc_run_program(const char *path, int argc, const char *const *argv,
-                     int *exit_code)
+/* The last '/' in a stored path, or the start if there is none. proc_create()
+ * keeps p->name as the full path (so the spawn line can print it); the reap line
+ * wants the bare program name the user actually typed or clicked, and that is
+ * what this trims to without copying anything. */
+static const char *proc_basename(const char *name)
 {
+    const char *base = name;
+    for (const char *p = name; *p != '\0'; p++)
+        if (*p == '/')
+            base = p + 1;
+    return base;
+}
+
+/* Hand the CPU back to the idle loop, leaving the current process exactly where
+ * it stands. Unlike the synchronous end-of-run unwind this frees nothing that is
+ * still alive: the process stays READY (or BLOCKED waiting for a child that will
+ * run on a later visit) and simply stops owning the CPU while the compositor
+ * paints. `free_idx` is the slot a just-exited process left behind — an EXITED
+ * slot owns memory worth returning now, exactly as the successor path returns it
+ * — and its state is left EXITED so proc_reap_live() can still name it once we
+ * are back in the kernel; pass -1 when nobody exited. paging_use_kernel() runs
+ * first because `free_idx`'s page tables cannot be freed while its CR3 is live. */
+static void sched_unwind_to_idle(int free_idx)
+{
+    current = -1;
+    paging_use_kernel();
+    if (free_idx >= 0)
+        proc_free_space(&table[free_idx]);
+    user_exit_to_kernel();
+}
+
+/* Reap what a visit left finished: only the shell's own EXITED children. A
+ * zombie still owned by a *running* parent is deliberately not touched — that
+ * parent has a wait() that names it and must collect it itself, and stealing it
+ * here would answer a wait() that had not asked. This is the async twin of the
+ * tail of proc_table_sweep, and it carries the same promise the synchronous
+ * launch path used to make right where the program ended: the code comes back,
+ * signed, through "shell: <name> exited with C". Emitting it here rather than in
+ * launch() is what lets launch() return while the process is still running. */
+static void proc_reap_live(void)
+{
+    for (int i = 0; i < PROC_MAX; i++) {
+        struct proc *p = &table[i];
+        if (p->state != PROC_EXITED || p->parent != shell_pid)
+            continue;
+
+        const char *base = proc_basename(p->name);
+        serial_write("shell: reaped pid ");
+        serial_write_dec((uint64_t)p->pid);
+        serial_write(" code ");
+        serial_write_signed(p->exit_code);
+        serial_write("\n");
+        serial_write("shell: ");
+        serial_write(base);
+        serial_write(" ran and returned\n");
+        serial_write("shell: ");
+        serial_write(base);
+        serial_write(" exited with ");
+        serial_write_signed(p->exit_code);
+        serial_write("\n");
+
+        proc_free_space(p);
+        p->state = PROC_FREE;
+        p->parent = 0;
+        p->wait_out = 0;
+        p->wake_pending = 0;
+        p->name[0] = '\0';
+    }
+}
+
+int proc_live_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < PROC_MAX; i++)
+        if (table[i].state != PROC_FREE && table[i].state != PROC_KERNEL)
+            n++;
+    return n;
+}
+
+/* Place a program in the table as the shell's child and return its pid, without
+ * running it. The difference from the old synchronous launch is the whole point
+ * of the release: this call returns while the process is still about to work, so
+ * the idle loop that called it stays free to repaint. Nothing here enters ring 3
+ * — that is proc_sched_visit()'s job, one bounded slice at a time. */
+int proc_spawn_async(const char *path, int argc, const char *const *argv,
+                     int *pid_out)
+{
+    if (pid_out != NULL)
+        *pid_out = 0;
     if (proc_shell_start() == 0)
         return -1;
     if (sched_active || current >= 0) {
-        /* Not from a process. proc_run_all() unwinds to its own frame through
-         * the exit path, so a nested call would strand a scheduler inside a
-         * scheduler; the syscall handler already refuses spawn outside the
-         * table for the same reason. */
-        serial_write("proc: a process cannot start a shell session\n");
+        /* Only the idle loop launches. A visit is already driving the CPU, and a
+         * second entry would collide on the one kernel anchor slot the switch
+         * unwinds to — the same reason a process is not allowed to start a
+         * shell session. */
+        serial_write("proc: cannot launch while the scheduler drives the CPU\n");
         return -1;
     }
-
-    run_code = -1;
-    run_done = 0;
-    run_watch = 0;
 
     adopt_pid = shell_pid;
     int pid = proc_create(path, argc, argv, PROC_PRIO_DEFAULT);
@@ -933,21 +1033,49 @@ int proc_run_program(const char *path, int argc, const char *const *argv,
     if (pid < 0)
         return -1;
 
-    run_watch = pid;
-    proc_run_all();
-    run_watch = 0;
-
-    if (!run_done) {
-        /* Started, never seen exiting: it was still BLOCKED (or READY behind a
-         * deadlock report) when the scheduler came home. Saying "exit code -1"
-         * would invent an ending this kernel did not witness. */
-        serial_write("proc: pid ");
-        serial_write_dec((uint64_t)pid);
-        serial_write(" never returned to its parent\n");
-        return -2;
-    }
-
-    if (exit_code != NULL)
-        *exit_code = run_code;
+    if (pid_out != NULL)
+        *pid_out = pid;
     return 0;
 }
+
+/* One bounded slice of the scheduler, entered from the idle loop. This is the
+ * resumable counterpart to proc_run_all(): instead of running the live set to
+ * empty and tearing the table down, it starts the next READY process from its
+ * saved frame and returns as soon as the slice budget is spent (see the switch
+ * and preempt paths) or there is nothing runnable at all. Returning does not
+ * disturb a running program — it stays READY and resumes where it stopped on the
+ * next visit. The sweep is NOT called here; only finished processes are reaped,
+ * by proc_reap_live(). */
+void proc_sched_visit(void)
+{
+    int first = pick_ready(rr);
+    if (first < 0) {
+        /* Nothing runnable right now, but a visit is cheap and this is how a
+         * just-exited orphan gets reaped when its group has no READY member
+         * left to notice it. Reap and go; live-but-blocked processes stay
+         * untouched for a later visit. */
+        proc_reap_live();
+        return;
+    }
+
+    sched_active = 1;
+    sched_idle_driven = 1;
+    visit_slices = 0;
+
+    current = first;
+    struct proc *p = &table[first];
+    p->state = PROC_RUNNING;
+    rr = (first + 1) % PROC_MAX;
+
+    paging_set_working((uint64_t *)(uintptr_t)p->p4_virt);
+    paging_switch(p->cr3);
+    usermode_resume(&p->ctx);
+
+    /* Back only when a switch or a preempt handed the CPU home. */
+    sched_active = 0;
+    sched_idle_driven = 0;
+    current = -1;
+    paging_use_kernel();
+    proc_reap_live();
+}
+
