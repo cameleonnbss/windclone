@@ -286,9 +286,10 @@ static int title_button_at(const struct window *w, int mx, int my)
 }
 
 /* Is (mx,my) inside window w and within RESIZE_EDGE pixels of one of its
- * borders? Returns the edge bitmask (a corner sets two bits). Called only
- * from the window-body pass, so the title bar and its buttons are never in
- * question here. */
+ * borders? Returns the edge bitmask (a corner sets two bits). The window-body
+ * pass never sees RS_TOP (by the time it runs the title bar already owned that
+ * row), and the title-bar pass only consults the top band above the buttons, so
+ * a grab never clashes with minimise / maximise / close. */
 static int resize_edge_at(const struct window *w, int mx, int my)
 {
     if (mx < w->x || mx >= w->x + w->w || my < w->y || my >= w->y + w->h)
@@ -296,6 +297,7 @@ static int resize_edge_at(const struct window *w, int mx, int my)
     int m = RS_NONE;
     if (mx < w->x + RESIZE_EDGE)         m |= RS_LEFT;
     if (mx >= w->x + w->w - RESIZE_EDGE) m |= RS_RIGHT;
+    if (my < w->y + RESIZE_EDGE)         m |= RS_TOP;
     if (my >= w->y + w->h - RESIZE_EDGE) m |= RS_BOTTOM;
     return m;
 }
@@ -767,6 +769,20 @@ static void handle_press(int mx, int my, int W, int H)
             continue;
 
         raise_window(id);
+        /* The thin strip at the very top of the title bar resizes the window's
+         * height (or a top corner, adding the horizontal bit). It sits above
+         * BTN_DY, so it never overlaps the minimise / maximise / close buttons;
+         * below it the title bar still drags, and the buttons still act. */
+        if (!w->max && my < w->y + RESIZE_EDGE) {
+            int m = RS_TOP;
+            if (mx < w->x + RESIZE_EDGE)         m |= RS_LEFT;
+            if (mx >= w->x + w->w - RESIZE_EDGE) m |= RS_RIGHT;
+            resizing = 1;
+            resize_win = id;
+            resize_mask = m;
+            resize_changed = 0;
+            return;
+        }
         switch (title_button_at(w, mx, my)) {
         case BTN_CLOSE:
             /* A program window is more than a rectangle: closing it frees the
@@ -984,24 +1000,33 @@ void desktop_frame(void)
     }
 
     /* Resize: the grabbed edges follow the cursor, the opposite edges stay put.
-     * Floors keep the window usable; a desktop clamp stops it growing off the
-     * right/bottom or a left-drag past x=0. A maximised window never reaches
-     * here (handle_press returned RS_NONE for it). */
+     * A left/top grab moves x/y and keeps the right/bottom fixed; right/bottom
+     * keep x/y. Floors stop the window shrinking past usable, and the desktop
+     * clamp keeps it on screen. A maximised window never reaches here. */
     if (resizing) {
         struct window *w = &wins[resize_win];
-        int right = w->x + w->w;          /* the edge a left-drag leaves fixed */
-        int nx = w->x, nw = w->w, nh = w->h;
-        if (resize_mask & RS_RIGHT)  nw = mx - w->x;
-        if (resize_mask & RS_BOTTOM) nh = my - w->y;
-        if (resize_mask & RS_LEFT)  { nx = mx; nw = right - mx; }
+        int right = w->x + w->w;    /* fixed edge a left-drag preserves */
+        int bottom = w->y + w->h;   /* fixed edge a top-drag preserves  */
+        int nx = w->x, ny = w->y, nw = w->w, nh = w->h;
+        if (resize_mask & RS_LEFT)   { nx = mx; nw = right - mx; }
+        if (resize_mask & RS_RIGHT)  { nw = mx - w->x; }
+        if (resize_mask & RS_TOP)    { ny = my; nh = bottom - my; }
+        if (resize_mask & RS_BOTTOM) { nh = my - w->y; }
+        /* floors: a left/top drag holds its fixed edge when it hits MIN */
         if (nw < MIN_W) { if (resize_mask & RS_LEFT) nx = right - MIN_W; nw = MIN_W; }
-        if (nx < 0) { nw -= -nx; nx = 0; }         /* a left-drag can't pass 0 */
+        if (nh < MIN_H) { if (resize_mask & RS_TOP)  ny = bottom - MIN_H; nh = MIN_H; }
+        /* the grabbed top/left edge cannot pass the screen origin */
+        if (nx < 0) nx = 0;
+        if (ny < 0) ny = 0;
+        if (resize_mask & RS_LEFT)  nw = right - nx;   /* recompute vs fixed edge */
+        if (resize_mask & RS_TOP)   nh = bottom - ny;
+        /* clamp to the desktop, then re-assert the floor */
+        if (nx + nw > W)                nw = W - nx;
+        if (ny + nh > H - TASKBAR_H)    nh = H - TASKBAR_H - ny;
         if (nw < MIN_W) nw = MIN_W;
-        if (nw > W - nx) nw = W - nx;              /* clamp to the desktop */
         if (nh < MIN_H) nh = MIN_H;
-        if (nh > H - TASKBAR_H - w->y) nh = H - TASKBAR_H - w->y;
-        if (nw != w->w || nh != w->h || nx != w->x) {
-            w->x = nx; w->w = nw; w->h = nh;
+        if (nx != w->x || ny != w->y || nw != w->w || nh != w->h) {
+            w->x = nx; w->y = ny; w->w = nw; w->h = nh;
             resize_changed = 1;
         }
     }

@@ -490,21 +490,24 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
 - [x] Cursor + one draggable window: grab the title bar, the window follows,
       clamped to the desktop (a drag flips the whole screen; a bare cursor move
       is clipped to its damage band since the double-buffer work above)
-- [x] Window resizing (v0.1.14): grab a window's left, right or bottom edge —
-      or a bottom corner, which sets two bits of the same mask — and drag; the
-      grabbed edges follow the cursor while the opposite ones stay put, down to
-      a `MIN_W`×`MIN_H` floor and a clamp to the desktop. A border press raises
-      the window like any click, and only the window body reaches this — the
-      title bar and its minimise/maximise/close buttons live above `TITLE_H`,
-      so a grab never clashes with them. Proven headlessly by a real PS/2 border
-      drag: `tools/qemu-desktop.py resize` raises the status window, grows its
-      bottom-right corner, and reads the width/height back out of the kernel's own
-      `wm: window resized WxH` line to check it followed the cursor and stayed
-      inside the desktop, then shrinks it far past the floor and requires it to
-      stop at exactly `MIN_W`×`MIN_H`. Out of scope, and the honest next step:
-      the top edge and top corners (a top grab has to coexist with title-bar
-      dragging and the buttons), and a resize cursor that changes shape over a
-      border.
+- [x] Window resizing (v0.1.14, completed v0.1.15): grab any window border and
+      drag. v0.1.14 added the left, right and bottom edges and the two bottom
+      corners; v0.1.15 added the top edge and the two top corners, so a window
+      now resizes from all four sides. A grabbed edge follows the cursor while
+      the opposite edge stays put (a top/left drag moves x/y and preserves the
+      bottom/right), down to a `MIN_W`×`MIN_H` floor and a clamp to the desktop.
+      A border press raises the window like any click. The top grab lives in the
+      thin strip *above* `BTN_DY`, so it never clashes with the minimise /
+      maximise / close buttons, while everything below it still drags the window
+      — the last thing that kept the top edge out of v0.1.14. Proven headlessly
+      by a real PS/2 border drag: `tools/qemu-desktop.py resize` raises the
+      status window, grows its bottom-right corner, shrinks it far past the floor
+      and requires it to stop at `MIN_W`×`MIN_H`, then grabs the top edge and
+      grows it back taller without changing its width — all read back out of the
+      kernel's own `wm: window resized WxH` line. What is still open here: a
+      resize cursor that changes shape over a border (the arrow is one glyph
+      today; directional cursors need new art and a hover state), which is its
+      own next step.
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
 

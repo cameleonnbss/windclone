@@ -37,8 +37,10 @@ Scenarios (each one asserts the serial markers the kernel prints):
                desktop
     resize     prove a window resizes by dragging its border: raise the status
                window, grow it from its bottom-right corner (width and height
-               follow the cursor and stay inside the desktop), then shrink it
-               far past the floor and require it to stop at the minimum size
+               follow the cursor and stay inside the desktop), shrink it far
+               past the floor and require it to stop at the minimum size, then
+               grab the top edge (above the title-bar buttons) and grow it back
+               taller without touching its width
 
 Exit status 0 = every step did what the serial log says it did.
 SPDX-License-Identifier: MIT
@@ -454,6 +456,20 @@ def scenario_actions(sc, mon, W, H):
         if m != (MIN_W, MIN_H):
             raise SystemExit("min size not enforced: got %dx%d, want %dx%d"
                              % (m[0], m[1], MIN_W, MIN_H))
+        # v0.1.15: the top edge too. Grab the thin strip above the title-bar
+        # buttons (the window is now min-sized at (116,88,200,120), still front)
+        # and drag it upward; the top edge follows the cursor while the bottom
+        # stays put, so the window grows taller. Reading only the height back
+        # proves the vertical half of a top grab works and did not clash with
+        # the drag or the buttons.
+        mon.drag(sx + MIN_W // 2, sy + 2, 0, -30)
+        m = last_resized()
+        if m is None:
+            raise SystemExit("dragging the top edge logged no resize")
+        w3, h3 = m
+        if not (h3 > MIN_H and w3 == MIN_W):
+            raise SystemExit("top-edge resize wrong: %dx%d, want height > %d, "
+                             "width unchanged at %d" % (w3, h3, MIN_H, MIN_W))
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
