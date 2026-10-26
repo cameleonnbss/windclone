@@ -170,12 +170,14 @@ static int64_t sys_getdirent(uint64_t index, uint64_t up)
  * argc <= 0 keeps the old path-only contract: the child runs as its own name,
  * exactly like the boot demos' NULL argv.
  *
- * Outside the scheduler there is nothing that would ever run the child: the
- * desktop shell starts one program at a time through usermode_run(), so a
- * spawn from a prompt would allocate an address space, hand back a pid, and
- * leave that process READY forever — a leak that also looks like a feature.
- * Answer -WC_EPERM instead, the same honest refusal wait() and kill() already
- * give, until the shell itself is a process. */
+ * Outside the scheduler there is still nothing that would ever run the child,
+ * so the answer stays -WC_EPERM rather than a pid for a process nobody will
+ * schedule. What changed is how wide that "outside" is: the desktop shell now
+ * owns a slot in the table (proc.h) and starts its programs with the scheduler
+ * running, so a program typed at the prompt or clicked in the start menu has a
+ * parent, a pid, and working process verbs. The only caller left in the refusal
+ * is the boot self-check, which runs one program through usermode_run() and
+ * never asks to spawn anything. */
 static char spawn_argbuf[USER_ARG_MAX][USER_PATH_MAX];
 static const char *spawn_argv[USER_ARG_MAX];
 
@@ -266,8 +268,11 @@ void syscall_handler(struct syscall_frame *f)
         break;
 
     case SYS_GETPID:
-        /* The scheduler's answer; 0 when a program runs under the shell's
-         * single-program path, which has no process table entry. */
+        /* The scheduler's answer. It used to be 0 for everything the shell
+         * started, because the shell's single-program path had no table entry
+         * to name; programs launched from the prompt or the start menu are in
+         * the table now, so they get a real pid. 0 remains honest for the boot
+         * self-check's usermode_run(), which is still not a process. */
         f->rax = (uint64_t)proc_current_pid();
         break;
 

@@ -95,12 +95,18 @@ sleep 6
 # `ls` enumerates the archive through SYS_GETDIRENT, `echo zzz` proves the
 # command line reached _start (the word comes back verbatim), and `cat
 # /etc/issue` prints bytes that exist nowhere else in this log. `spc` is
-# what this QEMU's monitor calls the space bar.
+# what this QEMU's monitor calls the space bar. The last three words are the
+# process table seen from a keyboard: `reaper` runs a real child, kills it and
+# reaps it, `whoami` reports its own pid and tries to kill the shell, and
+# `vanish` kills *itself* so the prompt has to report a -9 that it did not
+# invent.
 send_keys /tmp/wc-biosmon a b ret h e l l o ret \
     l s ret \
     e c h o spc z z z ret \
     c a t spc slash e t c slash i s s u e ret \
-    r e a p e r ret
+    r e a p e r ret \
+    w h o a m i ret \
+    v a n i s h ret
 wait $BIOPID 2>/dev/null || true
 for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "vga: text console live" "kmalloc selftest ok" "step: heap ok" \
@@ -131,11 +137,84 @@ for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "shell: running 'cat'" "0.0.4 - initrd live" \
             "shell: cat ran and returned" "shell: cat exited with 0" \
             "shell: running 'reaper'" \
-            "\\[reaper\\] spawned pid -1" \
-            "\\[reaper\\] wait again -> -10" \
             "shell: reaper ran and returned"; do
     grep -aq "$want" /tmp/wc-bios.log || fail "BIOS log missing: $want"
 done
+
+# The shell is a process, and that changes what a typed program can do. Until
+# the shell had a slot in the table, `reaper` at the prompt could only be
+# refused: spawn answered -1 and wait answered -10, because nothing would ever
+# have scheduled the child. Now the same word, typed the same way through a
+# real IRQ1 keystroke, runs the same program the boot demo runs — as a CHILD OF
+# THE SHELL — and the whole kill chain happens again from the keyboard.
+#
+# This block is scoped on purpose: `[reaper] ...` lines exist twice by now (the
+# boot demo and this run), so everything is read out of the part of the log that
+# begins with the shell's own "running 'reaper'" line. Pids are not written
+# down anywhere: the shell took pid 1, the demos moved, and a number hardcoded
+# here would rot the next time the boot sequence changed.
+SEG=$(awk '/shell: running .reaper./{f=1} f' /tmp/wc-bios.log)
+RPID=$(printf '%s\n' "$SEG" | grep -aF 'proc: spawned /bin/reaper as pid' | sed 's/.*pid \([0-9-]*\).*/\1/')
+KID2=$(printf '%s\n' "$SEG" | grep -aF '[reaper] spawned pid' | sed 's/.*pid \([0-9-]*\).*/\1/')
+[ -n "$RPID" ] || fail "the shell never gave the typed reaper a pid of its own"
+[ -n "$KID2" ] || fail "the typed reaper reported no child pid"
+[ "$KID2" -gt 0 ] || fail "spawn refused the typed reaper a child (pid $KID2)"
+[ "$KID2" != "$RPID" ] || fail "the typed reaper spawned itself?"
+for want in "proc: spawned /bin/reaper as pid $RPID" \
+            "[reaper] spawned pid $KID2" \
+            "[bell] ringing pid $KID2" \
+            "[reaper] kill $KID2 -> 0" \
+            "proc: killed pid $KID2 (SIGKILL) by pid $RPID" \
+            "[reaper] reaped pid $KID2 code -9" \
+            "shell: reaped pid $RPID code 0"; do
+    printf '%s\n' "$SEG" | grep -aqF "$want" \
+        || fail "a program typed at the prompt could not run the kill chain: $want"
+done
+{ printf '%s\n' "$SEG" | grep -aqF '[bell] done' \
+  && fail "the bell the prompt started finished on its own — kill() missed it"; } || true
+echo '    ok: the prompt is a process — a typed program spawns, kills and is reaped'
+
+# The shell's pid, and what that means for everybody else. The slot is claimed
+# in shell_init(), before any program can be started, so the shell is pid 1 and
+# every launch is its child. /bin/whoami is the witness from the other side of
+# the boundary: getpid() used to answer 0 for a prompt-started program (there
+# was no table entry to answer with) and now answers the very pid the kernel
+# printed when it spawned it. The same program then tries to kill pid 1 and
+# must be refused: EPERM, not ESRCH, because the shell really is in the table.
+grep -aqF 'proc: shell is pid 1' /tmp/wc-bios.log \
+    || fail 'the shell did not claim pid 1'
+WSEG=$(awk "/shell: running .whoami./{f=1} f" /tmp/wc-bios.log)
+WPID=$(printf '%s\n' "$WSEG" | grep -aF 'proc: spawned /bin/whoami as pid' | sed 's/.*pid \([0-9-]*\).*/\1/')
+[ -n "$WPID" ] || fail 'the shell never spawned /bin/whoami'
+for want in "[whoami] pid $WPID" \
+            "[whoami] kill 1 -> -1" \
+            "proc: refused to kill pid 1 (the shell owns it)" \
+            "shell: reaped pid $WPID code 0"; do
+    printf '%s\n' "$WSEG" | grep -aqF "$want" \
+        || fail "whoami did not report what a real process reports: $want"
+done
+[ "$WPID" != "1" ] || fail "the shell's own pid was handed to a program it started"
+echo '    ok: getpid — a prompt-started program is a process, and pid 1 is unkillable'
+
+# Giving the shell a slot makes a new number reachable at the prompt. A program
+# it starts can now be killed, so its exit code can be -SIGKILL, and an unsigned
+# printer turns -9 into a twenty-digit nothing: the screen would report an
+# ending as a clean exit. `vanish` kills itself, so everything below is the
+# shell having to say what the kernel actually witnessed — including the code
+# the sweep handed back, which is the one number a kill leaves behind.
+VSEG=$(awk "/shell: running .vanish./{f=1} f" /tmp/wc-bios.log)
+VPID2=$(printf '%s\n' "$VSEG" | grep -aF 'proc: spawned /bin/vanish as pid' | sed -n 's/.*pid \([0-9-]*\).*/\1/p')
+[ -n "$VPID2" ] || fail 'the shell never spawned /bin/vanish'
+for want in "[vanish] bye pid $VPID2" \
+            "proc: killed pid $VPID2 (SIGKILL) by pid $VPID2" \
+            "shell: reaped pid $VPID2 code -9" \
+            "shell: vanish exited with -9"; do
+    printf '%s\n' "$VSEG" | grep -aqF "$want" \
+        || fail "the prompt misreported a process it had seen killed: $want"
+done
+{ printf '%s\n' "$VSEG" | grep -aqF '[vanish] STILL HERE' \
+  && fail "a prompt-started vanish survived its own kill()"; } || true
+echo '    ok: -9 arrives whole — a killed program is not reported as an exit 0'
 
 # The scheduler demo runs on its own once the timer is up: two copies of
 # /bin/tick, each with its own address space and pid, printing a line and
@@ -144,12 +223,21 @@ done
 # extra steps would still print all eight lines, just as A-1 A-2 A-3 A-done
 # B-1 ..., so the interleaving check is the one that actually fails if the
 # context switch is a lie.
+#
+# The pids are read out of the spawn lines instead of written down. The shell
+# claims pid 1 now, so every demo process moved, and a literal number in a test
+# is a claim about the order of the boot sequence rather than about the
+# scheduler — which is precisely the kind of check that rots.
+TA_PID=$(grep -aF 'proc: spawned /bin/tick as pid' /tmp/wc-bios.log | sed -n '1s/.*pid \([0-9]*\).*/\1/p')
+TB_PID=$(grep -aF 'proc: spawned /bin/tick as pid' /tmp/wc-bios.log | sed -n '2s/.*pid \([0-9]*\).*/\1/p')
+[ -n "$TA_PID" ] && [ -n "$TB_PID" ] && [ "$TA_PID" != "$TB_PID" ] \
+    || fail "the two tick processes reported no distinct pids"
 for want in "sched: building two processes" \
-            "proc: spawned /bin/tick as pid 1" \
-            "proc: spawned /bin/tick as pid 2" \
+            "proc: spawned /bin/tick as pid $TA_PID" \
+            "proc: spawned /bin/tick as pid $TB_PID" \
             "sched: round-robin over the process table" \
-            "\\[tick A\\] step 1 pid 1" "\\[tick B\\] step 1 pid 2" \
-            "\\[tick A\\] step 2 pid 1" "\\[tick B\\] step 2 pid 2" \
+            "\\[tick A\\] step 1 pid $TA_PID" "\\[tick B\\] step 1 pid $TB_PID" \
+            "\\[tick A\\] step 2 pid $TA_PID" "\\[tick B\\] step 2 pid $TB_PID" \
             "\\[tick A\\] done" "\\[tick B\\] done" \
             "sched: all processes exited" \
             "step: scheduler ok (two processes, round-robin)"; do
@@ -175,11 +263,16 @@ echo '    ok: scheduler — two processes interleaved (round-robin)'
 # it gets its own program and its own check. Two /bin/spin processes burn CPU
 # in a hot loop and NEVER call sched_yield — cooperative round-robin could not
 # interleave them (one would spin all the way to done before the other printed
-# a line). pids are 3 and 4: next_pid keeps counting across the tick demo.
+# a line). Their pids come from the spawn lines, exactly as in the tick demo
+# above: next_pid keeps counting, and the shell is one of those numbers now.
+SA_PID=$(grep -aF 'proc: spawned /bin/spin as pid' /tmp/wc-bios.log | sed -n '1s/.*pid \([0-9]*\).*/\1/p')
+SB_PID=$(grep -aF 'proc: spawned /bin/spin as pid' /tmp/wc-bios.log | sed -n '2s/.*pid \([0-9]*\).*/\1/p')
+[ -n "$SA_PID" ] && [ -n "$SB_PID" ] && [ "$SA_PID" != "$SB_PID" ] \
+    || fail "the two spin processes reported no distinct pids"
 for want in "sched: two compute-heavy procs, no yields" \
-            "proc: spawned /bin/spin as pid 3" \
-            "proc: spawned /bin/spin as pid 4" \
-            "\\[spin A\\] start pid 3" "\\[spin B\\] start pid 4" \
+            "proc: spawned /bin/spin as pid $SA_PID" \
+            "proc: spawned /bin/spin as pid $SB_PID" \
+            "\\[spin A\\] start pid $SA_PID" "\\[spin B\\] start pid $SB_PID" \
             "\\[spin A\\] round 3" "\\[spin B\\] round 3" \
             "\\[spin A\\] done" "\\[spin B\\] done" \
             "step: preemption ok (timer switched a busy process)"; do
@@ -335,10 +428,11 @@ else
                 "initrd: /etc/motd" "step: vfs ok" \
                 "vfs: exists + dirent enumeration matches the archive" \
                 "step: userland ok (elf64 + ring 3 round trip)" \
-                "proc: spawned /bin/tick as pid 1" \
-                "\\[tick A\\] step 1 pid 1" "\\[tick B\\] step 1 pid 2" \
+                "proc: shell is pid 1" \
+                "proc: spawned /bin/tick as pid" \
+                "\\[tick A\\] step 1 pid" "\\[tick B\\] step 1 pid" \
                 "step: scheduler ok (two processes, round-robin)" \
-                "\\[spin A\\] start pid 3" "\\[spin B\\] start pid 4" \
+                "\\[spin A\\] start pid" "\\[spin B\\] start pid" \
                 "step: preemption ok (timer switched a busy process)" \
                 "proc: spawned /bin/exit as pid" \
                 "\\[waiter\\] spawned pid" \
@@ -403,6 +497,14 @@ done
 # rows above are only part of /bin and the loop proved nothing.
 grep -aqE 'wm: menu rows [0-9]+, hidden 0$' "$MENU_LOG" \
     || fail 'start menu hid programs that fit nowhere'
+# A click must start a *process*, not merely a program. menuproc clicks
+# /bin/whoami and ties three lines together: the pid the kernel handed out at
+# spawn, the pid the program read back through getpid(), and the reap the shell
+# owed it afterwards. The keyboard proves the same thing further up, but the
+# mouse is the path the start menu actually takes — and a scenario nobody
+# invokes is a screenshot of a test, not a test.
+python3 tools/qemu-desktop.py windclone.iso menuproc \
+    || fail 'the start menu did not launch a real process'
 
 # 7) kernel text console: the "vga: text console live" marker (checked in
 #    the BIOS + UEFI logs above) proves the kernel mapped 0xB8000 through

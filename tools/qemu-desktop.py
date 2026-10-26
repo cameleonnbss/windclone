@@ -19,6 +19,9 @@ Scenarios (each one asserts the serial markers the kernel prints):
                click it, and check the program really ran
     menushot   open the menu and leave it open — this one exists to be
                screenshotted (docs/screenshots/start-menu.png)
+    menuproc   click /bin/whoami and follow its pid through the log: the pid
+               the kernel gave at spawn, the one the program read back with
+               getpid(), and the reap the shell owed it
 
 Exit status 0 = every step did what the serial log says it did.
 SPDX-License-Identifier: MIT
@@ -208,6 +211,18 @@ def scenario_actions(sc, mon, W, H):
         mon.click(START_X + START_W // 2, H - TASKBAR_H + 22)
         wait_serial(r"wm: start menu opened")   # the panel is up before the
         time.sleep(0.5)                          # screenshot is taken
+    elif sc == "menuproc":
+        # A click must start a PROCESS, not merely a program: /bin/whoami
+        # prints the pid the kernel gave it, so the two lines can be tied
+        # together from the log. This is the mouse's version of the claim the
+        # keyboard test makes, and it is the one thing a screenshot cannot show.
+        mon.click(START_X + START_W // 2, H - TASKBAR_H + 22)
+        idx = int(wait_serial(r"wm: menu row (\d+) whoami\n").group(1))
+        mon.click(MENU_X + MENU_W // 2, menu_row_y(H, idx))
+        m = wait_serial(r"proc: spawned /bin/whoami as pid (\d+)")
+        pid = m.group(1)
+        wait_serial(r"\[whoami\] pid %s\n" % pid)
+        wait_serial(r"shell: reaped pid %s code 0\n" % pid)
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -227,6 +242,10 @@ MARKERS = {
     "menu":      ["wm: menu row", "shell: launched 'hello' from the start menu",
                   "shell: hello ran and returned", "hello from ring 3"],
     "menushot":  ["wm: start menu opened", "wm: menu rows"],
+    # the pid itself is cross-checked inside the scenario (spawn line versus
+    # what the program printed); these are the two claims around it
+    "menuproc":  ["shell: launched 'whoami' from the start menu",
+                  "proc: refused to kill pid 1 (the shell owns it)"],
 }
 
 

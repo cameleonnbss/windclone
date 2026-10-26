@@ -1,9 +1,9 @@
 /* WindClone — /bin/echo: the smallest program that proves argv.
  *
  * ls and cat read the kernel. This one reads its own command line, which is
- * the part of the handover the loader added for Phase 5: the shell tokenised
- * the line, usermode_run() copied the words onto the program's stack, and
- * rdi/rsi arrived at _start holding them. If any of that were wrong this
+ * the part of the handover the loader added for Phase 5: the shell tokenises
+ * the line, proc_create() lays the words out on the program's own stack, and
+ * rdi/rsi arrive at _start holding them. If any of that were wrong this
  * program prints nothing, prints the wrong words, or faults in ring 3 — and
  * "echo zzz" coming back as "zzz" is the whole proof.
  *

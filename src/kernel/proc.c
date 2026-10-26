@@ -38,8 +38,31 @@ static int next_pid = 1;
 static int current = -1;    /* index into table of the running process */
 static int rr;              /* round-robin cursor: next index to try */
 static int sched_active;    /* non-zero while proc_run_all drives the CPU */
+static int shell_pid;       /* the shell's own slot, 0 until it is claimed */
+
+/* The parent for a process created *outside* the scheduler. proc_create() is
+ * called from kernel code when the shell starts a program, and "who is the
+ * running process" has no answer there — so the launch path names the parent
+ * explicitly instead of leaving it 0. It is set for the one create call and
+ * cleared right after: the boot demos keep their parentless, kernel-started
+ * meaning, and only what the shell launches gets a real owner. */
+static int adopt_pid;
+
+/* proc_run_program() asks for one specific child's exit code back; the sweep
+ * that runs at the end of the group is the pass that holds it, so the answer
+ * travels through these rather than through a second scan of the table. */
+static int run_watch;
+static int run_code;
+static int run_done;   /* the watched pid was seen exiting — a code of -1 is a
+                        * perfectly legal exit status, so "did it come back"
+                        * cannot be folded into "what did it come back with" */
 
 /* --- helpers ---------------------------------------------------------- */
+
+/* An exit code of -9 is the whole point of a reap line, so the code prints
+ * through serial's signed writer rather than through a local copy of it: the
+ * shell reports the same number to the screen, and two printers of one claim
+ * are two chances to disagree about how a process died. */
 
 static void name_copy(char *dst, const char *src)
 {
@@ -266,9 +289,14 @@ int proc_create(const char *path, int argc, const char *const *argv,
 
     /* The reaper link: a process spawned while the scheduler runs belongs to
      * the process that spawned it, so its zombie waits for *that* parent's
-     * wait() and nobody else's. Boot-created demo processes have no parent
-     * (current < 0 before proc_run_all) and simply die and get forgotten. */
-    p->parent = (sched_active && current >= 0) ? table[current].pid : 0;
+     * wait() and nobody else's. A program the *shell* starts has no running
+     * parent — the shell is kernel code — so the launch path names one through
+     * adopt_pid, and its children become the shell's. Boot-created demo
+     * processes have neither (current < 0, no adopt) and stay parentless. */
+    if (sched_active && current >= 0)
+        p->parent = table[current].pid;
+    else
+        p->parent = adopt_pid;
     p->armed = 0;
     p->wait_out = 0;
     p->wake_code = 0;
@@ -296,6 +324,53 @@ int proc_spawn_path(const char *path)
 {
     const char *argv[1] = { path };
     return proc_create(path, 1, argv, PROC_PRIO_DEFAULT);
+}
+
+/* --- the shell's own slot ---------------------------------------------
+ *
+ * The shell has always driven the table without being in it, and that is the
+ * reason three separate lies had to be told: spawn and kill answered
+ * -WC_EPERM from a prompt-started program (nothing would ever schedule the
+ * child, so promising one was worse than refusing), wait answered
+ * -WC_ECHILD, and every leftover slot had to be *swept* at the end of a run
+ * because no parent existed to reap it. Claiming a slot removes all three: the
+ * shell is now a process in the only sense this kernel means — an entry the
+ * table knows about — and every program it starts is a child of it.
+ *
+ * It is emphatically not a schedulable context. The shell's code runs on the
+ * kernel stack from the idle loop, so its slot has no address space, no page
+ * tables and no trap frame; giving it PROC_READY would make the scheduler try
+ * to run all of that and fault. PROC_KERNEL is a state the scheduler, the
+ * killer and the sweep each have to refuse to touch, and each of those three
+ * refusals is a line of code with a reason attached.
+ */
+int proc_shell_start(void)
+{
+    if (shell_pid != 0)
+        return shell_pid;
+
+    for (int i = 0; i < PROC_MAX; i++) {
+        if (table[i].state != PROC_FREE)
+            continue;
+        struct proc *p = &table[i];
+        memset(p, 0, sizeof *p);
+        p->pid = next_pid++;          /* 1, because the shell is claimed first */
+        p->state = PROC_KERNEL;
+        name_copy(p->name, "shell");
+        shell_pid = p->pid;
+        serial_write("proc: shell is pid ");
+        serial_write_dec((uint64_t)shell_pid);
+        serial_write(", owner of every program it starts\n");
+        return shell_pid;
+    }
+
+    serial_write("proc: no slot left for the shell\n");
+    return 0;
+}
+
+int proc_shell_pid(void)
+{
+    return shell_pid;
 }
 
 /* --- the scheduler ---------------------------------------------------- */
@@ -552,11 +627,13 @@ int proc_wait(struct syscall_frame *f, uint64_t uout)
  * Killing yourself is the one case that is not in-place: it goes through the
  * exit arm of the switch, so it does not return.
  *
- * A victim's own children are NOT re-parented. There is no init yet, so an
- * orphan's zombie keeps a parent pid nobody will ever wait with again and its
- * slot stays until proc_run_all() sweeps the table. That is a real limitation,
- * not a detail: a shell (Phase 5's remaining half) is what will make every
- * process a descendant of something that reaps. */
+ * A victim's own children are NOT re-parented. The shell slot now exists, so
+ * re-parenting to it is possible — but nothing has been *shown* to need it or
+ * to exercise it, and a claim about orphans is a claim about a program that
+ * outlives its parent, which this kernel does not yet have. So an orphan's
+ * zombie still keeps a parent pid nobody will wait with, and the sweep at the
+ * end of a run is what frees it. Writing that down is the honest half; the
+ * proof belongs to whoever adds the program that orphans itself. */
 int proc_kill(int pid, int sig, struct syscall_frame *f)
 {
     if (!sched_active || current < 0)
@@ -574,6 +651,19 @@ int proc_kill(int pid, int sig, struct syscall_frame *f)
     if (t < 0 || table[t].state == PROC_EXITED)
         return WC_ESRCH;        /* never existed, or already a zombie — which
                                  * is not dead twice, it is waiting to be reaped */
+
+    /* The shell's slot is the one entry kill cannot take. It has no address
+     * space, no trap frame and nobody holding a CPU to end, so there is no
+     * "retire it where it stands" to do — and were it freed, every program
+     * this screen started would belong to a parent that no longer exists.
+     * EPERM rather than ESRCH, because the process really is in the table:
+     * refusing is honest, pretending it was never born is not. */
+    if (table[t].state == PROC_KERNEL) {
+        serial_write("proc: refused to kill pid ");
+        serial_write_dec((uint64_t)pid);
+        serial_write(" (the shell owns it)\n");
+        return WC_EPERM;
+    }
 
     /* Reported before either arm, because both are a killing and the log line
      * is the kernel's own witness: for a self-kill the two pids are equal, and
@@ -620,19 +710,44 @@ int proc_scheduler_active(void)
  * EXITED slot gave its frames back at exit, a BLOCKED one still holds them and
  * proc_free_space() hands those over. next_pid is deliberately NOT reset: pids
  * are never reused, so a program holding an old pid can never point at a new
- * process by accident. */
+ * process by accident.
+ *
+ * Two slots are handled differently, and both reasons are load-bearing. The
+ * shell's own entry is not a leftover of this run — it is what starts the next
+ * one — so it is skipped entirely. And a zombie whose parent *is* the shell is
+ * not swept in silence either: the shell is its parent, and a parent taking
+ * note of its child's death is called a reap, so the line says what happened
+ * ("shell: reaped pid P code C") and the code travels back to
+ * proc_run_program() through run_code. Before the shell had a slot this pass
+ * was the only reaper the desktop ever had; now it is the one for processes the
+ * shell could not be the parent of, which is a much smaller claim — and that is
+ * the point of writing it down. */
 static void proc_table_sweep(void)
 {
     for (int i = 0; i < PROC_MAX; i++) {
-        if (table[i].state == PROC_FREE)
+        struct proc *p = &table[i];
+        if (p->state == PROC_FREE || p->state == PROC_KERNEL)
             continue;
-        proc_free_space(&table[i]);
-        table[i].state = PROC_FREE;
-        table[i].parent = 0;
-        table[i].armed = 0;
-        table[i].wait_out = 0;
-        table[i].wake_pending = 0;
-        table[i].name[0] = '\0';
+
+        if (shell_pid != 0 && p->state == PROC_EXITED && p->parent == shell_pid) {
+            serial_write("shell: reaped pid ");
+            serial_write_dec((uint64_t)p->pid);
+            serial_write(" code ");
+            serial_write_signed(p->exit_code);
+            serial_write("\n");
+            if (run_watch != 0 && p->pid == run_watch) {
+                run_code = p->exit_code;
+                run_done = 1;
+            }
+        }
+
+        proc_free_space(p);
+        p->state = PROC_FREE;
+        p->parent = 0;
+        p->armed = 0;
+        p->wait_out = 0;
+        p->wake_pending = 0;
+        p->name[0] = '\0';
     }
 }
 
@@ -661,4 +776,65 @@ void proc_run_all(void)
     paging_use_kernel();
     proc_table_sweep();
     serial_write("sched: all processes exited\n");
+}
+
+/* The shell's way of running something — and the difference it makes is not
+ * cosmetic. The path this replaces, usermode_run(), loads one image into the
+ * kernel's own address space, enters ring 3, and comes back when the program
+ * calls exit(); the program has no pid, so the process verbs have nothing to
+ * work with and must refuse. Here the program goes through proc_create() as a
+ * child of the shell's slot, so it has an address space, a pid, a parent that
+ * reaps it, and a scheduler that will actually run anything it spawns.
+ *
+ * The run ends when the scheduler finds nothing READY — the started program and
+ * everything it spawned have finished (or one of them blocked with nobody left
+ * to wake it, which sched_switch reports honestly as a deadlock). Then the
+ * sweep reaps the shell's children, and the code of the one this call started
+ * comes back through run_code.
+ *
+ * Returns 0 with an exit code, -1 when the program could not be built at all,
+ * and -2 when it was started but never came back: three different answers to
+ * three different things that can go wrong, and a shell that printed "exit 0"
+ * for the third would be reporting a death it did not witness. */
+int proc_run_program(const char *path, int argc, const char *const *argv,
+                     int *exit_code)
+{
+    if (proc_shell_start() == 0)
+        return -1;
+    if (sched_active || current >= 0) {
+        /* Not from a process. proc_run_all() unwinds to its own frame through
+         * the exit path, so a nested call would strand a scheduler inside a
+         * scheduler; the syscall handler already refuses spawn outside the
+         * table for the same reason. */
+        serial_write("proc: a process cannot start a shell session\n");
+        return -1;
+    }
+
+    run_code = -1;
+    run_done = 0;
+    run_watch = 0;
+
+    adopt_pid = shell_pid;
+    int pid = proc_create(path, argc, argv, PROC_PRIO_DEFAULT);
+    adopt_pid = 0;
+    if (pid < 0)
+        return -1;
+
+    run_watch = pid;
+    proc_run_all();
+    run_watch = 0;
+
+    if (!run_done) {
+        /* Started, never seen exiting: it was still BLOCKED (or READY behind a
+         * deadlock report) when the scheduler came home. Saying "exit code -1"
+         * would invent an ending this kernel did not witness. */
+        serial_write("proc: pid ");
+        serial_write_dec((uint64_t)pid);
+        serial_write(" never returned to its parent\n");
+        return -2;
+    }
+
+    if (exit_code != NULL)
+        *exit_code = run_code;
+    return 0;
 }

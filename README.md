@@ -12,13 +12,16 @@ buttons and desktop icons](docs/screenshots/desktop.png)
 terminal focused and running `/bin/hello` from the initrd in ring 3.
 Screenshot taken by the test suite itself (`tools/qemu-desktop.py`).*
 
-![WindClone start menu: twelve program rows read out of /bin in the initrd,
+![WindClone start menu: thirteen program rows read out of /bin in the initrd,
 above the DEMARRER button](docs/screenshots/start-menu.png)
 
 *The start menu, opened by one click on DEMARRER. Every row is a `/bin`
 entry that the kernel enumerated from the initrd at that moment — clicking
-one runs it. The test suite clicks a row it found in its own serial log and
-checks the program answered (`tools/qemu-desktop.py menu`).*
+one starts it, as a process with its own pid and the shell as its parent. The
+test suite clicks a row it found in its own serial log and checks the program
+answered (`tools/qemu-desktop.py menu`), and clicks `/bin/whoami` to check the
+pid the kernel handed out at spawn is the one the program reads back
+(`menuproc`).*
 
 **WindClone** is a hobby operating system project. Nothing is copied from
 Linux or Windows: the kernel is written by us in C (with assembly for the
@@ -141,6 +144,19 @@ On boot the kernel:
    same exit code — and the test proves it by reading the row index out of the
    kernel's own log line and clicking *that*, then checking `/bin/hello`
    answered. Nothing in `desktop.c` contains a program name.
+18. gives the **command prompt a pid**. The shell used to drive the process
+   table from outside it, and three refusals were the consequence: a program
+   typed at the prompt could not `spawn`, `wait` or `kill`, because it had no
+   entry in the table to be anybody's parent or child. `shell_init()` now claims
+   one — pid 1, state `PROC_KERNEL`, no address space and no trap frame because
+   its code runs on the kernel stack — and every program the prompt starts or
+   the menu clicks is created as its child and run by the real scheduler.
+   `/bin/whoami` is the proof from the other side of the boundary: the pid it
+   reads back with `getpid()` must be the number the kernel printed when it
+   spawned it, and its `kill(1)` must come back `-EPERM` rather than `-ESRCH`,
+   because the shell genuinely is there. Typing `vanish` proves the other half:
+   a program the shell starts can now be *killed*, so the `-9` arrives at the
+   prompt and has to be reported as `-9` instead of a tidy, invented `0`.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
@@ -189,9 +205,9 @@ src/kernel/        C kernel: entry (kmain), console + memory managers,
                    per-process page tables + preemptive round-robin scheduler
                    (proc), interrupt stubs (NASM), string + port-I/O helpers
 src/user/          the programs that run in ring 3 — hello, motd, ls, cat,
-                   echo, tick, spin, exit, waiter, bell, reaper, vanish — with
-                   no libc of their own: a header of inline `int 0x80` wrappers
-                   and eight static inline string helpers
+                   echo, tick, spin, exit, waiter, bell, reaper, vanish,
+                   whoami — with no libc of their own: a header of inline
+                   `int 0x80` wrappers and eight static inline string helpers
 src/boot/          hand-written NASM boot code (two-stage educational MBR)
 rootfs/            what goes into the initrd: packed to a ustar tar, loaded
                    by the bootloader as a module, read in place by the kernel

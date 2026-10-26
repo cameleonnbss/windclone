@@ -298,30 +298,68 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         answers are checked too — `-WC_ESRCH` for a pid already reaped,
         `-WC_EINVAL` for a signal that does not exist, `-WC_ECHILD` for a
         `wait()` with nothing left to wait for.
-      - **The table now gets swept, or the boot demos would have run it dry.**
+      - **The table gets swept, or the boot demos would have run it dry.**
         An `EXITED` slot whose parent is gone as well (a boot-spawned process,
-        or an orphan — there is no `init` to re-parent to yet) can never be
-        reaped, and `PROC_MAX` is 8: four demo blocks each leaking two or three
-        slots exhausts the table mid-boot. `proc_run_all()` now calls
+        or an orphan — nothing re-parents yet) can never be reaped, and
+        `PROC_MAX` is 8: four demo blocks each leaking two or three slots
+        exhausts the table mid-boot. `proc_run_all()` calls
         `proc_table_sweep()` on the way home, freeing every leftover (an
         orphaned `BLOCKED` sleeper still owns its pages) while deliberately
         *not* resetting `next_pid`, so pids are never reused and a stale pid can
-        never point at somebody new. The honest limitation stays written down:
-        orphans exist until a shell is everyone's parent.
-      - **What the process table is still not wired to: the desktop shell.**
-        `hello`, `ls`, `cat` and `echo` — typed at the prompt *or* clicked in
-        the start menu, which went in later and changed nothing here — still go
-        through `usermode_run()`: one program, run to completion, back to the
-        prompt. That is because the shell is kernel-side code and not itself a
-        process. So
-        those programs get real answers from `write`/`open`/`getdirent` and an
-        honest refusal from the process verbs: `spawn` and `kill` answer
-        `-WC_EPERM`, `wait` `-WC_ECHILD`, since pretending to have started
-        something nobody would schedule is worse than refusing (a `spawn` that
-        only allocated an address space and left the child `READY` forever
-        looked exactly like a working feature). Giving the shell a slot in the
-        table — so a terminal window becomes every program's parent and the
-        orphan case above disappears — is the rest of this phase.
+        never point at somebody new. Since v0.1.8 this is no longer the desktop's
+        *only* reaper: a zombie whose parent is the shell is named while it is
+        freed (`shell: reaped pid P code C`) and the code travels back to the
+        prompt. What the sweep still frees in silence is what the shell could not
+        have been the parent of — the boot demos — which is a considerably
+        smaller claim than the one this bullet used to make.
+      - **The shell is a process (v0.1.8): pid 1, and every program it starts is
+        its child.** This replaces the paragraph that said the desktop shell was
+        not wired to the table at all, and with it the three refusals that
+        followed: `spawn` and `kill` answering `-WC_EPERM` to a program typed at
+        the prompt, `wait` answering `-WC_ECHILD`, and no shell-started program
+        ever having children. `proc_shell_start()` claims a slot in
+        `shell_init()` — before one key can be typed — and takes pid 1, because
+        nothing has asked for a number yet. Its state is new, `PROC_KERNEL`,
+        because the shell is *not* a schedulable context: it has no address
+        space, no page tables and no trap frame, since its code runs on the
+        kernel stack from the idle loop. Three places must therefore refuse to
+        touch it, each with the reason next to it: `pick_ready()` never selects
+        it, `proc_kill()` answers `-WC_EPERM` rather than `-WC_ESRCH` (the shell
+        genuinely is in the table; claiming it was never born would be the
+        lazier answer), and the sweep skips it — that slot is what starts the
+        next run. `proc_run_program()` replaces `usermode_run()` on the launch
+        path: the program is created as the shell's child, the scheduler runs
+        its whole group to the end, the sweep reaps it, and the exit code comes
+        back. So what you type at the prompt or click in the menu is a process
+        now, with a pid, a parent and working process verbs.
+        - The evidence is cross-checked, not eyeballed. `reaper` typed at the
+          keyboard really spawns a real child instead of being handed `-1`,
+          really kills it, and is itself reaped by the shell with code 0.
+          `/bin/whoami` prints what `getpid()` answered and CI requires that
+          number to be the one `proc: spawned /bin/whoami as pid` printed a line
+          earlier — a pid handed out on one side of the boundary and read back on
+          the other — then tries to kill pid 1 and must be refused. The
+          `menuproc` scenario makes the same claim from the mouse, by clicking
+          the row.
+        - A number had to become honest on the way. A shell-started program can
+          now be killed, so `-SIGKILL` reaches the prompt, and the unsigned
+          printer would have rendered it as a twenty-digit nothing: an ending
+          reported as a clean exit. `serial_write_signed()` is now the one signed
+          printer, used by the kernel's reap line and by the shell's, and typing
+          `vanish` is required to come back as `shell: vanish exited with -9`.
+        - The cost, written down rather than hidden: pid 1 permanently occupies
+          one of eight slots, so seven are left for a program and its
+          descendants. And the run is still synchronous —
+          `proc_run_program()` returns only when the scheduler has nothing left
+          to run, so a long program holds the screen, exactly as a long `spin`
+          does. A window that owns a *live* process, so the desktop keeps
+          painting while a program works, is the rest of this phase.
+      - **What is still not wired: re-parenting, and an `init` that adopts.**
+        The shell slot makes re-parenting possible in a way it was not before,
+        but no program has yet been shown to outlive its parent, so nothing is
+        claimed: an orphan's zombie keeps a parent pid nobody will wait with and
+        the sweep frees it. The proof belongs to whoever writes the program that
+        orphans itself.
 
 ## Phase 6 — Language expansion ⏳
 *Goal: use the right tool per layer (the "asm/C/C++/Rust" promise).*
@@ -369,7 +407,15 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       program, `tools/local-test.sh` requires every `USER_BINS` name from the
       Makefile to appear and `hidden 0`, and `tools/qemu-desktop.py menu` reads
       the index of `hello` out of that log, clicks *that* row, and greps
-      `shell: launched 'hello' from the start menu` plus the program's own line
+      `shell: launched 'hello' from the start menu` plus the program's own line.
+      Since v0.1.8 the thing a row starts is a *process*: `menuproc` clicks
+      `/bin/whoami` and requires the pid the kernel gave at spawn, the pid the
+      program read back through `getpid()`, and the reap the shell owed it to be
+      the same process, from the mouse
+- [ ] A window that owns a live process — right now a menu click or a typed word
+      runs the program to completion before the desktop paints again, so a long
+      program freezes the screen. Per-process windows (and a stdout that keeps
+      arriving) is what turns this from a launcher into a desktop
 - [x] One version string. `src/kernel/version.h` is what the status window, the
       taskbar and `about` all draw, and the kernel says it on the boot log —
       which the test reads back out of that header, so a number a release left

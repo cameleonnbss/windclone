@@ -29,6 +29,14 @@
  * as the tie-break (lower number runs first) — the "priority round-robin" the
  * roadmap named, honest about being cooperative for now.
  *
+ * The table also holds one entry that is not a process in that sense: the
+ * desktop shell's own slot, pid 1. It has no address space and no trap frame
+ * because the shell's code runs on the kernel stack from the idle loop — what
+ * it has is *parenthood*. Every program the prompt starts or the start menu
+ * clicks is created as its child, which is what lets those programs use
+ * spawn/wait/kill at all and lets the shell reap them instead of having the
+ * end-of-run sweep forget them. See proc_shell_start() and proc_run_program().
+ *
  * SPDX-License-Identifier: MIT
  */
 #ifndef WINDCLONE_PROC_H
@@ -49,7 +57,13 @@ enum proc_state {
     PROC_READY,       /* runnable, waiting its turn                        */
     PROC_RUNNING,     /* owns the CPU now                                  */
     PROC_EXITED,      /* ran to exit(); the zombie, reaped by parent's wait */
-    PROC_BLOCKED      /* asleep in wait(): only a child's exit wakes it     */
+    PROC_BLOCKED,     /* asleep in wait(): only a child's exit wakes it     */
+    PROC_KERNEL       /* a slot owned by kernel code, not by a CPU context:
+                       * the desktop shell's own entry. It has no address
+                       * space and no trap frame, so the scheduler must never
+                       * pick it, `kill` must never end it, and the sweep at
+                       * the end of a run must never take it. Everything the
+                       * shell starts is a child of this slot.             */
 };
 
 /* The switch a syscall asks for, passed to the scheduler's one switch point:
@@ -133,7 +147,9 @@ int  proc_wait(struct syscall_frame *f, uint64_t uout);
 int  proc_kill(int pid, int sig, struct syscall_frame *f);
 
 /* The pid of the running process, or 0 when the scheduler is not driving
- * anything (so the shell's own ring-3 runs report a plain, honest 0). */
+ * anything. 0 is the honest answer for the boot self-check's usermode_run(),
+ * which has no table entry; a program the desktop shell starts now has one, so
+ * it answers with a real pid. */
 int  proc_current_pid(void);
 
 /* Non-zero while proc_run_all() owns the exit path — the flag that tells
@@ -144,6 +160,34 @@ int  proc_scheduler_active(void);
 /* Spawn a process by path from inside the scheduler (SYS_SPAWN). Returns the
  * new pid, or -1. The caller keeps running; the child enters the READY set. */
 int  proc_spawn_path(const char *path);
+
+/* --- the shell as a process -------------------------------------------
+ * The desktop's command line is kernel code, so it never had an entry in the
+ * table it drives: every program the prompt or the start menu started was an
+ * excursion into ring 3 with no parent, which is why spawn/kill/wait could
+ * only refuse and why a leftover slot had to be swept rather than reaped.
+ * These calls give it one, and run the shell's programs underneath it. */
+
+/* Claim the shell's slot — once, idempotent, and the first claim takes pid 1.
+ * Returns the pid, or 0 when the table has no room (which would mean the boot
+ * got that far with no process table at all). */
+int  proc_shell_start(void);
+
+/* The shell slot's pid, or 0 before proc_shell_start() has run. */
+int  proc_shell_pid(void);
+
+/* Start `path` as a child of the shell, run its whole process group to
+ * completion (the scheduler owns the CPU until nothing is runnable), then reap
+ * what the shell is owed and hand back the started program's exit code —
+ * which may be negative, because a program the shell starts can now be killed.
+ * 0 = it ran and came back (`*exit_code` is its code); -1 = the program could
+ * not be built; -2 = it was started but never returned, so there is no code to
+ * report and inventing one would be reporting a death this kernel did not
+ * witness. This is what the shell's launch path calls instead of
+ * usermode_run(). Only valid from kernel context — a process cannot start a
+ * sibling's session. */
+int  proc_run_program(const char *path, int argc, const char *const *argv,
+                      int *exit_code);
 
 /* Timer-driven preemption. Called from the IRQ0 path with the interrupted
  * frame after the tick is accounted and EOI'd. Returns non-zero only when it

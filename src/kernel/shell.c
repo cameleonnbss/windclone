@@ -22,6 +22,7 @@
 #include "shell.h"
 #include "gfx.h"
 #include "usermode.h"
+#include "proc.h"
 #include "vfs.h"
 #include "keyboard.h"
 #include "serial.h"
@@ -98,6 +99,28 @@ static void put_line_num(const char *prefix, uint64_t value)
     put_line(buf);
 }
 
+/* The same with a sign. A program the shell starts can now be killed - that
+ * is what this release is - and a killed process exits with -SIGKILL, so the
+ * number after "CODE DE SORTIE:" carries the difference between "it finished"
+ * and "it was ended". Printing -9 as an unsigned value would not be a
+ * slightly wrong number, it would be a different claim entirely. */
+static void put_line_signed(const char *prefix, int value)
+{
+    char buf[SHELL_COLS + 2];
+    int n = 0;
+
+    for (; prefix[n] != '\0' && n < SHELL_COLS - 21; n++)
+        buf[n] = prefix[n];
+    if (value < 0)
+        buf[n++] = '-';
+    buf[n] = '\0';
+
+    unsigned long magnitude = value < 0
+        ? (unsigned long)(0LL - (long long)value)
+        : (unsigned long)value;
+    put_line_num(buf, (uint64_t)magnitude);
+}
+
 /* --- commands --------------------------------------------------------- */
 
 static void cmd_help(void)
@@ -112,6 +135,14 @@ static void cmd_help(void)
     put_line("  ECHO <MOTS>    RENVOIE SES ARGUMENTS");
     put_line("  HELLO          UN PROGRAMME QUI PARLE EN RING 3");
     put_line("  MOTD           LIT /ETC/MOTD VIA LE VFS");
+    put_line("  WHOAMI         MON PID - ON NE TUE PAS PID 1");
+    put_line("  REAPER         ENFANT, KILL, WAIT - DANS CET ORDRE");
+    put_line("CE QUE TU LANCES ICI EST UN PROCESSUS: PID REEL,");
+    /* The shell's pid is printed as the number the table holds, not as a "1"
+     * written into this file: the claim on the screen is then whatever the
+     * kernel actually did, and a boot that handed pid 1 to somebody else
+     * shows up as a different number instead of a lie. */
+    put_line_num("PARENT = LE SHELL, PID ", (uint64_t)proc_shell_pid());
 }
 
 /* --- a program's stdout, wired into the grid -------------------------
@@ -159,10 +190,16 @@ static void shell_sink(const char *data, uint64_t len)
  * and `origin` are the only difference, and they exist because a log that
  * cannot tell the two apart cannot prove which one a test drove.
  *
- * Everything that is not a built-in is looked for in /bin, run with the rest
- * of the line as argv, and given the terminal as its console. That is the
- * difference between "the shell has commands" and "there is an OS": the
- * kernel never hears about a program's name beyond the path it opened. */
+ * Everything that is not a built-in is looked for in /bin and started as a
+ * *child of the shell's own process slot* (see proc.h), with the rest of the
+ * line as argv and this grid as its console. It used to go through
+ * usermode_run(), which has no process table: a program could not spawn, wait
+ * or kill, because there was no entry for it to be anybody's parent or child.
+ * Now `reaper` typed at the prompt does what the boot demo does — a real bell,
+ * killed by a real kill, reaped by a real wait — from the keyboard or the
+ * mouse. That is the difference between "the shell has commands" and "there is
+ * an OS": the kernel never hears about a program's name beyond the path it
+ * opened, and the program itself is a process like any other. */
 static int launch(int argc, const char *const *argv,
                   const char *verb, const char *origin)
 {
@@ -195,7 +232,8 @@ static int launch(int argc, const char *const *argv,
     serial_write("\n");
 
     int code = -1;
-    if (usermode_run(path, &code, argc, argv) != 0) {
+    int rc = proc_run_program(path, argc, argv, &code);
+    if (rc == -1) {
         put_line("IMPOSSIBLE DE LANCER CE PROGRAMME");
         serial_write("shell: failed to run ");
         serial_write(path);
@@ -208,14 +246,25 @@ static int launch(int argc, const char *const *argv,
      * the program never said them. */
     sink_put_pending();
 
-    put_line_num("CODE DE SORTIE: ", (uint64_t)(code < 0 ? 0 : (unsigned)code));
+    if (rc == -2) {
+        /* The scheduler came home with this program still un-exited - it was
+         * blocked when nothing could wake it. There is no exit code to report,
+         * and inventing one is the kind of claim this project does not make. */
+        put_line("PROGRAMME JAMAIS REVENU (BLOQUE)");
+        serial_write("shell: ");
+        serial_write(argv[0]);
+        serial_write(" never returned\n");
+        return -1;
+    }
+
+    put_line_signed("CODE DE SORTIE: ", code);
     serial_write("shell: ");
     serial_write(argv[0]);
     serial_write(" ran and returned\n");
     serial_write("shell: ");
     serial_write(argv[0]);
     serial_write(" exited with ");
-    serial_write_dec((uint64_t)(code < 0 ? 0 : (unsigned)code));
+    serial_write_signed(code);
     serial_write("\n");
     return 0;
 }
@@ -278,8 +327,8 @@ static void execute(void)
     } else {
         /* Tokenise in place: spaces become NULs, so argv[] points into
          * `input` and there is no second copy to keep in sync. The buffer is
-         * a kernel static that outlives the call, and usermode_run() copies
-         * the strings onto the program's stack before entering ring 3 - so
+         * a kernel static that outlives the call, and proc_create() copies
+         * the strings onto the program's own stack before entering ring 3 - so
          * the program owns its own argv from the moment it starts, which is
          * what lets a shell reuse `input` for the next line. */
         const char *argv[USER_ARG_MAX];
@@ -318,6 +367,14 @@ static void execute(void)
 void shell_init(void)
 {
     grid_clear();
+
+    /* The shell takes its place in the process table before anything can be
+     * typed, and the claim it makes is the one the rest of this file depends
+     * on: a slot with a pid means the programs started here have a parent, so
+     * they may spawn, wait and kill instead of being refused. It happens here,
+     * in the shell's own bootstrap, rather than from kmain, because the slot
+     * belongs to this subsystem and nothing else needs it. */
+    proc_shell_start();
 
     /* From here on, whatever a program writes to fd 1 or 2 is typed into this
      * grid. The serial port still receives every byte - that is what CI

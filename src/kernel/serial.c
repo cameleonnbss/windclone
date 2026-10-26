@@ -63,6 +63,21 @@ void serial_write_dec(uint64_t value)
         serial_putc(buf[--i]);
 }
 
+/* The signed form, because the interesting numbers in this kernel's log are
+ * negative: an exit code of -SIGKILL, a -WC_EPERM, a -WC_ECHILD. Printing one
+ * through the unsigned writer turns -9 into a twenty-digit number that was
+ * never in the table at all. The magnitude is taken in unsigned so even
+ * INT64_MIN, whose negation cannot be represented, comes out right. */
+void serial_write_signed(int64_t value)
+{
+    if (value < 0) {
+        serial_putc('-');
+        serial_write_dec((uint64_t)0 - (uint64_t)value);
+        return;
+    }
+    serial_write_dec((uint64_t)value);
+}
+
 static const char hex_digits[] = "0123456789abcdef";
 
 void serial_write_hex(uint64_t value)

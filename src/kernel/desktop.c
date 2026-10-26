@@ -19,11 +19,15 @@
  *
  * The DEMARRER button is a start menu, and the menu is a launcher: its rows
  * are the /bin entries of the initrd, read back through the VFS every time
- * the panel opens, and clicking one really runs that program. Nothing in
- * this file knows a program's name.
+ * the panel opens, and clicking one starts that program as a *child of the
+ * shell's own process slot* — so a click has a pid, a parent that reaps it and
+ * an exit code, exactly like the same word typed at the prompt. Nothing in this
+ * file knows a program's name.
  *
- * The font is uppercase A-Z 0-9 with ":-.!" only, so interface strings
- * stay clear of apostrophes: an unknown glyph silently becomes a space.
+ * The font is uppercase A-Z 0-9 plus the punctuation the interface really
+ * uses (":-,.!/'+()"), and glyph_for() answers an unknown character with a
+ * space, so interface strings must stay inside that set: a missing glyph is not
+ * a box, it is a blank nobody notices.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -263,6 +267,18 @@ static void draw_status_content(const struct window *w)
     gfx_text(tx, ty, "DEMARRER OUVRIR UN MENU QUI", C_MUTED, 1);
     ty += 12;
     gfx_text(tx, ty, "LANCE LES PROGRAMMES DE /BIN.", C_MUTED, 1);
+    ty += 20;
+    /* The claim this screen makes about itself, and the one a user cannot test
+     * by clicking: a program started here is not a function call, it has a pid,
+     * a parent and an exit code. Saying the shell is pid 1 says what the table
+     * says — see proc.h, and /bin/whoami for the program that checks it. */
+    gfx_text(tx, ty, "CHAQUE PROGRAMME LANCE ICI", C_MUTED, 1);
+    ty += 12;
+    gfx_text(tx, ty, "EST UN PROCESSUS. LE SHELL", C_MUTED, 1);
+    ty += 12;
+    gfx_text(tx, ty, "EST PID 1 : TU NE PEUX PAS", C_MUTED, 1);
+    ty += 12;
+    gfx_text(tx, ty, "LE TUER.", C_MUTED, 1);
 }
 
 static void draw_trash_content(const struct window *w)

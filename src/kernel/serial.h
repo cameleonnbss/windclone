@@ -14,6 +14,7 @@ void serial_putc(char c);
 void serial_write(const char *s);
 void serial_write_len(const char *s, size_t n);
 void serial_write_dec(uint64_t value);
+void serial_write_signed(int64_t value);
 void serial_write_hex(uint64_t value);
 
 #endif
