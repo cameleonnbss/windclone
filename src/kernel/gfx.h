@@ -43,4 +43,26 @@ void gfx_frame(int x, int y, int w, int h, uint32_t rgb);
 void gfx_text(int x, int y, const char *s, uint32_t rgb, int scale);
 int  gfx_text_width(const char *s, int scale);
 
+/* --- double buffer, clip, and damage ---------------------------------
+ * Everything above draws into a RAM back buffer (once gfx_alloc_backbuffer()
+ * has taken it) rather than the screen, so a frame is composed invisibly and
+ * pushed to the display in a single flip. gfx_set_clip bounds what the next
+ * draws touch, so recomposing a small damage region costs a small region. With
+ * no back buffer (allocation failed, or before it is taken) the primitives
+ * write the framebuffer directly and gfx_has_backbuffer() returns 0 - the
+ * caller then repaints whole frames and never clips. */
+
+/* Take the back buffer from the heap. Must be called after kmalloc_init().
+ * 0 = back buffer in use, -1 = none (callers fall back to direct drawing). */
+int  gfx_alloc_backbuffer(void);
+int  gfx_has_backbuffer(void);
+
+void gfx_set_clip(int x, int y, int w, int h);
+void gfx_reset_clip(void);
+
+/* Copy the back buffer to the screen, whole or by rectangle, and return how
+ * many pixels that region covers (the work the frame did). */
+uint64_t gfx_flip(void);
+uint64_t gfx_flip_rect(int x, int y, int w, int h);
+
 #endif

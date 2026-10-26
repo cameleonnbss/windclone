@@ -443,6 +443,12 @@ void kmain(void)
          * cursor in it even before a single packet arrives. */
         mouse_init();
         shell_init();
+        /* Compose into a RAM back buffer, then flip it to the screen, so a
+         * frame lands whole and only the region that changed is redrawn. The
+         * heap is already up (kmalloc_init ran earlier in boot); if the buffer
+         * cannot be had, gfx draws straight to the framebuffer and desktop.c
+         * falls back to whole-screen repaints - it never clips without one. */
+        gfx_alloc_backbuffer();
         desktop_frame();
         serial_write("gfx: desktop composited ");
         serial_write_dec((uint64_t)gfx_width());

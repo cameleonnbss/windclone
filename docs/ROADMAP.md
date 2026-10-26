@@ -408,8 +408,9 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       low window of our own page tables, 32-bit pixels, pitch-correct
       writes, a vertical-gradient wallpaper and a 5x7 font compiled in
 - [x] First composited frame: desktop icons, taskbar with a start button,
-      one window with a title bar and a close button — drawn back to front,
-      no double buffer yet (verified by a QEMU `screendump`)
+      one window with a title bar and a close button — drawn back to front
+      (verified by a QEMU `screendump`); it composes into a back buffer now, see
+      the damage-tracking line below
 - [x] Window manager: three overlapping windows, focus by clicking anywhere
       on one, title-bar buttons (minimise / maximise / close), taskbar
       buttons that restore or raise, and desktop icons that reopen a window
@@ -418,7 +419,10 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       windows behave the way people expect
 - [x] Headless proof: `tools/qemu-desktop.py` injects real PS/2 moves and
       clicks through the QEMU monitor and greps the kernel's `wm:` markers
-- [ ] Damage tracking + double buffer (a mouse move still repaints everything)
+- [x] Damage tracking + double buffer: the desktop composes into a RAM back
+      buffer and flips it in one pass, and a mouse move now recomputes and blits
+      only a cursor-sized band instead of the whole screen (proven by a QEMU
+      scenario that reads the `gfx: flip N rects, AREA px` the kernel logs)
 - [x] Start menu, and a launcher that starts programs from the initrd. The
       rows are not written in `desktop.c`: opening the panel enumerates the
       archive through `vfs_dirent()` and keeps the `bin/` entries, so a program
@@ -481,7 +485,8 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       injecting `mouse_move` through the QEMU monitor and grepping the
       decoded packet
 - [x] Cursor + one draggable window: grab the title bar, the window follows,
-      clamped to the desktop (full-screen repaint — damage tracking is next)
+      clamped to the desktop (a drag flips the whole screen; a bare cursor move
+      is clipped to its damage band since the double-buffer work above)
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
 

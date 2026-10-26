@@ -98,6 +98,46 @@ static int dragging, grab_dx, grab_dy, drag_win;
 static int prev_left;
 static int laid_out;
 
+/* The cursor's previous position, so the box it is leaving is always part of
+ * the damage (that is what stops a cursor trail), plus whether a frame has ever
+ * been composited (the very first one has no back buffer to update, so it is
+ * whole-screen). `prev_menu_open` catches the panel appearing or vanishing. */
+static int prev_mx = -1, prev_my = -1;
+static int prev_menu_open;
+static int painted_once;
+
+#define CURSOR_W 12
+#define CURSOR_H 16
+
+/* A frame's damage: a handful of rectangles and the bounding box they union
+ * into. The recompose clips to the union (so it redraws only that band), then
+ * each rectangle is blitted to the screen. Six is plenty for the cursor's old
+ * and new boxes plus a title bar and the terminal; anything that would exceed
+ * it is a structural change and repaints whole-screen instead. */
+struct drect { int x, y, w, h; };
+static struct drect dmg[6];
+static int dmg_n, dmg_x0, dmg_y0, dmg_x1, dmg_y1;
+
+static void dmg_add(int W, int H, int x, int y, int w, int h)
+{
+    int x0 = x < 0 ? 0 : x;
+    int y0 = y < 0 ? 0 : y;
+    int x1 = x + w > W ? W : x + w;
+    int y1 = y + h > H ? H : y + h;
+    if (x1 <= x0 || y1 <= y0)
+        return;
+    if (dmg_n < (int)(sizeof dmg / sizeof dmg[0])) {
+        dmg[dmg_n].x = x0; dmg[dmg_n].y = y0;
+        dmg[dmg_n].w = x1 - x0; dmg[dmg_n].h = y1 - y0;
+        dmg_n++;
+    }
+    if (x0 < dmg_x0) dmg_x0 = x0;
+    if (y0 < dmg_y0) dmg_y0 = y0;
+    if (x1 > dmg_x1) dmg_x1 = x1;
+    if (y1 > dmg_y1) dmg_y1 = y1;
+}
+
+
 static const char *const cursor_shape[] = {
     "#...........",
     "##..........",
@@ -893,6 +933,57 @@ void desktop_frame(void)
     if (press)
         handle_press(mx, my, W, H);
 
+    /* Decide what changed since the last flip. A structural change - the first
+     * frame, a click, a drag, the menu opening or closing, a program's output
+     * arriving, or a machine with no back buffer to update - repaints the whole
+     * desktop. Anything else is the cursor having moved, and only the band it
+     * swept needs recomputing: which is the entire point, because a mouse move
+     * used to redraw all 1024x768 pixels of wallpaper behind it. */
+    int full = !painted_once
+            || press
+            || dragging
+            || (menu_open != prev_menu_open)
+            || shell_program_dirty_any()
+            || !gfx_has_backbuffer();
+
+    dmg_n = 0;
+    if (!full) {
+        dmg_x0 = dmg_y0 = 1 << 30;
+        dmg_x1 = dmg_y1 = 0;
+        dmg_add(W, H, mx, my, CURSOR_W, CURSOR_H);
+        if (prev_mx >= 0)
+            dmg_add(W, H, prev_mx, prev_my, CURSOR_W, CURSOR_H);
+
+        /* A title-bar button lights on hover, so when the pointer is in (or has
+         * just left) a window's title strip, that strip is damaged too - the
+         * hover highlight would otherwise paint over a stale button. */
+        for (int i = 0; i < WIN_TOTAL; i++) {
+            struct window *w = &wins[i];
+            if (!w->open || w->min)
+                continue;
+            int over_new = mx >= w->x && mx < w->x + w->w &&
+                           my >= w->y && my < w->y + TITLE_H;
+            int over_prev = prev_mx >= w->x && prev_mx < w->x + w->w &&
+                            prev_my >= w->y && prev_my < w->y + TITLE_H;
+            if (over_new || over_prev)
+                dmg_add(W, H, w->x, w->y, w->w, TITLE_H);
+        }
+
+        /* The terminal's text changed: its body is the damage (a running
+         * program's window would be full, handled above). */
+        if (shell_dirty())
+            dmg_add(W, H, wins[WIN_TERM].x, wins[WIN_TERM].y,
+                    wins[WIN_TERM].w, wins[WIN_TERM].h);
+
+        gfx_set_clip(dmg_x0, dmg_y0, dmg_x1 - dmg_x0, dmg_y1 - dmg_y0);
+    } else {
+        gfx_reset_clip();
+    }
+
+    /* Recompose the whole layer stack, but clipped: the primitives only write
+     * pixels inside the box above, so this is cheap for a cursor move and exact
+     * for a full repaint, and it recomputes the scene *over* wherever the cursor
+     * used to be, so no trail survives. */
     gfx_gradient_v(0, 0, W, H, C_WALL_TOP, C_WALL_BOTTOM);
     for (int i = 0; i < (int)(sizeof icons / sizeof icons[0]); i++)
         draw_icon(icons[i].label, icons[i].y);
@@ -908,4 +999,33 @@ void desktop_frame(void)
     if (menu_open)
         draw_menu(H);                  /* above the windows: it asked for them */
     draw_cursor(mx, my);
+
+    /* Push the recomputed region to the display in one pass, and say how big
+     * that region was - the honest number the tests read. A structural frame
+     * flips the whole screen; a cursor move blits only the few rectangles of its
+     * band, so its area is a rounding error against width*height. */
+    uint64_t area;
+    int n;
+    if (full) {
+        area = gfx_flip();
+        n = 1;
+    } else {
+        area = 0;
+        n = dmg_n;
+        for (int i = 0; i < dmg_n; i++)
+            area += gfx_flip_rect(dmg[i].x, dmg[i].y, dmg[i].w, dmg[i].h);
+    }
+    gfx_reset_clip();
+
+    serial_write("gfx: flip ");
+    serial_write_dec((uint64_t)n);
+    serial_write(" rects, ");
+    serial_write_dec(area);
+    serial_write(" px\n");
+
+    prev_mx = mx;
+    prev_my = my;
+    prev_menu_open = menu_open;
+    painted_once = 1;
 }
+

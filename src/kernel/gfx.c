@@ -21,6 +21,7 @@
 #include <limine.h>
 
 #include "gfx.h"
+#include "kmalloc.h"
 #include "paging.h"
 #include "serial.h"
 
@@ -38,6 +39,22 @@ static volatile struct limine_framebuffer_request framebuffer_request = {
 static volatile uint32_t *fb;
 static int      width, height;
 static uint32_t stride_px;      /* pixels per scanline, not bytes */
+
+/* The back buffer and the current clip box. Every primitive draws into `bb`
+ * (a plain RAM framebuffer) instead of straight into the MMIO `fb`, so a frame
+ * is composed invisibly and pushed to the display in one gfx_flip() blit - the
+ * visible screen is never caught half-drawn. `bb == NULL` (no heap, or the
+ * allocation failed) drops every primitive back to writing `fb` directly, so a
+ * machine that cannot give us 3 MB still boots and still paints. The clip box
+ * bounds what a recompose touches, which is what makes a small damage region
+ * cost a small amount of work instead of the whole 1024x768. */
+static uint32_t *bb;
+static int cl_x0, cl_y0, cl_x1, cl_y1;   /* current clip, in pixels */
+
+int gfx_has_backbuffer(void)
+{
+    return bb != NULL;
+}
 
 int gfx_ready(void)
 {
@@ -80,6 +97,10 @@ int gfx_init(uint64_t hhdm_offset)
     width     = (int)f->width;
     height    = (int)f->height;
     stride_px = (uint32_t)(f->pitch / 4);
+    bb        = NULL;                 /* direct-to-fb until a back buffer is got */
+    cl_x0 = cl_y0 = 0;                /* clip starts as the whole screen         */
+    cl_x1 = width;
+    cl_y1 = height;
 
     serial_write("gfx: framebuffer ");
     serial_write_dec((uint64_t)width);
@@ -95,24 +116,36 @@ int gfx_init(uint64_t hhdm_offset)
 
 void gfx_pixel(int x, int y, uint32_t rgb)
 {
-    if (fb == NULL || x < 0 || y < 0 || x >= width || y >= height)
+    if (fb == NULL || x < cl_x0 || y < cl_y0 || x >= cl_x1 || y >= cl_y1)
         return;
-    fb[(uint32_t)y * stride_px + (uint32_t)x] = rgb;
+    if (bb != NULL)
+        bb[(uint32_t)y * stride_px + (uint32_t)x] = rgb;
+    else
+        fb[(uint32_t)y * stride_px + (uint32_t)x] = rgb;
 }
 
 void gfx_fill(int x, int y, int w, int h, uint32_t rgb)
 {
     if (fb == NULL)
         return;
-    int x0 = x < 0 ? 0 : x;
-    int y0 = y < 0 ? 0 : y;
-    int x1 = x + w > width ? width : x + w;
-    int y1 = y + h > height ? height : y + h;
+    /* Clip first, then write: this one bounds check is what every other
+     * primitive (frame, text, glyph pixels, the gradient's per-row fill)
+     * inherits, so a recompose of a small damage box draws only that box. */
+    int x0 = x < cl_x0 ? cl_x0 : x;
+    int y0 = y < cl_y0 ? cl_y0 : y;
+    int x1 = x + w > cl_x1 ? cl_x1 : x + w;
+    int y1 = y + h > cl_y1 ? cl_y1 : y + h;
 
     for (int row = y0; row < y1; row++) {
-        volatile uint32_t *line = fb + (uint32_t)row * stride_px;
-        for (int col = x0; col < x1; col++)
-            line[col] = rgb;
+        if (bb != NULL) {
+            uint32_t *line = bb + (uint32_t)row * stride_px;
+            for (int col = x0; col < x1; col++)
+                line[col] = rgb;
+        } else {
+            volatile uint32_t *line = fb + (uint32_t)row * stride_px;
+            for (int col = x0; col < x1; col++)
+                line[col] = rgb;
+        }
     }
 }
 
@@ -125,10 +158,14 @@ void gfx_gradient_v(int x, int y, int w, int h, uint32_t top, uint32_t bottom)
     int r1 = (int)((bottom >> 16) & 0xFF), g1 = (int)((bottom >> 8) & 0xFF), b1 = (int)(bottom & 0xFF);
 
     for (int row = 0; row < h; row++) {
+        int sy = y + row;
+        if (sy < cl_y0 || sy >= cl_y1)   /* the wallpaper's only real cost is
+                                          * the rows it touches: skip the rest */
+            continue;
         int r = r0 + (r1 - r0) * row / h;
         int g = g0 + (g1 - g0) * row / h;
         int b = b0 + (b1 - b0) * row / h;
-        gfx_fill(x, y + row, w, 1, gfx_rgb((uint8_t)r, (uint8_t)g, (uint8_t)b));
+        gfx_fill(x, sy, w, 1, gfx_rgb((uint8_t)r, (uint8_t)g, (uint8_t)b));
     }
 }
 
@@ -242,3 +279,80 @@ int gfx_text_width(const char *s, int scale)
         n++;
     return n == 0 ? 0 : (n * 6 - 1) * scale;
 }
+
+/* --- back buffer, clip, and flip ------------------------------------- */
+
+/* Take the RAM back buffer. It is stride_px*height so it matches the real
+ * framebuffer row for row (including any pitch padding), which is what lets
+ * gfx_flip_rect copy the same offsets straight across. Called from the kernel
+ * once the heap is up, before the first composite; if it fails the primitives
+ * fall back to writing the framebuffer directly and nothing blanks. */
+int gfx_alloc_backbuffer(void)
+{
+    if (fb == NULL)
+        return -1;
+
+    uint64_t bytes = (uint64_t)stride_px * (uint64_t)height * 4;
+    bb = (uint32_t *)kmalloc((size_t)bytes);
+    if (bb == NULL) {
+        serial_write("gfx: back buffer alloc failed, direct framebuffer\n");
+        return -1;
+    }
+    serial_write("gfx: back buffer ");
+    serial_write_dec(bytes);
+    serial_write(" bytes\n");
+    return 0;
+}
+
+void gfx_set_clip(int x, int y, int w, int h)
+{
+    int x0 = x < 0 ? 0 : x;
+    int y0 = y < 0 ? 0 : y;
+    int x1 = x + w > width ? width : x + w;
+    int y1 = y + h > height ? height : y + h;
+    if (x1 < 0) x1 = 0;
+    if (y1 < 0) y1 = 0;
+    cl_x0 = x0; cl_y0 = y0;
+    cl_x1 = x1 < x0 ? x0 : x1;    /* never invert the clip */
+    cl_y1 = y1 < y0 ? y0 : y1;
+}
+
+void gfx_reset_clip(void)
+{
+    cl_x0 = cl_y0 = 0;
+    cl_x1 = width;
+    cl_y1 = height;
+}
+
+/* Push one rectangle from the back buffer to the screen. Returns the pixels
+ * in that (clamped) rectangle - the honest measure of how much a frame touched,
+ * whether we copied them (bb present) or already wrote them straight to fb
+ * (no back buffer, so the flip has nothing to do but the work still happened). */
+uint64_t gfx_flip_rect(int x, int y, int w, int h)
+{
+    if (fb == NULL)
+        return 0;
+
+    int x0 = x < 0 ? 0 : x;
+    int y0 = y < 0 ? 0 : y;
+    int x1 = x + w > width ? width : x + w;
+    int y1 = y + h > height ? height : y + h;
+    if (x1 <= x0 || y1 <= y0)
+        return 0;
+
+    if (bb != NULL) {
+        for (int row = y0; row < y1; row++) {
+            volatile uint32_t *d = fb + (uint32_t)row * stride_px;
+            uint32_t *s = bb + (uint32_t)row * stride_px;
+            for (int col = x0; col < x1; col++)
+                d[col] = s[col];
+        }
+    }
+    return (uint64_t)(x1 - x0) * (uint64_t)(y1 - y0);
+}
+
+uint64_t gfx_flip(void)
+{
+    return gfx_flip_rect(0, 0, width, height);
+}
+

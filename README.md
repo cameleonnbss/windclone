@@ -205,6 +205,26 @@ On boot the kernel:
    its twenty rounds and its exit code 5 stream into its own window, which is
    still open after the process is gone. Six such windows fit; the seventh launch
    still runs, its output just falls back to the terminal rather than vanishing.
+22. composes **into a back buffer and repaints only what changed.** Every
+   `gfx` primitive used to write straight into the mapped framebuffer, so a
+   frame could be seen half-drawn, and one change — even a single-pixel cursor
+   move — recomposed all 786 432 pixels of wallpaper, windows, taskbar and
+   pointer. The primitives now draw into a **back buffer in RAM** (a few MB the
+   kernel `kmalloc`s once the heap is up), so a visible frame is pushed to the
+   display whole, in one `gfx_flip`; the compositor's work is invisible. That
+   buffer persists between frames, so a repaint only recomputes the region that
+   actually moved: `desktop_frame` builds a small set of **damage rectangles**,
+   clips the full layered recompose to their bounding box, and blits just those
+   boxes. A pure mouse move now touches a cursor-sized band, not the screen —
+   while a click, a drag, the menu, or a program's output are structural and
+   still flip the whole desktop, exactly as before. Recomposing the *whole*
+   layer stack clipped to the damage box (rather than diffing pixels) is what
+   keeps overlapping windows and the cursor's vacated trail correct by
+   construction. If a machine cannot give us the buffer, the primitives fall
+   back to drawing the framebuffer directly and every frame repaints whole —
+   degraded, never blank. Each painted frame logs `gfx: flip N rects, AREA px`,
+   and the tests read that number to prove a mouse move really costs a fraction
+   of a full screen instead of trusting the claim.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

@@ -131,7 +131,7 @@ for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "\\[motd\\] segments: .data marker=0x5a5a .bss counter=0" \
             "\\[motd\\] closed. bytes read: " \
             "\\[motd\\] read after close returned -9" \
-            "gfx: framebuffer" "gfx: desktop composited" \
+            "gfx: framebuffer" "gfx: back buffer" "gfx: desktop composited" \
             "mouse: 8042 aux channel live" "mouse: first packet decoded" \
             "shell: hello ran and returned" \
             "shell: running 'ls'" "\\[ls\\] " "entries, " \
@@ -151,6 +151,24 @@ for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "\\[nest\\] exiting pid"; do
     grep -aq "$want" /tmp/wc-bios.log || fail "BIOS log missing: $want"
 done
+
+# v0.1.12: the compositor draws into a RAM back buffer and pushes a frame in one
+# flip. The "gfx: back buffer" line above already proves the buffer exists (a
+# machine that could not allocate one says so and never ships silently); this
+# proves the *first* frame really flipped the whole screen, because there is no
+# prior content to update. The size is read from the kernel's own banner and the
+# area from its own flip line - neither number is written down in this test.
+GBOX=$(grep -aoE 'gfx: desktop composited [0-9]+x[0-9]+' /tmp/wc-bios.log | head -1)
+GW=$(printf '%s' "$GBOX" | sed -n 's/.*composited \([0-9]*\)x.*/\1/p')
+GH=$(printf '%s' "$GBOX" | sed -n 's/.*composited [0-9]*x\([0-9]*\).*/\1/p')
+GFIRST=$(grep -aoE 'gfx: flip [0-9]+ rects, [0-9]+ px' /tmp/wc-bios.log | head -1)
+GN=$(printf '%s' "$GFIRST" | sed -n 's/gfx: flip \([0-9]*\) rects.*/\1/p')
+GA=$(printf '%s' "$GFIRST" | sed -n 's/.*, \([0-9]*\) px/\1/p')
+[ -n "$GW" ] && [ -n "$GH" ] \
+    || fail 'BIOS boot gave no composited size to check the flip against'
+[ "$GN" = "1" ] && [ "$GA" = "$((GW * GH))" ] \
+    || fail "the boot flip was not the whole screen: ${GN:-?} rects, ${GA:-?} px (want 1, $((GW * GH)))"
+echo '    ok: back buffer + a whole-screen boot flip'
 
 # The shell is a process, and that changes what a typed program can do. Until
 # the shell had a slot in the table, `reaper` at the prompt could only be
@@ -630,6 +648,16 @@ python3 tools/qemu-desktop.py windclone.iso minimize
 python3 tools/qemu-desktop.py windclone.iso maxmax
 python3 tools/qemu-desktop.py windclone.iso close
 python3 tools/qemu-desktop.py windclone.iso start
+
+# v0.1.12: the double buffer + damage claim, measured. The scenario reads the
+# kernel's own "gfx: flip <n> rects, <area> px" lines and requires three things:
+# the boot frame flipped the whole screen, a pure mouse move flipped only a
+# cursor-sized band (area under an eighth of the pixels), and a click on a window
+# body flipped everything again - so the smaller blit is real damage tracking and
+# not a broken repaint.
+echo '==> double buffer + damage (mouse move repaints a band, not the screen)'
+python3 tools/qemu-desktop.py windclone.iso damage \
+    || fail 'a mouse move did not repaint only a small region of the screen'
 
 # 6) the start menu is the archive, not a picture of it. Every program the
 #    build puts into /bin must appear as a row (the kernel writes one

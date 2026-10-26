@@ -26,6 +26,10 @@ Scenarios (each one asserts the serial markers the kernel prints):
                window, the window outlives the process (it finalises with the
                exit code but stays open), and closing it is the click that
                finally dismisses it
+    damage     prove the double buffer + damage claim: the boot composite flips
+               the whole screen, a pure mouse move after it flips only a
+               cursor-sized band (a fraction of the pixels), and a click on a
+               window body is structural and flips the whole screen again
 
 Exit status 0 = every step did what the serial log says it did.
 SPDX-License-Identifier: MIT
@@ -158,6 +162,26 @@ def wait_serial(pattern, timeout=25.0):
             return m
         time.sleep(0.25)
     raise SystemExit("serial never said %s (%s)" % (pattern, LOG))
+
+
+def wait_flip_after(mark, pred, timeout=15.0):
+    """Poll the serial log for a `gfx: flip <n> rects, <area> px` line that
+    appears *after* byte offset `mark` and whose (rects, area) satisfies `pred`.
+    Damage is a measured claim, not a fixed string, so the test reads the number
+    out of the log and compares it - offsetting by `mark` keeps the boot flip and
+    earlier frames from satisfying a later step's predicate."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with open(LOG, errors="replace") as fh:
+                tail = fh.read()[mark:]
+        except OSError:
+            tail = ""
+        for n, a in re.findall(r"gfx: flip (\d+) rects, (\d+) px", tail):
+            if pred(int(n), int(a)):
+                return (int(n), int(a))
+        time.sleep(0.2)
+    return None
 
 
 def menu_layout(H):
@@ -299,6 +323,38 @@ def scenario_actions(sc, mon, W, H):
         cx, cy = title_button((PROG_X0, PROG_Y0, pw, PROG_H), 2)   # BTN_CLOSE
         mon.click(cx, cy)
         wait_serial(r"wm: program window closed 'hold' pid %s\n" % pid)
+    elif sc == "damage":
+        # v0.1.12: the compositor draws into a RAM back buffer and pushes only
+        # what changed. The claim has three parts, all read from the kernel's own
+        # "gfx: flip <n> rects, <area> px" lines - nothing about the pixel counts
+        # is guessed, W and H come from the composited banner the caller parsed.
+        text = open(LOG, errors="replace").read()
+        if "gfx: back buffer" not in text:
+            raise SystemExit("no back buffer was allocated - direct-to-framebuffer fallback")
+        flips = [(int(n), int(a)) for n, a in
+                 re.findall(r"gfx: flip (\d+) rects, (\d+) px", text)]
+        if not flips:
+            raise SystemExit("the compositor never reported a flip")
+        # the boot frame has no back buffer to update, so it is whole-screen:
+        # exactly one rectangle covering every pixel
+        n0, area0 = flips[0]
+        if n0 != 1 or area0 != W * H:
+            raise SystemExit("boot flip was not the whole screen: %d rects, %d px"
+                             % (n0, area0))
+        # a pure mouse move (no button) is the case the release is about: it must
+        # repaint only the band the cursor swept, a rounding error against W*H.
+        mark = len(text)
+        mon.move_rel(40, 30)
+        small = wait_flip_after(mark, lambda n, a: a * 8 < W * H)
+        if small is None:
+            raise SystemExit("a mouse move still repainted the whole screen")
+        # a click on a window body is a structural change (z-order/raise), so the
+        # honesty of the smaller blit depends on this still flipping everything.
+        mark = len(open(LOG, errors="replace").read())
+        mon.click(tx + 60, ty + TITLE_H + 60)
+        full = wait_flip_after(mark, lambda n, a: n == 1 and a >= W * H)
+        if full is None:
+            raise SystemExit("a click on a window did not repaint the whole screen")
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -333,6 +389,9 @@ MARKERS = {
                   "wm: routed output pid",
                   "wm: program window pid",
                   "wm: program window closed 'hold'"],
+    # the small-band vs full-screen arithmetic is asserted in the scenario against
+    # the measured areas; these are the two marker lines the claim turns on
+    "damage":    ["gfx: back buffer", "gfx: flip"],
 }
 
 
