@@ -28,6 +28,7 @@
 #include "keyboard.h"
 #include "initrd.h"
 #include "vfs.h"
+#include "tmpfs.h"
 #include "syscall.h"
 #include "usermode.h"
 #include "version.h"
@@ -426,7 +427,93 @@ void kmain(void)
         kassert(vfs_dirent(0, NULL) == WC_EINVAL);
         serial_write("vfs: exists + dirent enumeration matches the archive\n");
 
-        klog("vfs: %u files behind %u descriptor slots", initrd_count(), 8u);
+        /* v0.1.18: the writable half. Everything above is what a boot archive
+         * can honestly answer; this is what a filesystem has to answer on top of
+         * it, and every claim here is checked against a number the kernel
+         * computed rather than a number written down in the test.
+         *
+         * It runs at boot, before a single program exists, for the same reason
+         * the archive checks do: a file layer that only works when a C program
+         * is polite about it is a file layer a program can break. */
+        static const char note[] = "windclone writes files now\n";
+        const uint64_t note_len = sizeof note - 1;
+
+        int64_t tfd = vfs_open_flags("/tmp/selftest.txt",
+                                     WC_O_WRONLY | WC_O_CREAT | WC_O_TRUNC);
+        kassert(tfd >= 3);
+        kassert(vfs_write((int)tfd, note, note_len) == (int64_t)note_len);
+        /* A second write on the same descriptor lands after the first, because
+         * the position lives in the descriptor and moving it is what a save
+         * does: two chunks, one file, no overwrite of the header. */
+        kassert(vfs_write((int)tfd, "twice\n", 6) == 6);
+        kassert(vfs_size((int)tfd) == (int64_t)(note_len + 6));
+        kassert(vfs_close((int)tfd) == 0);
+
+        /* Read it back the way a program would: a plain read-only open of the
+         * same path, with nothing but the name to go on. */
+        int64_t rfd = vfs_open("/tmp/selftest.txt");
+        kassert(rfd >= 3);
+        kassert(vfs_size((int)rfd) == (int64_t)(note_len + 6));
+        char rb[64];
+        int64_t note_got = vfs_read((int)rfd, rb, sizeof rb);
+        kassert(note_got == (int64_t)(note_len + 6));
+        kassert(memcmp(rb, note, (size_t)note_len) == 0);
+        kassert(memcmp(rb + note_len, "twice\n", 6) == 0);
+        /* A descriptor that was opened read-only refuses writes, whatever store
+         * is behind it — and refuses them with EBADF, the answer Linux gives, so
+         * a program written against either behaves the same way. */
+        kassert(vfs_write((int)rfd, "x", 1) == WC_EBADF);
+
+        /* O_EXCL next to O_CREAT is how a program says "do not quietly clobber
+         * what is already there", and the archive is read-only whatever the
+         * caller asked for. */
+        kassert(vfs_open_flags("/tmp/selftest.txt",
+                               WC_O_WRONLY | WC_O_CREAT | WC_O_EXCL) == WC_EEXIST);
+        kassert(vfs_open_flags("/bin/hello", WC_O_WRONLY) == WC_EPERM);
+        kassert(vfs_open("/tmp/no-such-note.txt") == WC_ENOENT);
+
+        /* One listing, two stores. The writable files come first, so the count
+         * is the archive's plus the one file this check just made, and entry 0
+         * is a name that exists nowhere in the tar. */
+        unsigned merged = 0;
+        while (vfs_dirent(merged, &dent) == 0)
+            merged++;
+        kassert(merged == initrd_count() + 1);
+        kassert(vfs_dirent(0, &dent) == 0);
+        kassert(strcmp(dent.name, "tmp/selftest.txt") == 0);
+        kassert(vfs_exists("/tmp/selftest.txt") == 1);
+        serial_write("vfs: merged enumeration lists the store and the archive\n");
+
+        /* The stale-descriptor check, and the reason tmpfs hands out a
+         * generation as well as a slot: this descriptor is open on a file that
+         * is about to stop existing, and a *different* file is about to be
+         * created in the very same pool slot. Reading through rfd after that
+         * must not return the new file's bytes - an fd that outlives its file
+         * and starts reporting somebody else's is not a bug in a corner case,
+         * it is a data leak through a number a program still thinks is valid. */
+        kassert(tmpfs_remove("tmp/selftest.txt") == 0);
+        kassert(vfs_read((int)rfd, rb, sizeof rb) == WC_EBADF);
+        kassert(vfs_size((int)rfd) == WC_EBADF);
+        kassert(vfs_open("/tmp/selftest.txt") == WC_ENOENT);
+        kassert(tmpfs_create("tmp/recycled.txt") >= 0);
+        kassert(vfs_read((int)rfd, rb, sizeof rb) == WC_EBADF);
+        /* Closing still works: a descriptor has to be releasable even when the
+         * file behind it is gone, or the slot leaks. */
+        kassert(vfs_close((int)rfd) == 0);
+        kassert(tmpfs_remove("tmp/recycled.txt") == 0);
+        kassert(tmpfs_count() == 0);
+
+        /* Back to the archive's own number, which is the claim the release makes
+         * about its own footprint: the self-check leaves the store empty, so no
+         * listing, menu row or program's behaviour changes because this ran. */
+        unsigned after = 0;
+        while (vfs_dirent(after, &dent) == 0)
+            after++;
+        kassert(after == initrd_count());
+        serial_write("tmpfs: write, read-back, eexist, eperm and stale-fd checks passed\n");
+
+        klog("vfs: %u files behind %u descriptor slots, plus %u tmpfs slots",
+             initrd_count(), 8u, (unsigned)TMPFS_MAX_FILES);
         serial_write("step: vfs ok\n");
     } else {
         serial_write("initrd: no tar module found - ISO built without "

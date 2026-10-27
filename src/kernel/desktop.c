@@ -613,8 +613,14 @@ static void draw_window(const struct window *w, int focus)
 #define MENU_ITEM_H   22
 #define MENU_FOOTER_H 26
 #define MENU_GAP      6          /* air between the panel and the taskbar */
-#define MENU_MAX      16         /* rows the array can hold; menu_scan() also
-                                  * caps that by what the screen has room for */
+#define MENU_MAX      24         /* rows the array can hold; menu_scan() also
+                                  * caps that by what the screen has room for.
+                                  * The number has to stay above the count of
+                                  * programs in /bin: tools/local-test.sh
+                                  * requires a row for every USER_BINS entry and
+                                  * `hidden 0`, so adding a seventeenth program
+                                  * without raising this is a failing test, not a
+                                  * menu that quietly drops one. */
 #define MENU_NAME_MAX 24
 
 /* Not a list written in this file: every row is a /bin entry of the initrd,

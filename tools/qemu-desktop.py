@@ -48,6 +48,15 @@ Scenarios (each one asserts the serial markers the kernel prints):
                screen and it tiles as a half, then drag the tiled window to the
                top-right corner and it tiles as a quarter. The kernel logs the
                zone and the rect it applied, and the test asserts that geometry
+    filewrite  prove the writable file layer end-to-end from the keyboard: type
+               `save write demo <note>` so one process puts bytes in /tmp, then
+               `save read demo` so a *different* pid opens the same path and
+               prints the note back. The test checks the writer's byte count,
+               the reader's, that the two pids differ, and that the note's own
+               text sits between the reader's two lines (the shell never echoes
+               a typed command to the serial port, so nothing else put it there),
+               then `save list` so a third process sees the name and size through
+               SYS_GETDIRENT's merged enumeration
 
 Exit status 0 = every step did what the serial log says it did.
 SPDX-License-Identifier: MIT
@@ -114,6 +123,17 @@ def last_cursor():
     if not hits:
         return None
     return int(hits[-1])
+
+
+def read_log():
+    """The whole serial log as text, or "" before the first byte lands. Every
+    `last_*` reader above and every cross-line assertion below works from this,
+    and none of them invents a number: the kernel's own lines are the input."""
+    try:
+        with open(LOG, errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return ""
 
 
 def last_snap():
@@ -566,6 +586,58 @@ def scenario_actions(sc, mon, W, H):
         want = (SNAP_TR, W // 2, work // 2, W // 2, 0)
         if s != want:
             raise SystemExit("top-right snap %r, want %r" % (s, want))
+    elif sc == "filewrite":
+        # v0.1.18: the writable half of the file layer, driven from a real
+        # keyboard. One process writes a note and dies; a *second* process,
+        # with a different pid and no memory of the first, opens the same path
+        # and prints those bytes back. That is what makes it a file rather than
+        # a variable the kernel remembers.
+        #
+        # The claim this scenario reads is not "the kernel logged a number": the
+        # note's own text has to appear in the log with nothing left that put it
+        # there. The shell never echoes a typed line to the serial port (its
+        # put_line() writes to the terminal surface only) and launch() logs just
+        # argv[0], so the bytes between the reader's two lines came out of the
+        # store and nowhere else.
+        note = "hello from the mouse"
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal, the
+                                                     # way `shot` does
+        mon.type_text("save write demo " + note + "\n")
+        m = wait_serial(r"save: wrote (\d+) bytes /tmp/demo\.txt pid (\d+)")
+        wrote, wpid = int(m.group(1)), int(m.group(2))
+        if wrote != len(note) + 1:
+            raise SystemExit("the store kept %d bytes, want %d (%d of text plus "
+                             "a newline)" % (wrote, len(note) + 1, len(note)))
+
+        mon.type_text("save read demo\n")
+        m = wait_serial(r"save: opening /tmp/demo\.txt pid (\d+)")
+        rpid, opened_at = int(m.group(1)), m.end()
+        m = wait_serial(r"save: read back (\d+) bytes /tmp/demo\.txt pid (\d+)")
+        back, bpid = int(m.group(1)), int(m.group(2))
+        if back != wrote:
+            raise SystemExit("a second process read %d bytes back; the writer "
+                             "wrote %d" % (back, wrote))
+        if rpid == wpid or bpid == wpid:
+            raise SystemExit("the reader is the writer's own process (pid %d): "
+                             "nothing crossed a process boundary" % rpid)
+        between = read_log()[opened_at:m.start()]
+        if note not in between:
+            raise SystemExit("the note's bytes never landed between the reader's "
+                             "two lines: %r" % between[:160])
+
+        # And the directory: SYS_GETDIRENT now spans both stores, so a third
+        # process has to see the note by name with the size the writer reported.
+        mon.type_text("save list\n")
+        m = wait_serial(r"save: listed (\d+) files in the store")
+        if int(m.group(1)) != 1:
+            raise SystemExit("the store listed %s files, want exactly the one "
+                             "this run wrote" % m.group(1))
+        m = wait_serial(r"save: tmp/demo\.txt\s+(\d+)")
+        if int(m.group(1)) != wrote:
+            raise SystemExit("the directory entry says %s bytes, the writer "
+                             "wrote %d" % (m.group(1), wrote))
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -615,6 +687,12 @@ MARKERS = {
     # the half/quarter geometry is asserted in the scenario against the rect the
     # kernel logged; this marker is what a snap turns on
     "snap":      ["wm: snapped"],
+    # the byte counts, the pid boundary and the note's own text between the
+    # reader's two lines are all asserted in the scenario; these markers are the
+    # three steps that claim rests on - a write that landed, a read that came
+    # back from another process, and a store the boot said is RAM-only
+    "filewrite": ["tmpfs: writable store live", "save: wrote",
+                  "save: read back"],
 }
 
 

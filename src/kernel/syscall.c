@@ -99,17 +99,20 @@ static int64_t sys_read(uint64_t fd, uint64_t buf, uint64_t len)
     return vfs_read((int)fd, (void *)(uintptr_t)buf, len);
 }
 
-/* open(path) — copy the name out first, then resolve it. */
-static int64_t sys_open(uint64_t upath)
+/* open(path) — copy the name out first, then resolve it.
+ *
+ * The copy is the security-relevant part and it is shared with open2 below, so
+ * it lives in one function: a program must not be able to make the kernel read a
+ * path that changes underneath it, and it must not be able to trip a fault by
+ * pointing at a page that ends before its string does. */
+static int64_t copy_user_path(uint64_t upath, char *path, size_t cap)
 {
-    char path[USER_PATH_MAX];
-
     if (!user_ptr_ok(upath, 1, 0))
         return WC_EFAULT;
 
     size_t i = 0;
     int terminated = 0;
-    for (; i + 1 < USER_PATH_MAX; i++) {
+    for (; i + 1 < cap; i++) {
         /* Re-check per byte rather than once for the whole cap: a 3-byte name
          * at the end of a page must not be rejected because the 125 bytes
          * after its NUL happen to be unmapped. */
@@ -122,14 +125,39 @@ static int64_t sys_open(uint64_t upath)
         }
     }
     if (!terminated) {
-        if (i + 1 >= USER_PATH_MAX)
+        if (i + 1 >= cap)
             return WC_ENAMETOOLONG;
         return WC_EFAULT;          /* the mapping ended before the NUL did */
     }
     if (i == 0)
         return WC_EINVAL;
+    return (int64_t)i;
+}
 
+static int64_t sys_open(uint64_t upath)
+{
+    char path[USER_PATH_MAX];
+
+    int64_t n = copy_user_path(upath, path, sizeof path);
+    if (n < 0)
+        return n;
     return vfs_open(path);
+}
+
+/* open2(path, flags) — the same border crossing with the intent attached. The
+ * flags argument is a *number*, so the rule is the other one: clamp and mask,
+ * never trust. Anything outside the WC_O_* set is dropped here rather than
+ * passed on, so a program cannot turn an unimplemented bit into behaviour the
+ * VFS did not choose. */
+static int64_t sys_open2(uint64_t upath, uint64_t flags)
+{
+    char path[USER_PATH_MAX];
+
+    int64_t n = copy_user_path(upath, path, sizeof path);
+    if (n < 0)
+        return n;
+    return vfs_open_flags(path, flags & (WC_O_ACCMODE | WC_O_CREAT |
+                                         WC_O_TRUNC | WC_O_EXCL));
 }
 
 static int64_t sys_close(uint64_t fd)
@@ -188,27 +216,9 @@ static int64_t sys_spawn(uint64_t upath, uint64_t argc, uint64_t uargv)
     if (!proc_scheduler_active())
         return WC_EPERM;
 
-    if (!user_ptr_ok(upath, 1, 0))
-        return WC_EFAULT;
-
-    size_t i = 0;
-    int terminated = 0;
-    for (; i + 1 < USER_PATH_MAX; i++) {
-        if (!user_ptr_ok(upath + i, 1, 0))
-            break;
-        path[i] = *(const char *)(uintptr_t)(upath + i);
-        if (path[i] == '\0') {
-            terminated = 1;
-            break;
-        }
-    }
-    if (!terminated) {
-        if (i + 1 >= USER_PATH_MAX)
-            return WC_ENAMETOOLONG;
-        return WC_EFAULT;
-    }
-    if (i == 0)
-        return WC_EINVAL;
+    int64_t name_len = copy_user_path(upath, path, sizeof path);
+    if (name_len < 0)
+        return name_len;
 
     int n = (int)argc;
     if (n <= 0) {
@@ -257,6 +267,15 @@ void syscall_handler(struct syscall_frame *f)
 
     case SYS_OPEN:
         f->rax = (uint64_t)sys_open(f->rdi);
+        break;
+
+    case SYS_OPEN2:
+        /* rsi is the caller's flags word. It is only ever read here, never by
+         * SYS_OPEN, which is the whole reason this call needed a new number: a
+         * binary built before v0.1.18 leaves garbage in rsi, and garbage that
+         * means "O_CREAT" would be a file appearing in someone else's
+         * filesystem. */
+        f->rax = (uint64_t)sys_open2(f->rdi, f->rsi);
         break;
 
     case SYS_CLOSE:

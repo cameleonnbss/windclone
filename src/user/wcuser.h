@@ -68,6 +68,26 @@ static inline long wc_open(const char *path)
     return wc_call1(SYS_OPEN, (long)path);
 }
 
+/* The same, with intent. `flags` is the WC_O_* set: 0 for read-only (exactly
+ * what wc_open() does), WC_O_WRONLY | WC_O_CREAT | WC_O_TRUNC to replace a file,
+ * WC_O_WRONLY | WC_O_CREAT without the trunc to write it from byte 0 again (there
+ * is no lseek() and no O_APPEND yet, so a descriptor always starts at 0 and a
+ * shorter new content leaves the old tail past the end of what was written —
+ * which is why saving wants O_TRUNC).
+ *
+ * This is SYS_OPEN2 and not a second argument on wc_open(), because a program
+ * built before this call existed sets rdi and leaves rsi alone: if the old number
+ * had grown a parameter, that leftover register would decide whether the program
+ * was about to overwrite a file. Errors worth handling: -WC_ENOENT (no such
+ * file, and O_CREAT was not asked for), -WC_EPERM (the initrd has that name and
+ * it is read-only), -WC_EEXIST (O_CREAT | O_EXCL on a name already there),
+ * -WC_ENOSPC (the store is full), -WC_EMFILE (eight descriptors are already
+ * open in this process table). */
+static inline long wc_open_flags(const char *path, long flags)
+{
+    return wc_call2(SYS_OPEN2, (long)path, flags);
+}
+
 static inline long wc_close(long fd)
 {
     return wc_call1(SYS_CLOSE, fd);

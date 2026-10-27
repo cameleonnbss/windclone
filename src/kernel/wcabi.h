@@ -74,6 +74,29 @@
  * log line cannot testify to. */
 #define SYS_GETPPID 12
 
+/* open(path, flags) — the thirteenth call, and the reason the twelfth one is
+ * still twelve. SYS_OPEN above takes one argument, and a program compiled
+ * against it sets only rdi: rsi is whatever the compiler had lying around, so
+ * giving SYS_OPEN a second, *meaningful* argument would make existing binaries
+ * create files or open for writing by accident, depending on garbage. A new
+ * number is the only safe way to add a parameter, which is exactly what
+ * "frozen" is for. */
+#define SYS_OPEN2 13
+
+/* --- open flags (the argument of SYS_OPEN2) ----------------------------- */
+/* Linux's values, with the same split Linux uses: the low two bits select the
+ * access mode, the rest are bit flags. A program that wants to create a file
+ * asks for O_WRONLY | O_CREAT | O_TRUNC; nothing here implements O_APPEND,
+ * O_SYNC or O_NONBLOCK, and unknown bits are ignored rather than refused so a
+ * later addition cannot break an older caller that happened to pass one. */
+#define WC_O_RDONLY   0       /* ask for nothing: the old SYS_OPEN behaviour */
+#define WC_O_WRONLY   1
+#define WC_O_RDWR     2
+#define WC_O_ACCMODE  3       /* mask for the three bits above               */
+#define WC_O_CREAT    0x40    /* 0100: make the file if it is not there      */
+#define WC_O_TRUNC    0x200   /* 01000: throw away what is already in it     */
+#define WC_O_EXCL     0x400   /* 04000: fail if O_CREAT finds it already there */
+
 /* --- signals ------------------------------------------------------------ */
 /* Only SIGKILL exists so far, and only as the argument of kill(): there is no
  * delivery, no masking, no handler. It is Linux's number because Linux's
@@ -107,8 +130,10 @@ struct wc_dirent {
 #define WC_EBADF    (-9)
 #define WC_ECHILD   (-10)               /* no children to wait for   */
 #define WC_EFAULT   (-14)
+#define WC_EEXIST   (-17)               /* the name is already taken    */
 #define WC_EINVAL   (-22)
 #define WC_EMFILE   (-24)
+#define WC_ENOSPC   (-28)               /* the writable store is full   */
 #define WC_ENAMETOOLONG (-36)
 #define WC_ENOSYS   (-38)
 #define WC_ERANGE   (-75)

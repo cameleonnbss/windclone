@@ -84,6 +84,8 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       files are read-only, so a `write` to a file descriptor is refused
       instead of silently succeeding. The kernel's own ELF loader reads
       programs through this same door, and so does ring 3
+      *(read-only for four releases: `tmpfs` and `SYS_OPEN2` give the layer a
+      writable half in v0.1.18 — see Phase 5, "A file layer that can write")*
 - [x] Ring 3: our own GDT with DPL-3 code/data selectors, a TSS so an
       interrupt taken in userland lands on a kernel stack, `iretq` entry,
       and a DPL-3 `int 0x80` gate — the first privilege boundary in the
@@ -386,6 +388,68 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
           code is collected by the shell rather than by a dedicated `init`, and the
           run is still synchronous. Deeper orphans (a child whose grandparent also
           dies) and a real `/bin/init` are Phase 6+ work, not claimed here.
+- [x] **A file layer that can write (v0.1.18).** Up to here `write()` on a file
+      descriptor was *refused*, and that refusal was the honest answer: the
+      initrd is a boot archive whose files are slices of RAM the bootloader
+      handed over, so a changed byte had nowhere to go. Any "text editor" built
+      on that would have been a screenshot of a save dialog. This is the store
+      that makes `write` mean something, and it is deliberately small:
+      - **`tmpfs`** (`src/kernel/tmpfs.c`) — a fixed pool of 8 × 4 KiB named
+        blobs in the kernel's own `.bss`. Static on purpose: `vfs.c`'s rule is
+        that nothing allocates on the syscall path, because a syscall runs in
+        whatever interrupt state the program left. **RAM only — a reboot
+        forgets every byte here**, and no test claims otherwise; persistence
+        across boots needs a block device driver first (ATA or NVMe — there is
+        PCI enumeration but no disk yet), and that is not this release's work.
+      - **A thirteenth syscall, `SYS_OPEN2` (13), not a second argument on
+        `SYS_OPEN`.** A binary built against `open(path)` sets `rdi` and leaves
+        `rsi` alone, so growing the old call's parameter list would have made
+        whatever the compiler had lying around decide whether the program was
+        about to overwrite a file. Flags are Linux's (`O_CREAT` 0100,
+        `O_TRUNC` 01000, `O_EXCL` 04000); unknown bits are masked off at the
+        border rather than passed down, so a program cannot invent behaviour the
+        VFS did not choose. No `lseek`, no `O_APPEND`: an untested, unused API
+        surface is refused, not shipped.
+      - **Two stores, one path, and the archive always wins.** `open()` looks in
+        the initrd first, then in `tmpfs`, so a program cannot shadow `/bin/hello`
+        by saving a file under that name — the name never reaches the writable
+        side. `O_WRONLY` on an archive path answers `-EPERM` (a boot archive is
+        not a disk) and writing to a read-only descriptor answers `-EBADF`, which
+        is what Linux says too. `vfs_exists()` asks both halves and
+        `vfs_dirent()` enumerates the store *then* the archive, so `ls` and the
+        start menu see one filesystem instead of one half of it. Menu rows are
+        filtered on the `bin/` prefix, so a saved note can never become a
+        launchable program.
+      - **A generation counter per pool slot.** A slot index is a position in an
+        array and a position can be recycled, so a descriptor left open on a
+        removed file would otherwise start reporting the *next* file's bytes —
+        not a corner-case bug but a data leak through a number a program still
+        believes is valid. `live_file()` is the single gate every read, write and
+        `size` passes through; `vfs_close()` deliberately bypasses it, because a
+        descriptor has to be releasable even when the file behind it is gone or
+        the slot leaks.
+      - **The evidence runs at boot, before a program exists**: write two chunks,
+        read them back through a fresh read-only `open()` of the same path,
+        require `-EBADF` on a write to it, `-EEXIST` on `O_CREAT | O_EXCL`,
+        `-EPERM` on `/bin/hello`, `-ENOENT` on a name nobody made, one merged
+        directory listing of `initrd_count() + 1` entries whose *first* row is a
+        path that exists nowhere in the tar, then remove the file and require the
+        still-open descriptor to answer `-EBADF` after a *different* file has been
+        created in the same slot. The check leaves the store empty, so no listing,
+        menu row or program's behaviour shifts because it ran.
+      - **And the userland half, from a real keyboard** (`/bin/save`, scenario
+        `qemu-desktop.py filewrite`): one process writes a note and dies, a second
+        process with a different pid opens the same path and prints those bytes
+        back, a third sees the name and size through the merged `getdirent`. The
+        scenario compares both byte counts, requires the two pids to differ, and
+        requires the note's own text to sit *between* the reader's two lines —
+        the shell never echoes a typed command to the serial port, so nothing but
+        the store can have put it there.
+      - The cost, written down: eight descriptors and eight files, 4 KiB each, no
+        directories (names are flat, `tmp/x.txt` is one string), no `unlink` in
+        userland, no permissions, no disk. That is what makes the roadmap's text
+        editor and code editor *possible*; it is not them, and this release does
+        not claim to have shipped an editor.
 
 ## Phase 6 — Language expansion ⏳
 *Goal: use the right tool per layer (the "asm/C/C++/Rust" promise).*
@@ -534,6 +598,12 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       needs its own damage rect and is its own next step.
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
+- [ ] A text editor and a code editor as program windows — both are blocked on
+      the file layer being able to *write*, which v0.1.18 shipped, and on
+      userland being able to read the keyboard, which it still cannot (fd 0
+      answers `-ENOSYS`; the shell owns every IRQ1 byte)
+- [ ] A block device driver (ATA or NVMe), so `tmpfs` can stop being the only
+      place a byte a program wrote can go
 
 ## Phase 9 — Beyond x86 ⏳
 - [ ] AArch64 + RISC-V boot (Limine supports both)

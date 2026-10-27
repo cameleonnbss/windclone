@@ -126,6 +126,9 @@ for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "vfs: descriptor table live" "step: vfs ok" \
             "vfs: read-back, offset, ebadf and enoent checks passed" \
             "vfs: exists + dirent enumeration matches the archive" \
+            "tmpfs: writable store live" \
+            "vfs: merged enumeration lists the store and the archive" \
+            "tmpfs: write, read-back, eexist, eperm and stale-fd checks passed" \
             "elf64, entry" "hello from ring 3" \
             "step: userland ok (elf64 + ring 3 round trip)" \
             "\\[motd\\] segments: .data marker=0x5a5a .bss counter=0" \
@@ -574,6 +577,8 @@ else
                 "log ring (most recent):" "step: initrd ok" \
                 "initrd: /etc/motd" "step: vfs ok" \
                 "vfs: exists + dirent enumeration matches the archive" \
+                "tmpfs: writable store live" \
+                "tmpfs: write, read-back, eexist, eperm and stale-fd checks passed" \
                 "step: userland ok (elf64 + ring 3 round trip)" \
                 "proc: shell is pid 1" \
                 "proc: spawned /bin/tick as pid" \
@@ -673,6 +678,18 @@ python3 tools/qemu-desktop.py windclone.iso cursor \
 echo '==> window snapping (drag a title bar to an edge: halves, quarters)'
 python3 tools/qemu-desktop.py windclone.iso snap \
     || fail 'a window did not snap to a screen edge when dragged by its title bar'
+
+# v0.1.18: the file layer can write. The boot self-check above proves the kernel
+# half against its own numbers; this proves the userland half the way a user
+# does - real IRQ1 keystrokes at the prompt. One `save` process writes a note and
+# exits, a second one (different pid) reads those bytes back, and a third sees
+# the name through the merged directory. The scenario compares the two byte
+# counts and the two pids, and requires the note's text between the reader's own
+# lines: the shell never echoes a typed command to the serial port, so nothing
+# but the store can have put it there.
+echo '==> writable files (write a note in one process, read it in another)'
+python3 tools/qemu-desktop.py windclone.iso filewrite \
+    || fail 'a program could not write a file another program could read'
 
 # v0.1.12: the double buffer + damage claim, measured. The scenario reads the
 # kernel's own "gfx: flip <n> rects, <area> px" lines and requires three things:

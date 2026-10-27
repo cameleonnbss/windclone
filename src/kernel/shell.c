@@ -183,6 +183,7 @@ static void cmd_help(void)
     put_line("  MOTD           LIT /ETC/MOTD VIA LE VFS");
     put_line("  WHOAMI         MON PID - ON NE TUE PAS PID 1");
     put_line("  REAPER         ENFANT, KILL, WAIT - DANS CET ORDRE");
+    put_line("  SAVE           ECRIT OU LIT UN FICHIER DANS /TMP");
     put_line("CE QUE TU LANCES ICI EST UN PROCESSUS: PID REEL,");
     /* The shell's pid is printed as the number the table holds, not as a "1"
      * written into this file: the claim on the screen is then whatever the
