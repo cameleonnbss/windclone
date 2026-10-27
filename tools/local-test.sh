@@ -658,6 +658,14 @@ echo '==> window resizing (drag a border; min size; desktop clamp)'
 python3 tools/qemu-desktop.py windclone.iso resize \
     || fail 'a window could not be resized by dragging its border'
 
+# v0.1.16: the pointer changes shape over a draggable border. The scenario hovers
+# the status window's left edge, its bottom-right corner, and its body, and
+# requires the kernel to log the border mask it is showing (and a plain arrow
+# once off the border) — the same geometry a click would resize from.
+echo '==> resize cursor (the pointer changes over a border)'
+python3 tools/qemu-desktop.py windclone.iso cursor \
+    || fail 'the cursor did not change shape over a window border'
+
 # v0.1.12: the double buffer + damage claim, measured. The scenario reads the
 # kernel's own "gfx: flip <n> rects, <area> px" lines and requires three things:
 # the boot frame flipped the whole screen, a pure mouse move flipped only a

@@ -504,10 +504,17 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       status window, grows its bottom-right corner, shrinks it far past the floor
       and requires it to stop at `MIN_W`×`MIN_H`, then grabs the top edge and
       grows it back taller without changing its width — all read back out of the
-      kernel's own `wm: window resized WxH` line. What is still open here: a
-      resize cursor that changes shape over a border (the arrow is one glyph
-      today; directional cursors need new art and a hover state), which is its
-      own next step.
+      kernel's own `wm: window resized WxH` line.
+- [x] Resize cursor (v0.1.16): the pointer changes to a double-headed arrow over
+      a draggable border — vertical on the top/bottom edges, horizontal on the
+      left/right, and a diagonal on each corner — and stays a plain arrow anywhere
+      a click would not resize. One hover hit-test (`hover_resize_edge`) walks the
+      stack front to back and lets the frontmost *visible* window under the point
+      decide, so the cursor promises exactly what the click delivers; a maximised
+      window (which fills the desktop and cannot resize) keeps the arrow. Proven
+      headlessly by `tools/qemu-desktop.py cursor`: it hovers the status window's
+      left edge, its bottom-right corner and its body, and reads the border mask
+      the kernel logs on each hover change — the geometry, not a screenshot.
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
 

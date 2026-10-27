@@ -41,6 +41,9 @@ Scenarios (each one asserts the serial markers the kernel prints):
                past the floor and require it to stop at the minimum size, then
                grab the top edge (above the title-bar buttons) and grow it back
                taller without touching its width
+    cursor     prove the resize cursor: hover the status window's left edge, its
+               bottom-right corner, and its body, and require the kernel to log
+               the border mask it is showing (a plain arrow off the border)
 
 Exit status 0 = every step did what the serial log says it did.
 SPDX-License-Identifier: MIT
@@ -91,6 +94,22 @@ def last_resized(marker="wm: window resized "):
         return None
     w, h = hits[-1]
     return (int(w), int(h))
+
+
+def last_cursor():
+    """Return the mask from the LAST `wm: cursor resize <n>` line, or None. The
+    kernel logs a border mask only when the hover changes, so reading the last
+    one gives the cursor the pointer is showing right now. The numbers are the
+    kernel's RS_* bits: LEFT=1, RIGHT=2, TOP=4, BOTTOM=8, 0 = plain arrow."""
+    try:
+        with open(LOG, errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    hits = re.findall(r"wm: cursor resize (\d+)", text)
+    if not hits:
+        return None
+    return int(hits[-1])
 
 
 class Monitor:
@@ -470,6 +489,31 @@ def scenario_actions(sc, mon, W, H):
         if not (h3 > MIN_H and w3 == MIN_W):
             raise SystemExit("top-edge resize wrong: %dx%d, want height > %d, "
                              "width unchanged at %d" % (w3, h3, MIN_H, MIN_W))
+    elif sc == "cursor":
+        # v0.1.16: the pointer changes shape over a draggable border. Raise the
+        # status window, hover its left edge, then its bottom-right corner, then
+        # its body. The kernel logs the border mask it is showing on every change
+        # — the same geometry a click would resize from, read from the log rather
+        # than a screenshot, so this proves the hit-test and not just the art.
+        sx, sy = 116, 88
+        LEFT, RIGHT, BOTTOM = 1, 2, 8
+        mon.click(sx + 40, sy + TITLE_H + 40)              # raise it; arrow inside
+        mon.move_to(sx + 2, sy + STATUS_H // 2)            # left edge
+        time.sleep(0.5)
+        m = last_cursor()
+        if m != LEFT:
+            raise SystemExit("left edge showed cursor %r, want %d (RS_LEFT)" % (m, LEFT))
+        mon.move_to(sx + STATUS_W - 2, sy + STATUS_H - 2)  # bottom-right corner
+        time.sleep(0.5)
+        m = last_cursor()
+        if m != (RIGHT | BOTTOM):
+            raise SystemExit("corner showed cursor %r, want %d (RIGHT|BOTTOM)"
+                             % (m, RIGHT | BOTTOM))
+        mon.move_to(sx + STATUS_W // 2, sy + STATUS_H // 2)  # body -> plain arrow
+        time.sleep(0.5)
+        m = last_cursor()
+        if m != 0:
+            raise SystemExit("body showed cursor %r, want 0 (arrow)" % (m,))
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -513,6 +557,9 @@ MARKERS = {
     # the grow/shrink-to-floor arithmetic is asserted in the scenario against
     # the kernel's own resize line; this marker is what that line turns on
     "resize":    ["wm: window resized"],
+    # the per-position mask is asserted in the scenario; this marker proves the
+    # kernel reports which border the pointer is hovering (the resize cursor)
+    "cursor":    ["wm: cursor resize"],
 }
 
 

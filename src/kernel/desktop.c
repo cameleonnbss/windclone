@@ -75,6 +75,8 @@ enum { BTN_MIN, BTN_MAX, BTN_CLOSE, BTN_NONE };
 /* Which borders a press grabbed, as a bitmask: a corner sets two bits. The
  * body pass never produces RS_TOP (the title bar owns that edge this release). */
 enum { RS_NONE = 0, RS_LEFT = 1, RS_RIGHT = 2, RS_TOP = 4, RS_BOTTOM = 8 };
+/* Which cursor glyph draw_cursor() paints for a border mask (cursor_shape_id). */
+enum { CUR_ARROW, CUR_NS, CUR_EW, CUR_NWSE, CUR_NESW };
 
 /* Three windows are fixed (status, trash, terminal) and live at indices 0..2,
  * their kind equalling their index. Beyond them is a pool of program windows —
@@ -106,6 +108,7 @@ static int order[WIN_TOTAL] = { WIN_STATUS, WIN_TERM, WIN_TRASH,
 static int dragging, grab_dx, grab_dy, drag_win;
 static int resizing, resize_win, resize_mask, resize_changed;
 static int prev_left;
+static int prev_cursor_mask;   /* last border mask the cursor showed (for the edge) */
 static int laid_out;
 
 /* The cursor's previous position, so the box it is leaving is always part of
@@ -229,16 +232,123 @@ static void set_maximised(struct window *w, int on, int W, int H)
 
 /* --- painting ---------------------------------------------------------- */
 
-static void draw_cursor(int x, int y)
+/* Resize cursors. Windows changes the pointer to a double-headed arrow over a
+ * draggable border; these are the four directions. A border grab (see
+ * resize_edge_at / hover_resize_edge) picks one, so what the cursor shows is
+ * exactly what a click there would do. '#' is the dark outline, 'W' the fill,
+ * '.' transparent — same encoding as the arrow above. */
+static const char *const cursor_ns[] = {
+    ".....##.....",
+    "....####....",
+    "...######...",
+    "....####....",
+    ".....##.....",
+    ".....##.....",
+    ".....##.....",
+    ".....##.....",
+    ".....##.....",
+    ".....##.....",
+    "....####....",
+    "...######...",
+    "....####....",
+    ".....##.....",
+    "............",
+    "............",
+};
+
+static const char *const cursor_ew[] = {
+    "............",
+    "............",
+    "............",
+    "............",
+    "............",
+    "..#......#..",
+    ".#........#.",
+    "############",
+    ".#........#.",
+    "..#......#..",
+    "............",
+    "............",
+    "............",
+    "............",
+    "............",
+    "............",
+};
+
+static const char *const cursor_nwse[] = {   /* "\" — top-left / bottom-right  */
+    "##..........",
+    ".##.........",
+    "..##........",
+    "...##.......",
+    "....##......",
+    ".....##.....",
+    "......##....",
+    ".......##...",
+    "........##..",
+    ".........##.",
+    "..........##",
+    "...........#",
+    "............",
+    "............",
+    "............",
+    "............",
+};
+
+static const char *const cursor_nesw[] = {   /* "/" — top-right / bottom-left  */
+    "..........##",
+    ".........##.",
+    "........##..",
+    ".......##...",
+    "......##....",
+    ".....##.....",
+    "....##......",
+    "...##.......",
+    "..##........",
+    ".##.........",
+    "##..........",
+    "#...........",
+    "............",
+    "............",
+    "............",
+    "............",
+};
+
+static void draw_cursor(int x, int y, int shape)
 {
-    for (int row = 0; row < 16; row++) {
-        const char *line = cursor_shape[row];
+    const char *const *glyph = cursor_shape;
+    if (shape == CUR_NS)        glyph = cursor_ns;
+    else if (shape == CUR_EW)   glyph = cursor_ew;
+    else if (shape == CUR_NWSE) glyph = cursor_nwse;
+    else if (shape == CUR_NESW) glyph = cursor_nesw;
+
+    for (int row = 0; row < CURSOR_H; row++) {
+        const char *line = glyph[row];
         for (int col = 0; line[col] != '\0'; col++) {
             if (line[col] == '#')
                 gfx_pixel(x + col, y + row, gfx_rgb(0x00, 0x00, 0x00));
             else if (line[col] == 'W')
                 gfx_pixel(x + col, y + row, C_WHITE);
         }
+    }
+}
+
+/* Map a border mask to one of the cursors. A single edge is an axis arrow; a
+ * corner is the diagonal it drags along (top-left/bottom-right follow "\",
+ * top-right/bottom-left follow "/"). RS_NONE (and any odd combination) is the
+ * plain arrow, so the pointer only changes where a click really resizes. */
+static int cursor_shape_id(int mask)
+{
+    switch (mask) {
+    case RS_TOP:      case RS_BOTTOM:      case (RS_TOP | RS_BOTTOM):
+        return CUR_NS;
+    case RS_LEFT:     case RS_RIGHT:       case (RS_LEFT | RS_RIGHT):
+        return CUR_EW;
+    case (RS_TOP | RS_LEFT):   case (RS_BOTTOM | RS_RIGHT):
+        return CUR_NWSE;
+    case (RS_TOP | RS_RIGHT):  case (RS_BOTTOM | RS_LEFT):
+        return CUR_NESW;
+    default:
+        return CUR_ARROW;
     }
 }
 
@@ -300,6 +410,36 @@ static int resize_edge_at(const struct window *w, int mx, int my)
     if (my < w->y + RESIZE_EDGE)         m |= RS_TOP;
     if (my >= w->y + w->h - RESIZE_EDGE) m |= RS_BOTTOM;
     return m;
+}
+
+/* Which border, if any, is the pointer hovering? Walk front to back and let the
+ * frontmost *visible* window that contains the point decide — the same window a
+ * click would act on, so the cursor promises exactly what the click delivers. A
+ * maximised window fills the desktop and cannot be resized, so it (and only it)
+ * yields the arrow even though it is under the pointer. The title bar offers the
+ * top edge only in the thin strip above its buttons; the body offers any border. */
+static int hover_resize_edge(int mx, int my)
+{
+    for (int i = WIN_TOTAL - 1; i >= 0; i--) {
+        struct window *w = &wins[order[i]];
+        if (!w->open || w->min)
+            continue;
+        if (mx < w->x || mx >= w->x + w->w || my < w->y || my >= w->y + w->h)
+            continue;
+        if (w->max)
+            return RS_NONE;
+        if (my < w->y + TITLE_H) {
+            if (my < w->y + RESIZE_EDGE) {
+                int m = RS_TOP;
+                if (mx < w->x + RESIZE_EDGE)         m |= RS_LEFT;
+                if (mx >= w->x + w->w - RESIZE_EDGE) m |= RS_RIGHT;
+                return m;
+            }
+            return RS_NONE;
+        }
+        return resize_edge_at(w, mx, my);
+    }
+    return RS_NONE;
 }
 
 static void draw_logo(int x, int y, int pane, int gap)
@@ -1034,6 +1174,15 @@ void desktop_frame(void)
     if (press)
         handle_press(mx, my, W, H);
 
+    /* Border under the pointer now that drag/resize/press may have moved a
+     * window's edges. Say so only on a change, so hovering a border does not
+     * spam the log, and keep the arrow while the start menu covers the click. */
+    int cur_mask = menu_open ? RS_NONE : hover_resize_edge(mx, my);
+    if (cur_mask != prev_cursor_mask) {
+        klog("wm: cursor resize %d", cur_mask);
+        prev_cursor_mask = cur_mask;
+    }
+
     /* Decide what changed since the last flip. A structural change - the first
      * frame, a click, a drag, the menu opening or closing, or a machine with no
      * back buffer to update - repaints the whole desktop. Everything else is a
@@ -1114,7 +1263,7 @@ void desktop_frame(void)
     draw_taskbar(W, H);
     if (menu_open)
         draw_menu(H);                  /* above the windows: it asked for them */
-    draw_cursor(mx, my);
+    draw_cursor(mx, my, cursor_shape_id(cur_mask));
 
     /* Push the recomputed region to the display in one pass, and say how big
      * that region was - the honest number the tests read. A structural frame
