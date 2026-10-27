@@ -262,6 +262,26 @@ void syscall_handler(struct syscall_frame *f)
         break;
 
     case SYS_READ:
+        /* fd 0 is the keyboard, and it is the one descriptor a program can *wait*
+         * for. That is why the call is made here instead of inside sys_read(): a
+         * function that must return a number cannot also save the caller's frame
+         * and switch away, and proc_input_read() does exactly that when the keys
+         * have not arrived yet. The buffer is validated against *this* process's
+         * page tables before anything can block — a bad pointer is the caller's
+         * -WC_EFAULT, never a kernel fault — and the bytes themselves are written
+         * later, under the reader's own CR3, by wakeup_deliver(). Every other fd
+         * keeps the ordinary non-blocking path, including fd 0 outside the
+         * scheduler, where there is no table to sleep in and read() still answers
+         * -WC_ENOSYS. */
+        if (f->rdi == 0) {
+            uint64_t rn = f->rdx > USER_BUF_MAX ? USER_BUF_MAX : f->rdx;
+            if (!user_ptr_ok(f->rsi, rn, 1)) {
+                f->rax = (uint64_t)WC_EFAULT;
+                break;
+            }
+            proc_input_read(f, f->rsi, rn);
+            break;
+        }
         f->rax = (uint64_t)sys_read(f->rdi, f->rsi, f->rdx);
         break;
 

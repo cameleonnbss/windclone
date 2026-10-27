@@ -65,6 +65,13 @@ Scenarios (each one asserts the serial markers the kernel prints):
                a batch file` - a typed line says "from the prompt"). Then the
                three refusals: a missing script, a name that looks like a path
                traversal, and a script that calls another script.
+    typing     prove the keyboard reaches a *program*: type `keys` so /bin/keys
+               launches and blocks in read(0) (the kernel says it is asleep until
+               a keystroke wakes it), then type a word and require the program to
+               print it back exactly, with every byte it delivered summing to the
+               keys typed. The same typing must NOT reach the prompt, and when the
+               program exits the console has to take the keyboard back and run the
+               next word it is given — no click in between.
 
 Exit status 0 = every step did what the serial log says it did.
 SPDX-License-Identifier: MIT
@@ -725,6 +732,70 @@ def scenario_actions(sc, mon, W, H):
                              % m.group(1))
         if count_serial(r"shell: running 'echo' from a batch file") != 2:
             raise SystemExit("the line after a refused nested script did not run")
+    elif sc == "typing":
+        # v0.1.20: the keyboard reaches a *program*. Everything the earlier
+        # scenarios type goes to the prompt; this one hands the same PS/2 bytes
+        # to a process in ring 3 and proves three separate things from the
+        # kernel's own lines: the program slept rather than polled, every byte
+        # arrived (none leaked to the command line, none dropped), and the prompt
+        # came back on its own when the program finished.
+        typed = "hello there"
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+        mon.type_text("keys\n")
+
+        m = wait_serial(r"wm: program window opened 'keys' pid (\d+)")
+        wpid = int(m.group(1))
+        m = wait_serial(r"keys: waiting for keys pid (\d+)")
+        kpid = int(m.group(1))
+        if kpid != wpid:
+            raise SystemExit("the window belongs to pid %d but the reader is "
+                             "pid %d: the keyboard went to somebody else"
+                             % (wpid, kpid))
+        # The claim underneath the whole release: read(0) *slept*. Nothing else
+        # in the table was runnable at that moment, so the scheduler says so, and
+        # it is the idle loop that stays in charge until a key lands.
+        wait_serial(r"asleep until a keystroke wakes it")
+
+        mon.type_text(typed + "\n")
+        m = wait_serial(r"keys: line '([^']*)' len (\d+) pid (\d+)")
+        text, count = m.group(1), int(m.group(2))
+        if text != typed:
+            raise SystemExit("the program read %r, want %r: a keystroke was "
+                             "lost, reordered or decoded wrong" % (text, typed))
+        if count != len(typed):
+            raise SystemExit("the program says its line is %d bytes, it holds "
+                             "%d characters" % (count, len(typed)))
+        if int(m.group(3)) != kpid:
+            raise SystemExit("a different pid finished the line: %s" % m.group(3))
+
+        # Every byte typed is accounted for exactly once. The kernel may deliver
+        # them in several reads — that is scheduling, not a contract — so the
+        # honest claim is the sum, and it has to include the Enter.
+        chunks = [int(c) for c in re.findall(r"keys: got (\d+) bytes pid",
+                                             read_log())]
+        if sum(chunks) != len(typed) + 1:
+            raise SystemExit("the reads delivered %d of the %d bytes typed (%s "
+                             "chunks)" % (sum(chunks), len(typed) + 1, chunks))
+
+        # The other half of the proof: the prompt never saw any of it. A leak
+        # would show up as the shell trying to run "hello".
+        for leak in (r"shell: running 'hello'", r"shell: no program /bin/hello"):
+            if count_serial(leak) != 0:
+                raise SystemExit("typing reached the command line as well: %s"
+                                 % leak)
+
+        # The program ends itself on the newline, its keyboard claim goes back
+        # to the console, and the next word typed is a command again — with no
+        # click in between.
+        m = wait_serial(r"proc: pid (\d+) died holding the keyboard")
+        if int(m.group(1)) != kpid:
+            raise SystemExit("pid %s died holding the keyboard, not the reader "
+                             "%d" % (m.group(1), kpid))
+        wait_serial(r"shell: keys exited with 0")
+        mon.type_text("echo done\n")
+        wait_serial(r"shell: running 'echo' from the prompt")
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -787,6 +858,17 @@ MARKERS = {
     "batchfile": ["tmpfs: writable store live", "save: wrote",
                   "shell: batch file", "shell: running 'echo' from a batch file",
                   "shell: batch ran", "shell: batch refused nested script"],
+    # the line's text, the byte total across reads and the absence of any leak to
+    # the prompt are all asserted in the scenario; these are the lines the claim
+    # turns on - a program that asked for the keyboard, slept until a key landed,
+    # got the whole word typed to it, and handed the keys back when it finished
+    "typing":    ["shell: running 'keys' from the prompt",
+                  "keys: waiting for keys pid",
+                  "asleep until a keystroke wakes it",
+                  "keys: line 'hello there' len 11",
+                  "died holding the keyboard; the console has it back",
+                  "shell: keys exited with 0",
+                  "shell: running 'echo' from the prompt"],
 }
 
 

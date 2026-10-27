@@ -25,4 +25,13 @@ void desktop_frame(void);
  * from the shell's launch path, never from an IRQ. */
 void wm_open_program(int slot, int pid);
 
+/* The pid of the program whose window is on top, or 0 when the keyboard belongs
+ * to the console. The idle loop asks this for every keystroke: a program that has
+ * claimed the keyboard (by calling read(0)) keeps receiving keys only while this
+ * says its pid, so clicking past its window — minimising it, raising another, or
+ * the process dying while its window stays to show an exit code — hands typing
+ * straight back to the prompt. Transfers are one-way here: this reports the
+ * window manager's opinion and never takes or grants a claim itself. */
+int desktop_key_pid(void);
+
 #endif

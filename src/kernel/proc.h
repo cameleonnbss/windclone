@@ -97,6 +97,16 @@ enum proc_state {
 #define SWITCH_EXIT  1
 #define SWITCH_BLOCK 2
 
+/* What a PROC_BLOCKED slot is asleep on, and so what is allowed to wake it.
+ * Without this the one state would mean two different things and `wake_parent()`
+ * would answer a keystroke as if it were a child's death — planting a pid in a
+ * register nobody in read() is waiting for. A sleeper with no reason recorded is
+ * treated as a child waiter, which is what every process blocked before this
+ * field existed. */
+#define BLOCK_NONE   0
+#define BLOCK_CHILD  1               /* asleep in wait(): a child's exit wakes it */
+#define BLOCK_INPUT  2               /* asleep in read(0): a keystroke wakes it  */
+
 /* One process. The context is a whole syscall_frame: for a process that has
  * already run it is what the stub will pop on resume; for one that has not run
  * yet it is a synthetic frame whose rip/rsp land _start on its entry point. */
@@ -118,6 +128,20 @@ struct proc {
     int      wake_pending;          /* 1 = a child's death has already promised
                                      * this wait() its pid; also the guard that
                                      * keeps a second death from overwriting it  */
+    int      blocked_on;            /* BLOCK_* — what a PROC_BLOCKED slot waits
+                                     * for. The wake source has to match it, or a
+                                     * keystroke would answer a wait() and a
+                                     * child's death would answer a read(0).    */
+    uint64_t in_buf;                /* a blocked read(0)'s user buffer, or 0    */
+    uint64_t in_len;                /* bytes that call asked for                */
+    int      in_ready;              /* 1 = a keystroke is waiting for it,
+                                     * 2 = another process took the keyboard and
+                                     * this read comes back with nothing       */
+    int      in_reported;           /* 1 = the "asleep until a keystroke" line has
+                                     * already been said for this process. A reader
+                                     * blocks once per character it is handed, so
+                                     * without this the report is a line per key —
+                                     * noise that hides the one fact it states.   */
     char     name[PROC_NAME_MAX];
 };
 
@@ -170,6 +194,28 @@ int  proc_wait(struct syscall_frame *f, uint64_t uout);
  * cannot be killed twice) or -WC_EPERM (not under the scheduler, so there is
  * no table to kill from). */
 int  proc_kill(int pid, int sig, struct syscall_frame *f);
+
+/* --- the keyboard, seen from the process table -------------------------
+ * The other half of `read(0)`. keyboard.c holds the bytes; these two say what
+ * happens when a process wants them and there are none, which is the difference
+ * between a program that can type and a program that polls. A read with nothing
+ * waiting blocks the caller the way wait() blocks its own — same switch, same
+ * saved frame, same resume — and the answer (the bytes, and how many) is
+ * delivered at the moment the process is actually resumed, under its own page
+ * tables, because that is when its buffer is reachable.
+ *
+ * `proc_input_read` never returns to its caller when it blocks; it returns
+ * through the resume path with rax set to the byte count. A read by a process
+ * that is not under the scheduler answers -WC_ENOSYS, exactly as it did before
+ * this existed: there is no slot to put to sleep, and pretending otherwise
+ * would be a syscall that lies about what it waited for. */
+void proc_input_read(struct syscall_frame *f, uint64_t ubuf, uint64_t len);
+
+/* Put a keystroke-blocked `pid` back in the runnable set. Called from the idle
+ * loop after the byte has already been queued, so the reader wakes with
+ * something to read rather than to find nothing. No-op for any other state or
+ * for a sleeper waiting on a child. */
+void proc_input_wake(int pid);
 
 /* The pid of the running process, or 0 when the scheduler is not driving
  * anything. 0 is the honest answer for the boot self-check's usermode_run(),

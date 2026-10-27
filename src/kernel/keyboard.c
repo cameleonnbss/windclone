@@ -139,6 +139,73 @@ int keyboard_take_char(void)
     return (unsigned char)c;
 }
 
+/* --- the keyboard a program holds ----------------------------------------
+ * The console ring above is the shell's, and until now it was the only one: an
+ * IRQ1 byte had exactly one destination, which is why read(0) answered -ENOSYS
+ * and why every "text editor" on this roadmap was really a viewer. This second
+ * ring is the piece an editor needs, and it is deliberately not a per-process
+ * table. One window can be on top, only the window on top is offered keys, and
+ * so one owner is enough — a claim, not a routing table, and nothing to leak,
+ * expire or rebalance when a pid is recycled.
+ *
+ * The bytes reach here from the idle loop, never from the IRQ: the decoder is
+ * still the only thing that turns a scancode into a character, and the ring a
+ * program reads holds finished characters.
+ *
+ * No lock, and the reason is the loop's shape rather than luck. The push below
+ * runs in the idle loop between scheduler visits; a pop runs inside a syscall.
+ * The idle loop cannot be re-entered while a process owns the CPU — a tick that
+ * lands on the hlt() has no ring-3 context to switch to, so it returns to the
+ * same iteration — and the visit is what runs syscalls. The two never interleave
+ * on a core, and the volatile indices are the same discipline the console ring
+ * above already keeps. */
+#define KB_CAP 64
+static volatile char cap_ring[KB_CAP];
+static volatile int  cap_head, cap_tail;
+static volatile int  cap_owner;          /* 0 = the console holds the keyboard */
+
+void keyboard_own(int pid)
+{
+    if (pid == cap_owner)
+        return;
+    cap_owner = pid;
+    /* A new owner starts from nothing. The old one's unread keys are dropped
+     * rather than handed over: they were typed for a different program, and a
+     * claim that leaks the previous holder's input would be worse than losing
+     * them. */
+    cap_head = cap_tail = 0;
+}
+
+int keyboard_owner(void)
+{
+    return cap_owner;
+}
+
+int keyboard_push(int ch)
+{
+    if (cap_owner == 0)
+        return 0;
+    int next = (cap_head + 1) % KB_CAP;
+    if (next == cap_tail)
+        return 0;                 /* full: the caller keeps the byte for the shell */
+    cap_ring[cap_head] = (char)ch;
+    cap_head = next;
+    return 1;
+}
+
+int keyboard_pop(int pid, void *buf, int len)
+{
+    if (pid != cap_owner || buf == NULL || len <= 0)
+        return 0;
+    char *out = (char *)buf;
+    int n = 0;
+    while (n < len && cap_tail != cap_head) {
+        out[n++] = cap_ring[cap_tail];
+        cap_tail = (cap_tail + 1) % KB_CAP;
+    }
+    return n;
+}
+
 static void keyboard_decode(uint8_t sc)
 {
     if (kb_state == K_E0) {

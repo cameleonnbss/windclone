@@ -702,6 +702,17 @@ echo '==> batch files (a script a program wrote, the shell obeys)'
 python3 tools/qemu-desktop.py windclone.iso batchfile \
     || fail 'the shell could not run a batch file out of the writable store'
 
+# v0.1.20: the keyboard has a second customer. The scenario types a command that
+# launches /bin/keys, waits for the kernel to say the program is *asleep* in
+# read(0), types a word, and requires the program - not the prompt - to print it
+# back with every byte accounted for. Then the program exits and the next word
+# typed is a command again, which is the half that a desktop without this would
+# lose: a program that dies holding the keyboard leaves a screen you can look at
+# but cannot type into.
+echo '==> the keyboard reaches a program (read(0) sleeps until a key lands)'
+python3 tools/qemu-desktop.py windclone.iso typing \
+    || fail 'a program could not read the keyboard, or the prompt could not take it back'
+
 # v0.1.12: the double buffer + damage claim, measured. The scenario reads the
 # kernel's own "gfx: flip <n> rects, <area> px" lines and requires three things:
 # the boot frame flipped the whole screen, a pure mouse move flipped only a

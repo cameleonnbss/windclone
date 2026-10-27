@@ -644,14 +644,89 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       `wm: snapped <zone> <W>x<H> at <x>,<y>` line. Still open here: the snap
       *overlay* (the preview ghost Windows shows while you hover an edge), which
       needs its own damage rect and is its own next step.
+- [x] The keyboard reaches a program (v0.1.20): `read(0)` is a real call, and it
+      *waits*. Until this release the keyboard had exactly one customer — the
+      shell — and the reason every "editor" on this roadmap stayed a checkbox was
+      that a program could not be handed a keystroke at any price: fd 0 answered
+      `-ENOSYS` and IRQ1 wrote into the one ring the idle loop drained into the
+      command line. What ships is the smallest thing that makes the sentence true.
+      - **A claim, not a routing table.** `keyboard.c` gained a second ring
+        (`KB_CAP` 64) and one owner: a pid, or 0 for the console. A process
+        becomes the owner by calling `read(0)`, and a new owner starts with an
+        empty ring — unread keys are *not* handed over, because they were typed
+        for somebody else. One owner is enough because one window is on top, and
+        it is enough because there is then nothing to leak, expire or rebalance
+        when a pid is recycled.
+      - **The window manager keeps veto power.** The idle loop is the only arbiter
+        (the IRQ path still just queues a decoded character, so a program can never
+        be handed a byte mid-scancode) and it routes a key to the owner *only*
+        while `desktop_key_pid()` says that pid's program window is frontmost and
+        alive. Minimise it, click past it, or let its process die while its window
+        stays to show the exit code, and typing goes back to the prompt on the next
+        keystroke. With no framebuffer there is no z-order to consult, so on a text
+        console the claim stands by itself rather than making `read(0)` useless.
+      - **Sleeping is the part that matters.** An empty keyboard does not answer 0
+        and does not spin: `proc_input_read()` saves the frame and blocks through
+        the *same* switch `wait()` uses, so an idle editor costs no CPU and the
+        compositor keeps painting. `PROC_BLOCKED` therefore needed a reason —
+        `blocked_on` is `BLOCK_CHILD` or `BLOCK_INPUT` — because one state with two
+        meanings let a keystroke wake a parent asleep in `wait()` and hand it a pid
+        register nobody in `read()` was waiting for. Each wake source now checks
+        the reason before it touches a sleeper.
+      - **The answer is written when the reader runs, not when it was woken.** The
+        bytes go into the caller's buffer in `wakeup_deliver()`, under *its* CR3
+        and at the moment `usermode_resume()` is about to load its frame, and the
+        count is whatever is queued then — a tick, another program's slice and two
+        more keys can all land between the wake and the resume, and a `read()` that
+        reports fewer bytes than it could have taken is short, not wrong. Fixing
+        this path exposed a bug that predates the keyboard: `proc_sched_visit()`'s
+        first-entry resume is how an idle-driven process actually comes back, and it
+        never called `wakeup_deliver()`, so a parent woken exactly when the slice
+        budget ran out kept `wake_pending`, never got its `*status` written, and
+        could not be answered a second time. Delivery now happens wherever a saved
+        frame becomes a running process, not only where a switch chooses one.
+      - **Death gives the keyboard back.** Both ways a process ends (the exit arm
+        of the switch, the in-place arm of `kill()`) release the claim, zero the
+        blocked read's user pointer — an address that stops making sense the moment
+        its page tables go — and log it. A process that died holding the keys would
+        otherwise leave `cap_owner` pointing at a pid nothing owns, and the desktop
+        would go deaf until some other program happened to call `read(0)`.
+      - **`/bin/keys` is the witness, `qemu-desktop.py typing` the proof.** It
+        prints `keys: waiting for keys pid N`, sleeps, and prints the whole line the
+        typist meant. The scenario types `keys` at the prompt, requires the window's
+        pid and the reader's pid to be the same number, requires the kernel to say
+        *`asleep until a keystroke wakes it`* (a new line: calling a parked process
+        a deadlock was a lie waiting to be printed), types `hello there`, and then
+        asserts four separate things: the program got the exact text back, the bytes
+        summed across its reads to everything typed including the Enter (chunking is
+        scheduling, not a contract, so the sum is the honest claim), the prompt
+        *never* saw it (`shell: running 'hello'` and `shell: no program /bin/hello`
+        both counted at zero), and after the program exited, `echo done` ran as a
+        command with nobody clicking anything.
+      - The cost, written down: one claim at a time, so a second program that reads
+        takes the keys and the first is woken with 0 bytes and says so
+        (`keys: lost the keyboard`); nothing is echoed into the program's window on
+        its behalf — an editor draws its own text; no shift/ctrl/arrows reach a
+        program beyond what the existing decoder already turned into ASCII; no line
+        editing, so backspace is the program's problem; a full ring hands the key to
+        the prompt rather than dropping it; and typing still does not reach a
+        program that was never launched, because focus is a claim, not a click.
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
-- [ ] A text editor and a code editor as program windows — the store can write
-      (v0.1.18) and a program's bytes can now drive the shell (v0.1.19), so the
-      one thing still missing is userland reading the keyboard: fd 0 answers
-      `-ENOSYS` and the shell owns every IRQ1 byte. Until a program can be *handed*
-      the keys, an editor is a viewer with a save button, and that is not what
-      this item means.
+- [ ] A text editor and a code editor as program windows. Every blocker named in
+      the last four releases is now gone: the store can write (v0.1.18), a
+      program's bytes can drive the shell (v0.1.19), and a program can be *handed*
+      the keyboard and sleep until a key lands (v0.1.20). What is left is the
+      editor itself, and it has three problems the kernel does not solve for it: a
+      text buffer that survives a repaint (a program window shows text through the
+      console surface, so a buffer that scrolls is a design decision, not a
+      syscall), the keys that are not printable characters — arrows, Home/End and
+      a shift state that `keyboard.c` decodes for the console and does not yet put
+      on the wire to a program — and an open/save-as *dialog*, which means either a
+      second window per program or a small modal drawn inside the first. Start with
+      a single-window editor that opens a `/tmp` file by name from a batch file or
+      the command line, edits it with the keys it can already read, and saves with
+      the write path it can already call.
 - [ ] A block device driver (ATA or NVMe), so `tmpfs` can stop being the only
       place a byte a program wrote can go
 

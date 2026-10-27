@@ -577,8 +577,31 @@ void kmain(void)
 
         int redraw = mouse_take_dirty() || shell_dirty()
                                      || shell_program_dirty_any();
+        /* One keyboard, two customers, and the idle loop is the only place that
+         * can arbitrate: the IRQ handler just queues a byte. The rule is the
+         * desktop's and the scheduler's, read together — a byte goes to a program
+         * only if that program *asked* for the keyboard (it called read(0), which
+         * is what claims it) and the window manager still says its window is on
+         * top. Everything else is typing at the prompt, exactly as it was before
+         * this release: an unmapped key, a program that never read, a window the
+         * user clicked past, or a full ring (a reader that stopped reading is not
+         * owed an ever-growing queue, and the key is worth more at the prompt than
+         * dropped on the floor). A byte that lands in a program's ring also wakes
+         * it if it was asleep waiting for one, which is the whole reason a program
+         * can sit in read(0) instead of burning slices polling it. */
         int ch;
         while ((ch = keyboard_take_char()) >= 0) {
+            /* With no framebuffer there is no compositor, so no z-order to ask:
+             * on a text console the only honest answer to "is this program's
+             * window the one on top" is that there are no windows, and the claim
+             * a read(0) made stands by itself. Otherwise the window manager
+             * decides, which is what takes the keys away from a program the user
+             * clicked past. Either way the routed pid must be the claiming pid. */
+            int target = gfx_up ? desktop_key_pid() : keyboard_owner();
+            if (target > 0 && target == keyboard_owner() && keyboard_push(ch)) {
+                proc_input_wake(target);
+                continue;
+            }
             shell_key(ch);
             redraw = 1;
         }

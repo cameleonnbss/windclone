@@ -207,7 +207,10 @@ int64_t vfs_pread(int fd, void *buf, uint64_t len, uint64_t off)
 int64_t vfs_read(int fd, void *buf, uint64_t len)
 {
     if (fd == STDIN_FILENO)
-        return WC_ENOSYS;     /* no keyboard -> userland path yet */
+        return WC_ENOSYS;     /* read(0) is the scheduler's now (see syscall.c);
+                               * this stays for a caller outside a process, where
+                               * there is no slot to put to sleep and a 0 would
+                               * look exactly like end-of-file */
 
     struct open_file *f = live_file(fd);
     if (f == NULL)

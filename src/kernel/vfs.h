@@ -15,10 +15,13 @@
  *     a reboot;
  *   - fd 0/1/2 are the console. Writing to 1 and 2 reaches the serial port
  *     (what CI greps) and, when there is a text screen, the screen;
- *   - reading fd 0 fails with -WC_ENOSYS. The keyboard exists and the shell
- *     eats it; wiring it to a line buffer for userland is Phase 5's job, and
- *     returning "not implemented" is honest where returning 0 would look
- *     exactly like end-of-file;
+ *   - reading fd 0 is not this file's business. Since v0.1.20 the syscall layer
+ *     intercepts read(0) before it reaches the VFS and hands it to the scheduler,
+ *     which may put the caller to *sleep* until a keystroke arrives — a file
+ *     layer cannot block, so the keyboard belongs to whoever can. vfs_read()'s
+ *     fd-0 branch stays as the honest answer for the one place that still has no
+ *     process to sleep: outside the scheduler, where it returns -WC_ENOSYS rather
+ *     than the 0 that would look exactly like end-of-file;
  *   - writing to a descriptor depends on what it was opened from. A tmpfs file
  *     opened for writing stores the bytes and reads back later, including from
  *     another process. An archive file is read-only whatever the caller asked

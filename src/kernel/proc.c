@@ -14,6 +14,7 @@
 #include "string.h"
 #include "usermode.h"   /* USER_* window + the argv convention */
 #include "wcabi.h"       /* WC_ECHILD / WC_EFAULT for proc_wait */
+#include "keyboard.h"    /* the ring a program's read(0) drains */
 
 void panic(const char *why);
 
@@ -339,6 +340,15 @@ int proc_create(const char *path, int argc, const char *const *argv,
     p->wait_out = 0;
     p->wake_code = 0;
     p->wake_pending = 0;
+    /* The keyboard half of the slot, born empty. A recycled slot must not carry
+     * a dead process's user pointer into a new one's read(0): the address would
+     * belong to a different address space and the write would land somewhere the
+     * reader never pointed. */
+    p->blocked_on = BLOCK_NONE;
+    p->in_buf   = 0;
+    p->in_len   = 0;
+    p->in_ready = 0;
+    p->in_reported = 0;
 
     p->priority = priority;
     p->exit_code = 0;
@@ -413,19 +423,78 @@ int proc_shell_pid(void)
 
 /* --- the scheduler ---------------------------------------------------- */
 
-/* A woken parent carries its exit code through the table, not through a
- * register: the child that woke it may not run again for a while, and the
- * parent's `int *status` is only writable under the *parent's* page tables.
- * So the write is deferred to the moment of resume, when q's CR3 is live and
- * the walker sees the stack slot wait() pointed at. A stale or unroutable
- * pointer is dropped honestly — a switch is not an excuse for a fault. */
-static void wakeup_deliver(struct proc *q)
+/* The answer a blocked call is owed, written at the moment its process is
+ * actually resumed. Two calls block for something outside themselves, and both
+ * have to be answered under the *reader's* page tables rather than the one that
+ * happened to be live when the wake arrived:
+ *
+ *   wait()  — the child's exit code goes to the `int *status` the parent
+ *             pointed at, which is only writable once the parent's CR3 is.
+ *   read(0) — the bytes queued for this process go into *its* buffer, and the
+ *             count has to be whatever is waiting right now, not what was
+ *             waiting when the keystroke woke it: a tick, another program's
+ *             slice and a second key can all land in between, and a read() that
+ *             reports fewer bytes than it could have taken is a short answer,
+ *             not a wrong one — but reporting *none* of them would be.
+ *
+ * `f` is the frame the stub is about to iretq out of: the switch paths assign
+ * the saved context into it before calling, and the visit's first entry passes
+ * the slot's own frame, which usermode_resume() is about to load. Writing
+ * q->ctx instead would be lost on those paths — the copy has already happened.
+ * A stale or unroutable pointer is dropped honestly: a switch is not an excuse
+ * for a fault, and the process simply gets 0 bytes and can ask again. */
+static void wakeup_deliver(struct proc *q, struct syscall_frame *f)
 {
-    if (!q->wake_pending)
+    if (q->wake_pending) {
+        q->wake_pending = 0;
+        if (q->wait_out != 0 && user_write_ok(q->wait_out, sizeof(int)))
+            memcpy((void *)(uintptr_t)q->wait_out, &q->wake_code, sizeof(int));
+    }
+
+    if (!q->in_ready)
         return;
-    q->wake_pending = 0;
-    if (q->wait_out != 0 && user_write_ok(q->wait_out, sizeof(int)))
-        memcpy((void *)(uintptr_t)q->wait_out, &q->wake_code, sizeof(int));
+    /* in_ready 2 means the keyboard was claimed by somebody else while this
+     * read slept: the answer is "nothing for you", and the reader can tell that
+     * apart from a zero-length read because it never asked for zero bytes. */
+    uint64_t n = 0;
+    if (q->in_ready == 1 && q->in_buf != 0 &&
+        user_write_ok(q->in_buf, q->in_len))
+        n = (uint64_t)keyboard_pop(q->pid, (void *)(uintptr_t)q->in_buf,
+                                   (int)(q->in_len > 4096ULL ? 4096ULL
+                                                            : q->in_len));
+    q->in_ready = 0;
+    q->in_buf = 0;
+    q->in_len = 0;
+    f->rax = n;
+}
+
+/* A process is dying: give back what the keyboard machinery remembers about it.
+ *
+ * Two separate leaks are closed here. The first is a claim: an owner that stops
+ * existing would leave `cap_owner` pointing at a pid nothing owns, and every key
+ * typed afterwards would be queued for a process that can never read it — the
+ * screen would look deaf until some other program's read(0) took the keyboard
+ * over. Returning it to 0 means the console, which is who should have it: with no
+ * live window to blame, typing belongs to the command line again. The second is a
+ * promise — a blocked read's user buffer, an address that stops making sense the
+ * moment its page tables go. Zeroing the four fields means no later
+ * wakeup_deliver() can find a half-dead slot still holding a pointer into
+ * reclaimed memory. Unread keys in the ring leave with the owner, which is
+ * precisely what closing a window does to typing that never reached it. */
+static void proc_release_keys(struct proc *p)
+{
+    if (p->blocked_on == BLOCK_INPUT)
+        p->blocked_on = BLOCK_NONE;
+    p->in_buf = 0;
+    p->in_len = 0;
+    p->in_ready = 0;
+
+    if (p->pid != 0 && keyboard_owner() == p->pid) {
+        keyboard_own(0);
+        serial_write("proc: pid ");
+        serial_write_dec((uint64_t)p->pid);
+        serial_write(" died holding the keyboard; the console has it back\n");
+    }
 }
 
 /* A child died — by its own exit() or by somebody's kill() — and its parent may
@@ -458,7 +527,8 @@ static void wake_parent(int c, int code)
         struct proc *pp = &table[i];
         if (pp->pid != cc->parent)
             continue;
-        if (pp->state == PROC_BLOCKED && !pp->wake_pending) {
+        if (pp->state == PROC_BLOCKED && pp->blocked_on == BLOCK_CHILD &&
+            !pp->wake_pending) {
             int pid = cc->pid;
             pp->state = PROC_READY;
             pp->ctx.rax = (uint64_t)pid;
@@ -572,6 +642,7 @@ static void sched_switch(struct syscall_frame *f, int mode, int code)
         table[c].exit_code = code;
         table[c].state = PROC_EXITED;
         record_exit(table[c].pid, code);
+        proc_release_keys(&table[c]);
     } else if (mode == SWITCH_BLOCK) {
         table[c].state = PROC_BLOCKED;
     } else {
@@ -616,22 +687,51 @@ static void sched_switch(struct syscall_frame *f, int mode, int code)
         paging_set_working((uint64_t *)(uintptr_t)q->p4_virt);
         paging_switch(q->cr3);
         *f = q->ctx;
-        wakeup_deliver(q);         /* parent's CR3 is live: deliver now */
+        wakeup_deliver(q, f);      /* parent's CR3 is live: deliver now */
         return;                    /* stub iretq resumes q */
     }
 
     /* Nobody runnable. Either the last process exited (caller EXITED, every
-     * other slot already reaped long ago) — the honest end, unwind home — or
-     * the caller just blocked and nothing else can ever run: a cycle wait can
-     * only sleep through. Report that truthfully instead of pretending, then
-     * unwind; the blocked slot dies with the scheduler, which is exactly what
-     * "this demo would hang forever" means in words. */
-    int blocked = 0;
-    for (int i = 0; i < PROC_MAX; i++)
-        if (table[i].state == PROC_BLOCKED)
-            blocked = 1;
-    if (blocked)
+     * other slot already reaped long ago) — the honest end, unwind home — or the
+     * caller just blocked and nothing else can ever run: a cycle wait can only
+     * sleep through. Report that truthfully instead of pretending, then unwind;
+     * the blocked slot dies with the scheduler, which is exactly what "this demo
+     * would hang forever" means in words.
+     *
+     * A sleep on input is the exception the wording has to respect: a process
+     * waiting for a keystroke is not deadlocked, it is *waiting*, and the thing
+     * that releases it is outside the scheduler entirely — the idle loop, which
+     * still runs because this path unwinds to it. Calling that a deadlock would
+     * be the same kind of lie as calling a parked car a crashed one, so the two
+     * sleepers are named apart. */
+    int blocked = 0, input = 0;
+    for (int i = 0; i < PROC_MAX; i++) {
+        if (table[i].state != PROC_BLOCKED)
+            continue;
+        blocked++;
+        if (table[i].blocked_on == BLOCK_INPUT)
+            input++;
+    }
+    if (blocked && input == blocked) {
+        /* Named, and only once per process. A reader blocks once for every
+         * character it is handed, so a report printed at each one would be a line
+         * per keystroke — the same fact said forty times a second, which hides the
+         * fact instead of reporting it. The pid is who is waiting; the waiting is
+         * what is not a deadlock. */
+        for (int i = 0; i < PROC_MAX && input > 0; i++) {
+            struct proc *s = &table[i];
+            if (s->state != PROC_BLOCKED || s->blocked_on != BLOCK_INPUT ||
+                s->in_reported)
+                continue;
+            s->in_reported = 1;
+            serial_write("sched: nothing runnable — pid ");
+            serial_write_dec((uint64_t)s->pid);
+            serial_write(" asleep until a keystroke wakes it\n");
+            break;
+        }
+    } else if (blocked) {
         serial_write("sched: deadlock — a process is waiting but nothing is runnable\n");
+    }
 
     paging_use_kernel();
     if (mode == SWITCH_EXIT)
@@ -698,7 +798,7 @@ int proc_timer_preempt(struct syscall_frame *f)
     paging_set_working((uint64_t *)(uintptr_t)q->p4_virt);
     paging_switch(q->cr3);
     *f = q->ctx;
-    wakeup_deliver(q);
+    wakeup_deliver(q, f);
     return 1;
 }
 
@@ -769,9 +869,98 @@ int proc_wait(struct syscall_frame *f, uint64_t uout)
     if (uout != 0 && !user_write_ok(uout, sizeof(int)))
         return WC_EFAULT;
     p->wait_out = uout;
+    p->blocked_on = BLOCK_CHILD;
     sched_switch(f, SWITCH_BLOCK, 0);
     /* the switch never returns to this frame */
     return WC_ECHILD;
+}
+
+/* --- read(0): the keyboard, from ring 3 -----------------------------------
+ * The claim this exists to make is the one every earlier release had to refuse:
+ * a program can ask for a keystroke and *wait* for one. Waiting matters more
+ * than the reading — a poll loop gives up or burns the slice budget, and an
+ * editor built on giving up is not an editor — so an empty keyboard puts this
+ * process to sleep through the same switch wait() uses, and the idle loop that
+ * queues the byte is what wakes it.
+ *
+ * The read also *claims*: the caller becomes the keyboard's owner, and it keeps
+ * the keys only while the window manager says its window is on top (see
+ * desktop_key_pid(), the other half of the rule). That is what lets the shell
+ * hand the keyboard over without handing it over for good, and what makes the
+ * command line come back the moment the program that took it is gone.
+ *
+ * The claim moving is not silent: the process that held it and was asleep on a
+ * keystroke is woken with a zero-byte answer, so it can say so instead of
+ * sleeping on a keyboard somebody else is now holding.
+ *
+ * Runs only under the scheduler. A process is a table slot or it is nothing, and
+ * `current < 0` (the boot demos' single-program path, the VFS self-check) has no
+ * slot to put to sleep, so it keeps the -ENOSYS it has always answered. */
+void proc_input_read(struct syscall_frame *f, uint64_t ubuf, uint64_t len)
+{
+    if (current < 0) {
+        f->rax = (uint64_t)WC_ENOSYS;
+        return;
+    }
+    if (ubuf == 0 || len == 0) {
+        f->rax = 0;
+        return;
+    }
+
+    struct proc *p = &table[current];
+    int prev = keyboard_owner();
+    if (prev != p->pid) {
+        keyboard_own(p->pid);
+        for (int i = 0; i < PROC_MAX; i++) {
+            struct proc *o = &table[i];
+            if (o->pid != prev || o->state != PROC_BLOCKED ||
+                o->blocked_on != BLOCK_INPUT)
+                continue;
+            o->in_ready = 2;
+            o->blocked_on = BLOCK_NONE;
+            o->state = PROC_READY;
+            serial_write("proc: pid ");
+            serial_write_dec((uint64_t)prev);
+            serial_write(" lost the keyboard to pid ");
+            serial_write_dec((uint64_t)p->pid);
+            serial_write("\n");
+        }
+    }
+
+    int n = keyboard_pop(p->pid, (void *)(uintptr_t)ubuf,
+                         (int)(len > 4096ULL ? 4096ULL : len));
+    if (n > 0) {
+        f->rax = (uint64_t)n;
+        return;
+    }
+
+    p->in_buf = ubuf;
+    p->in_len = len;
+    p->in_ready = 0;
+    p->blocked_on = BLOCK_INPUT;
+    sched_switch(f, SWITCH_BLOCK, 0);
+    /* the switch never returns to this frame */
+}
+
+/* A keystroke landed in `pid`'s ring: it has something to read now, so it is
+ * runnable again. Only a process asleep *on input* is touched here — a parent
+ * asleep in wait() must not be woken by typing, or it would come back believing
+ * a child had died. The byte count is not planted either: wakeup_deliver()
+ * counts what is queued at the moment the reader is really resumed, which may be
+ * after more keys have arrived. */
+void proc_input_wake(int pid)
+{
+    for (int i = 0; i < PROC_MAX; i++) {
+        struct proc *p = &table[i];
+        if (p->pid != pid)
+            continue;
+        if (p->state != PROC_BLOCKED || p->blocked_on != BLOCK_INPUT)
+            return;
+        p->blocked_on = BLOCK_NONE;
+        p->in_ready = 1;
+        p->state = PROC_READY;
+        return;
+    }
 }
 
 /* kill(pid, SIGKILL) — one process ending another, and the reason the process
@@ -848,6 +1037,7 @@ int proc_kill(int pid, int sig, struct syscall_frame *f)
     record_exit(v->pid, -sig);
     v->wait_out = 0;
     v->wake_pending = 0;        /* a sleeper's pending wake dies with it */
+    proc_release_keys(v);       /* ditto a blocked read(0) and the keyboard claim */
     proc_free_space(v);         /* safe: the victim's CR3 is not loaded */
     proc_adopt_children(t);     /* same order as the exit arm: place, then tell */
     wake_parent(t, -sig);
@@ -1130,6 +1320,18 @@ void proc_sched_visit(void)
 
     paging_set_working((uint64_t *)(uintptr_t)p->p4_virt);
     paging_switch(p->cr3);
+    /* The answer a woken process is owed has to be written here too, not only on
+     * the two switch paths that already did it. This is the common one for a key
+     * press: the reader blocks, the visit unwinds home, the idle loop queues a
+     * byte and wakes it, and the *next* visit picks it as `first` and resumes it
+     * straight from its saved frame — a path that never reached the delivery
+     * below the switch. Without this line a read(0) would sleep through its own
+     * wake-up; and the same gap quietly applied to wait(), where a parent woken
+     * at the exact moment the slice budget ran out kept `wake_pending` set, never
+     * got its *status written, and could not be answered a second time. The fix
+     * is the same one for both: deliver wherever a saved frame becomes a running
+     * process, not only where a switch chooses one. */
+    wakeup_deliver(p, &p->ctx);
     usermode_resume(&p->ctx);
 
     /* Back only when a switch or a preempt handed the CPU home. */

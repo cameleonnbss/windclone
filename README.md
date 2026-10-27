@@ -289,7 +289,7 @@ src/kernel/        C kernel: entry (kmain), console + memory managers,
                    (proc), interrupt stubs (NASM), string + port-I/O helpers
 src/user/          the programs that run in ring 3 — hello, motd, ls, cat,
                    echo, tick, spin, exit, waiter, bell, reaper, vanish,
-                   whoami, orphan, nest — with no libc of their own: a header of inline
+                   whoami, orphan, nest, hold, save, keys — with no libc of their own: a header of inline
                    `int 0x80` wrappers and eight static inline string helpers
 src/boot/          hand-written NASM boot code (two-stage educational MBR)
 rootfs/            what goes into the initrd: packed to a ustar tar, loaded

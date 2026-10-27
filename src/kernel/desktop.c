@@ -39,6 +39,7 @@
 #include "gfx.h"
 #include "log.h"
 #include "mouse.h"
+#include "proc.h"
 #include "serial.h"
 #include "shell.h"
 #include "vfs.h"
@@ -210,6 +211,36 @@ static int focused(void)
             return order[i];
     }
     return -1;
+}
+
+/* Who should the keyboard go to, in the window manager's opinion: the pid of the
+ * program whose window is on top, or 0 for the console.
+ *
+ * This is half of one rule — *a program keeps the keys only while its window is
+ * on top* — and it lives here rather than in the kernel's idle loop because the
+ * answer is pure window state: z-order, open, minimised. The other half, that a
+ * program must have asked for the keyboard by calling read(0), is the
+ * scheduler's business (see keyboard_own()); this function never grants a claim,
+ * it only says who is in front, so the idle loop can take the keyboard away from
+ * a program the user has simply looked past.
+ *
+ * A dead program still owns its window until the user closes it — that is how
+ * this desktop reports an exit code — so proc_pid_live() is what keeps typing
+ * from vanishing into a window whose process is gone. A minimised window is not
+ * "on top" in any sense a user would accept, and the fixed windows (status,
+ * trash, terminal) have no process to type to: every one of those answers 0,
+ * which is the console, which is the prompt. */
+int desktop_key_pid(void)
+{
+    int id = focused();
+    if (id < 0)
+        return 0;
+    struct window *w = &wins[id];
+    if (w->kind != WIN_PROGRAM)
+        return 0;
+    if (!proc_pid_live(w->pid))
+        return 0;
+    return w->pid;
 }
 
 static void clamp_to_desktop(struct window *w, int W, int H)
@@ -615,12 +646,11 @@ static void draw_window(const struct window *w, int focus)
 #define MENU_GAP      6          /* air between the panel and the taskbar */
 #define MENU_MAX      24         /* rows the array can hold; menu_scan() also
                                   * caps that by what the screen has room for.
-                                  * The number has to stay above the count of
-                                  * programs in /bin: tools/local-test.sh
-                                  * requires a row for every USER_BINS entry and
-                                  * `hidden 0`, so adding a seventeenth program
-                                  * without raising this is a failing test, not a
-                                  * menu that quietly drops one. */
+                                  * It has to stay above the number of programs
+                                  * in /bin: tools/local-test.sh requires a row
+                                  * for every USER_BINS entry and `hidden 0`, so
+                                  * a menu that quietly drops a program is a
+                                  * failing test rather than a silent one. */
 #define MENU_NAME_MAX 24
 
 /* Not a list written in this file: every row is a /bin entry of the initrd,
