@@ -691,6 +691,17 @@ echo '==> writable files (write a note in one process, read it in another)'
 python3 tools/qemu-desktop.py windclone.iso filewrite \
     || fail 'a program could not write a file another program could read'
 
+# v0.1.19: the file layer can hand the shell instructions. /bin/save writes two
+# command lines into /tmp/demo.bat, `bat demo` reads them back and runs them
+# through the same dispatcher a typed line goes through — the log tells them
+# apart by the origin word, so `shell: running 'echo' from a batch file` can only
+# have come from the file. The scenario also requires the three refusals to be
+# answers and not crashes: no such script, a name that looks like a traversal,
+# and a script inside a script (whose following line still has to run).
+echo '==> batch files (a script a program wrote, the shell obeys)'
+python3 tools/qemu-desktop.py windclone.iso batchfile \
+    || fail 'the shell could not run a batch file out of the writable store'
+
 # v0.1.12: the double buffer + damage claim, measured. The scenario reads the
 # kernel's own "gfx: flip <n> rects, <area> px" lines and requires three things:
 # the boot frame flipped the whole screen, a pure mouse move flipped only a

@@ -57,6 +57,14 @@ Scenarios (each one asserts the serial markers the kernel prints):
                a typed command to the serial port, so nothing else put it there),
                then `save list` so a third process sees the name and size through
                SYS_GETDIRENT's merged enumeration
+    batchfile  prove the shell obeys a script that a *program* wrote: type
+               `save script demo about nl echo hi` so /bin/save puts two command
+               lines in /tmp/demo.bat, then `bat demo` and require the kernel to
+               log the same byte count, run both lines, and name the batch file as
+               the origin of the program it launched (`shell: running 'echo' from
+               a batch file` - a typed line says "from the prompt"). Then the
+               three refusals: a missing script, a name that looks like a path
+               traversal, and a script that calls another script.
 
 Exit status 0 = every step did what the serial log says it did.
 SPDX-License-Identifier: MIT
@@ -91,6 +99,20 @@ PROG_X0, PROG_Y0, PROG_STEP_X, PROG_STEP_Y = 150, 56, 24, 22
 # an edge, and a shrink stops at MIN_W x MIN_H. These mirror the kernel's
 # RESIZE_EDGE / MIN_W / MIN_H so the scenario can drive and assert against them.
 RESIZE_EDGE, MIN_W, MIN_H = 5, 200, 120
+# Characters a scenario may type that are not letters or digits. These are
+# QEMU's monitor key names, and the kernel's own scancode table (keyboard.c
+# map_plain) has to agree: 0x33 ',', 0x34 '.', 0x35 '/' are mapped there, so a
+# `sendkey slash` really does land as a '/' in the shell's input buffer.
+KEYMAP = {" ": "spc", "\n": "ret", "/": "slash", ".": "dot", "-": "minus",
+          "_": "underscore"}
+
+
+def count_serial(pattern):
+    """How many times the serial log already says `pattern`. A marker that a
+    later step also produces cannot be proven with `wait_serial` alone - re.search
+    is happy with the *first* hit and would pass on a stale line - so scenarios
+    that expect an event to happen *again* count the hits instead."""
+    return len(re.findall(pattern, read_log()))
 
 
 def last_resized(marker="wm: window resized "):
@@ -200,9 +222,15 @@ class Monitor:
         self.cmd("sendkey %s" % name)
 
     def type_text(self, text):
-        """Type through the emulated 8042: every key is a real IRQ1."""
+        """Type through the emulated 8042: every key is a real IRQ1.
+
+        QEMU's monitor wants key *names*, not characters, and the two only agree
+        for letters and digits. The map below covers the punctuation a path or a
+        script line needs; a character missing from it would be sent as itself
+        and silently dropped, which is why the batch scenario asserts the whole
+        name back out of the serial log instead of trusting the typing."""
         for ch in text:
-            self.key({" ": "spc", "\n": "ret"}.get(ch, ch))
+            self.key(KEYMAP.get(ch, ch))
             time.sleep(0.12)
 
     def shot(self, path):
@@ -638,6 +666,65 @@ def scenario_actions(sc, mon, W, H):
         if int(m.group(1)) != wrote:
             raise SystemExit("the directory entry says %s bytes, the writer "
                              "wrote %d" % (m.group(1), wrote))
+    elif sc == "batchfile":
+        # v0.1.19: the shell reads instructions out of a file a ring-3 program
+        # made. Every claim below is a line the kernel wrote itself, and the one
+        # that matters is the origin: a launched program logs `from the prompt`
+        # when a person typed it and `from a batch file` when the script did, so
+        # the log cannot confuse the two paths.
+        script = "about\necho hi\n"
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+        mon.type_text("save script demo about nl echo hi\n")
+        m = wait_serial(r"save: wrote (\d+) bytes /tmp/demo\.bat pid (\d+)")
+        wrote = int(m.group(1))
+        if wrote != len(script):
+            raise SystemExit("the script landed as %d bytes, want %d (%r)"
+                             % (wrote, len(script), script))
+
+        mon.type_text("bat demo\n")
+        m = wait_serial(r"shell: batch file /tmp/demo\.bat \((\d+) bytes\)")
+        if int(m.group(1)) != wrote:
+            raise SystemExit("the shell read %s bytes of a file the writer "
+                             "reported as %d" % (m.group(1), wrote))
+        wait_serial(r"shell: running 'echo' from a batch file")
+        m = wait_serial(r"shell: batch ran (\d+) commands from /tmp/demo\.bat")
+        ran = int(m.group(1))
+        if ran != 2:
+            raise SystemExit("the script ran %d of its 2 lines (a built-in and "
+                             "a /bin program)" % ran)
+        # Counted, not just waited for: `batch ran 2` proves two lines reached the
+        # dispatcher, and this proves one of them was the program and the other a
+        # built-in rather than the same line running twice.
+        if count_serial(r"shell: running 'echo' from a batch file") != 1:
+            raise SystemExit("the batch file's program line did not reach the "
+                             "launcher exactly once")
+
+        # A name that is not a word is refused before anything is opened, and the
+        # log echoes the whole attempt back: the regex only matches if every '/'
+        # and '.' actually arrived as a key, so a dropped sendkey fails here
+        # instead of quietly testing a different command line.
+        mon.type_text("bat nope\n")
+        wait_serial(r"shell: no batch file /tmp/nope\.bat")
+        mon.type_text("bat ../bin/ls\n")
+        wait_serial(r"shell: bad batch name \.\./bin/ls")
+
+        # No nesting, and the rest of the script still runs: a refusal is an
+        # answer, not a crash.
+        mon.type_text("save script nest bat demo nl echo ok\n")
+        m = wait_serial(r"save: wrote (\d+) bytes /tmp/nest\.bat")
+        if int(m.group(1)) != len("bat demo\necho ok\n"):
+            raise SystemExit("the nested script landed as %s bytes" % m.group(1))
+        mon.type_text("bat nest\n")
+        wait_serial(r"shell: batch refused nested script")
+        m = wait_serial(r"shell: batch ran (\d+) commands from /tmp/nest\.bat")
+        if int(m.group(1)) != 1:
+            raise SystemExit("a script inside a script ran %s commands; the "
+                             "nested line must be refused and the next one kept"
+                             % m.group(1))
+        if count_serial(r"shell: running 'echo' from a batch file") != 2:
+            raise SystemExit("the line after a refused nested script did not run")
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -693,6 +780,13 @@ MARKERS = {
     # back from another process, and a store the boot said is RAM-only
     "filewrite": ["tmpfs: writable store live", "save: wrote",
                   "save: read back"],
+    # the byte counts, the command count and the three refusals are asserted in
+    # the scenario; these are the lines the claim turns on - a script a program
+    # wrote, a shell that opened it, and a launched program that knows it came
+    # from a file rather than from a keyboard
+    "batchfile": ["tmpfs: writable store live", "save: wrote",
+                  "shell: batch file", "shell: running 'echo' from a batch file",
+                  "shell: batch ran", "shell: batch refused nested script"],
 }
 
 

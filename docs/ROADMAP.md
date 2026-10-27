@@ -450,6 +450,54 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         userland, no permissions, no disk. That is what makes the roadmap's text
         editor and code editor *possible*; it is not them, and this release does
         not claim to have shipped an editor.
+- [x] **Batch files: the shell obeys a file a program wrote (v0.1.19).** The
+      previous release made `write()` mean something; this one makes it mean
+      something *to the shell*. `save script demo about nl echo hi` puts two
+      command lines in `/tmp/demo.bat`, and `bat demo` reads them back and runs
+      each one through the dispatcher a typed line already went through — so a
+      script gets the built-ins and the `/bin` programs exactly the way a person
+      at the prompt does, and nothing about the launcher had to be forked to
+      allow it.
+      - **`execute()` became `run_line(line, len, origin)`.** The tokeniser and
+        the built-in table are no longer tied to the shell's own input buffer: a
+        typed line lives in `input`, a script line lives in `bat_line`, both are
+        dispatched by the same function. `origin` is the proof — `launch()` logs
+        `shell: running 'echo' from the prompt` for a keystroke and
+        `from a batch file` for a script line, so a log can never claim a program
+        ran from a file when somebody typed it, and the test asserts the second
+        string specifically.
+      - **`nl` is a newline only in script mode.** The shell tokenises on spaces
+        and there is no way to type a line terminator into a command line, so the
+        separator has to be a word. `save write demo the nl plan` still writes the
+        two letters `nl`, because a note is text; `save script` turns the same word
+        into a line break, because a script is lines. One flag on one helper, and
+        the difference is what the two verbs are *for*.
+      - **Three refusals, each a line in the log and not a crash.** 16 commands
+        maximum (`shell: batch stopped at 16 lines, more in <path>`) because a file
+        that runs forever is not a script; no `bat` inside a `bat`
+        (`shell: batch refused nested script`) so the depth is two and a
+        self-referring file cannot eat the kernel stack it executes on — and the
+        lines *after* a refused one still run, which the scenario counts;
+        `BAT_LINE_MAX` truncates a long line rather than dropping it, because a
+        half command that fails is an answer where silence is a lie about what
+        ran. A name that is not letters, digits or `_` is refused before anything
+        is opened, so `bat ../bin/ls` answers `shell: bad batch name ../bin/ls`.
+      - **The whole file is read before the first line runs**, into one kernel
+        static: a script cannot change underneath itself half way through, and the
+        byte count the shell read is logged against the count the writer reported
+        (`shell: batch file /tmp/demo.bat (14 bytes)`), so a short read is visible.
+      - **The evidence is typed, not called** (`qemu-desktop.py batchfile`): real
+        IRQ1 keystrokes write the script, run it, then exercise a missing file, a
+        traversal-shaped name and a nested script. The punctuation that the name
+        test needs (`/`, `.`) now goes through a key *map* in the harness, and the
+        assertion checks the refused name back out of the serial log — if a
+        `sendkey` had been silently dropped, the logged name would not match and
+        the run fails instead of testing a different command line.
+      - The cost, written down: no variables, no redirection, no `@echo off`, no
+        `call`, no loops, no arguments passed to a script, 512 bytes and 16 lines
+        per file, 8 files per boot — and still RAM, so a script written this release
+        is gone at the next reboot. `command.com` this is not; it is the smallest
+        thing that makes "run that file" true.
 
 ## Phase 6 — Language expansion ⏳
 *Goal: use the right tool per layer (the "asm/C/C++/Rust" promise).*
@@ -598,10 +646,12 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       needs its own damage rect and is its own next step.
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
-- [ ] A text editor and a code editor as program windows — both are blocked on
-      the file layer being able to *write*, which v0.1.18 shipped, and on
-      userland being able to read the keyboard, which it still cannot (fd 0
-      answers `-ENOSYS`; the shell owns every IRQ1 byte)
+- [ ] A text editor and a code editor as program windows — the store can write
+      (v0.1.18) and a program's bytes can now drive the shell (v0.1.19), so the
+      one thing still missing is userland reading the keyboard: fd 0 answers
+      `-ENOSYS` and the shell owns every IRQ1 byte. Until a program can be *handed*
+      the keys, an editor is a viewer with a save button, and that is not what
+      this item means.
 - [ ] A block device driver (ATA or NVMe), so `tmpfs` can stop being the only
       place a byte a program wrote can go
 

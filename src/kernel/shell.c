@@ -175,6 +175,7 @@ static void cmd_help(void)
     put_line("  HELP           CETTE LISTE");
     put_line("  ABOUT          VERSION ET UPTIME");
     put_line("  CLEAR          EFFACE L'ECRAN");
+    put_line("  BAT <NOM>      EXECUTE /TMP/<NOM>.BAT");
     put_line("  - PROGRAMMES DANS /BIN -");
     put_line("  LS             LISTE L'INITRD");
     put_line("  CAT <FICHIER>  AFFICHE UN FICHIER");
@@ -509,9 +510,12 @@ static int launch(int argc, const char *const *argv,
     return 0;
 }
 
-static void cmd_program(int argc, const char *const *argv)
+static void cmd_program(int argc, const char *const *argv, const char *origin)
 {
-    launch(argc, argv, "running", "from the prompt");
+    /* `origin` is the only difference between a keystroke and a script line,
+     * and it is not cosmetic: a log that cannot tell the two apart cannot
+     * prove which one a test drove. */
+    launch(argc, argv, "running", origin);
 }
 
 /* The desktop's start menu calls this with one of the names it read out of
@@ -547,6 +551,209 @@ static void cmd_about(void)
     put_line("SHELL: CE QUE TU TAPES EST LU PAR L'IRQ1");
 }
 
+static void cmd_bat(int argc, const char *const *argv);
+
+/* One command line, wherever it came from. `line` is written in place — spaces
+ * become NULs so argv[] points into it and there is no second copy to keep in
+ * sync — and the buffer belongs to the caller, which is what lets a typed line
+ * live in `input` and a script line live in `bat_line` while both go through
+ * this one dispatcher. `origin` names which one it was. */
+static void run_line(char *line, int len, const char *origin)
+{
+    const char *argv[USER_ARG_MAX];
+    int argc = 0;
+    int i = 0;
+
+    while (i < len && argc < USER_ARG_MAX) {
+        while (i < len && line[i] == ' ')
+            line[i++] = '\0';
+        if (i >= len)
+            break;
+        argv[argc++] = &line[i];
+        while (i < len && line[i] != ' ')
+            i++;
+    }
+
+    if (argc == 0)
+        return;                       /* nothing but spaces */
+    if (strcmp(argv[0], "help") == 0)
+        cmd_help();
+    else if (strcmp(argv[0], "about") == 0)
+        cmd_about();
+    else if (strcmp(argv[0], "clear") == 0)
+        surf_clear(&term);
+    else if (strcmp(argv[0], "bat") == 0)
+        cmd_bat(argc, argv);
+    else
+        cmd_program(argc, argv, origin);
+}
+
+/* --- batch files: a script read out of the writable store -----------------
+ * cmd.exe's oldest idea, and the reason v0.1.18 mattered: bytes a *program*
+ * wrote are now something the shell can read back and obey. `bat demo` opens
+ * /tmp/demo.bat, splits it on newlines and runs every line through the same
+ * dispatcher a typed line goes through, so a script gets the built-ins and the
+ * /bin programs exactly the way a person at the prompt does.
+ *
+ * Three limits, each one a refusal with a line in the log rather than a crash:
+ *   - BAT_MAX_LINES commands, because a file that runs forever is not a script;
+ *   - no `bat` inside a `bat`, so the depth is two and a self-referring file
+ *     cannot eat the kernel stack it is executing on;
+ *   - BAT_LINE_MAX bytes per line, and a longer line is truncated rather than
+ *     skipped — a half command may fail, which is an answer, where quietly
+ *     dropping it is a lie about what ran.
+ * The whole file is read into a kernel static before the first line runs, so a
+ * script cannot change underneath itself half way through (and on this store,
+ * nothing else can change it either — there is no scheduler preemption of a
+ * syscall that simple, but the rule is worth having anyway). */
+#define BAT_NAME_MAX   12         /* same rule /bin/save uses: a word, not a path */
+#define BAT_PATH_MAX   32         /* "/tmp/" + name + ".bat" + NUL, with room */
+#define BAT_LINE_MAX   64         /* one command, SHELL_COLS minus the prompt */
+#define BAT_MAX        512        /* the whole script, in one static */
+#define BAT_MAX_LINES  16
+
+static char bat_text[BAT_MAX];
+static char bat_line[BAT_LINE_MAX];
+
+/* Compose "/tmp/<name>.bat" into `out`. Returns the length, or 0 when the name
+ * is not a word — letters, digits or underscore — because nothing that reaches
+ * the VFS from here may look like a traversal. The store is flat and the
+ * archive is searched first anyway, so no name here could have escaped; the
+ * filter exists so a typo says "bad name" instead of making a file nobody
+ * meant to make. */
+static int bat_path(const char *name, char *out, int cap)
+{
+    const char *p = "/tmp/";
+    int n = 0;
+
+    if (name == NULL || name[0] == '\0' || cap < BAT_PATH_MAX)
+        return 0;
+    for (; *p != '\0'; p++)
+        out[n++] = *p;
+    for (int i = 0; name[i] != '\0'; i++) {
+        char c = name[i];
+        int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                 (c >= '0' && c <= '9') || c == '_';
+        if (!ok || i >= BAT_NAME_MAX || n > cap - 6)
+            return 0;
+        out[n++] = c;
+    }
+    for (p = ".bat"; *p != '\0'; p++)
+        out[n++] = *p;
+    out[n] = '\0';
+    return n;
+}
+
+static void cmd_bat(int argc, const char *const *argv)
+{
+    if (argc < 2) {
+        put_line("USAGE: BAT <NOM>  EXECUTE /TMP/<NOM>.BAT");
+        return;
+    }
+
+    char path[BAT_PATH_MAX];
+    if (bat_path(argv[1], path, sizeof path) == 0) {
+        put_line("NOM DE SCRIPT INVALIDE: DES LETTRES, CHIFFRES OU _.");
+        serial_write("shell: bad batch name ");
+        serial_write(argv[1]);
+        serial_write("\n");
+        return;
+    }
+
+    int64_t fd = vfs_open(path);
+    if (fd < 0) {
+        put_line("FICHIER DE SCRIPT INTROUVABLE.");
+        serial_write("shell: no batch file ");
+        serial_write(path);
+        serial_write("\n");
+        return;
+    }
+
+    int have = 0;
+    while (have < BAT_MAX - 1) {
+        int64_t got = vfs_read((int)fd, bat_text + have,
+                               (uint64_t)(BAT_MAX - 1 - have));
+        if (got <= 0)
+            break;
+        have += (int)got;
+    }
+    vfs_close((int)fd);
+    bat_text[have] = '\0';
+
+    serial_write("shell: batch file ");
+    serial_write(path);
+    serial_write(" (");
+    serial_write_dec((uint64_t)have);
+    serial_write(" bytes)\n");
+
+    int ran = 0;
+    int lines = 0;
+    char *p = bat_text;
+
+    while (*p != '\0') {
+        int l = 0;
+        while (*p != '\0' && *p != '\n') {
+            if (*p != '\r' && l < BAT_LINE_MAX - 1)
+                bat_line[l++] = *p;
+            p++;
+        }
+        if (*p == '\n')
+            p++;
+        bat_line[l] = '\0';
+
+        if (l == 0)
+            continue;                 /* a blank line is not a command */
+
+        if (lines >= BAT_MAX_LINES) {
+            serial_write("shell: batch stopped at ");
+            serial_write_dec((uint64_t)BAT_MAX_LINES);
+            serial_write(" lines, more in ");
+            serial_write(path);
+            serial_write("\n");
+            put_line("SCRIPT TROP LONG: LIMITE ATTEINTE.");
+            break;
+        }
+        lines++;
+
+        /* ';' is cmd.exe's comment character, and the line says so on the serial
+         * port rather than vanishing: a transcript with holes in it is a
+         * transcript you cannot trust. */
+        if (bat_line[0] == ';') {
+            serial_write("shell: batch comment skipped\n");
+            continue;
+        }
+
+        char echo[BAT_LINE_MAX + 3];
+        int e = 0;
+        echo[e++] = '>';
+        echo[e++] = ' ';
+        for (int k = 0; k < l && e < BAT_LINE_MAX; k++)
+            echo[e++] = bat_line[k];
+        echo[e] = '\0';
+        put_line(echo);
+
+        /* No nesting. Checked on the raw line, before run_line() turns its
+         * spaces into NULs, so this is a prefix test and not a token one. */
+        if (strncmp(bat_line, "bat", 3) == 0 &&
+            (bat_line[3] == '\0' || bat_line[3] == ' ')) {
+            serial_write("shell: batch refused nested script\n");
+            put_line("PAS DE SCRIPT DANS UN SCRIPT.");
+            continue;
+        }
+
+        /* Spaces become NULs inside bat_line here, which is fine: this buffer
+         * is rewritten from bat_text on the next iteration. */
+        run_line(bat_line, l, "from a batch file");
+        ran++;
+    }
+
+    serial_write("shell: batch ran ");
+    serial_write_dec((uint64_t)ran);
+    serial_write(" commands from ");
+    serial_write(path);
+    serial_write("\n");
+}
+
 static void execute(void)
 {
     input[input_len] = '\0';
@@ -562,40 +769,8 @@ static void execute(void)
     echo[n] = '\0';
     put_line(echo);
 
-    if (input_len == 0) {
-        /* bare Enter: nothing to do */
-    } else {
-        /* Tokenise in place: spaces become NULs, so argv[] points into
-         * `input` and there is no second copy to keep in sync. The buffer is
-         * a kernel static that outlives the call, and proc_create() copies
-         * the strings onto the program's own stack before entering ring 3 - so
-         * the program owns its own argv from the moment it starts, which is
-         * what lets a shell reuse `input` for the next line. */
-        const char *argv[USER_ARG_MAX];
-        int argc = 0;
-        int i = 0;
-
-        while (i < input_len && argc < USER_ARG_MAX) {
-            while (i < input_len && input[i] == ' ')
-                input[i++] = '\0';
-            if (i >= input_len)
-                break;
-            argv[argc++] = &input[i];
-            while (i < input_len && input[i] != ' ')
-                i++;
-        }
-
-        if (argc == 0)
-            ;   /* nothing but spaces */
-        else if (strcmp(argv[0], "help") == 0)
-            cmd_help();
-        else if (strcmp(argv[0], "about") == 0)
-            cmd_about();
-        else if (strcmp(argv[0], "clear") == 0)
-            surf_clear(&term);
-        else
-            cmd_program(argc, argv);
-    }
+    if (input_len != 0)
+        run_line(input, input_len, "from the prompt");
 
     input_len = 0;
     input[0] = '\0';

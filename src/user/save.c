@@ -30,18 +30,19 @@
 
 #define NOTE_DIR     "/tmp/"
 #define NOTE_EXT     ".txt"
+#define BAT_EXT      ".bat"
 #define NOTE_NAME_MAX 12            /* letters, digits or _ */
 #define NOTE_PATH_MAX 32            /* dir + name + ext + NUL, with room */
-#define NOTE_CONTENT_MAX 512        /* one note */
+#define NOTE_CONTENT_MAX 512        /* one note, or one script */
 
 static char path[NOTE_PATH_MAX];
 static char content[NOTE_CONTENT_MAX];
 static char line[64];
 static char chunk[128];
 
-/* Compose "/tmp/<name>.txt" into the static path. Returns 1 when the name is
+/* Compose "/tmp/<name><ext>" into the static path. Returns 1 when the name is
  * usable and the result fits, 0 otherwise. */
-static int note_path(const char *name)
+static int note_path_ext(const char *name, const char *ext)
 {
     unsigned long l = wc_strlen(name);
     if (l == 0 || l > NOTE_NAME_MAX)
@@ -58,12 +59,17 @@ static int note_path(const char *name)
             return 0;               /* a name is a word, not a path */
         path[n++] = c;
     }
-    for (const char *p = NOTE_EXT; *p != '\0'; p++)
+    for (const char *p = ext; *p != '\0'; p++)
         path[n++] = *p;
     if (n + 1 > NOTE_PATH_MAX)
         return 0;                   /* unreachable with the caps above, stated */
     path[n] = '\0';
     return 1;
+}
+
+static int note_path(const char *name)
+{
+    return note_path_ext(name, NOTE_EXT);
 }
 
 /* One line, one write() — see wcstr.h: a tick may land between two syscalls and
@@ -87,42 +93,51 @@ static void say_bad_name(const char *name)
     say("save: a name is letters, digits or _ , up to 12");
 }
 
-/* --- save write <name> <words...> --------------------------------------- */
-static int do_write(int argc, char **argv)
+/* Join argv[from..argc] into `content`. Words are separated by one space and
+ * the result ends with a newline, because a file whose last line has no
+ * terminator is the small misery every editor has to work around.
+ *
+ * `nl_lines` is the batch-file rule: with it on, a word that is exactly `nl`
+ * becomes a newline instead of the two letters. It exists because the shell
+ * tokenises a command line on spaces and there is no way to type a line
+ * terminator into one — so the separator has to be a word. With it off the word
+ * stays literal text, which is what someone writing a note expects: `save write
+ * demo the nl plan` keeps saying "nl". */
+static unsigned build_content(int argc, char **argv, int from, int nl_lines)
 {
-    if (argc < 3) {
-        say("save: usage save write <name> <words...>");
-        return 1;
-    }
-    if (!note_path(argv[2])) {
-        say_bad_name(argv[2]);
-        return 1;
-    }
-
-    /* Join the remaining words with single spaces and end the note with a
-     * newline, because a file whose last line has no terminator is the small
-     * misery every editor has to work around. */
     unsigned n = 0;
-    for (int i = 3; i < argc && n < NOTE_CONTENT_MAX; i++) {
-        if (i > 3 && n < NOTE_CONTENT_MAX)
+    int at_start = 1;           /* nothing on the current line yet */
+
+    for (int i = from; i < argc && n + 1 < NOTE_CONTENT_MAX; i++) {
+        if (nl_lines && wc_streq(argv[i], "nl")) {
+            if (!at_start)
+                content[n++] = '\n';
+            at_start = 1;
+            continue;
+        }
+        if (!at_start)
             content[n++] = ' ';
+        at_start = 0;
         unsigned long l = wc_strlen(argv[i]);
-        for (unsigned long j = 0; j < l && n < NOTE_CONTENT_MAX; j++)
+        for (unsigned long j = 0; j < l && n + 1 < NOTE_CONTENT_MAX; j++)
             content[n++] = argv[i][j];
     }
-    if (n == 0) {
-        say("save: nothing to write");
-        return 1;
-    }
-    if (n < NOTE_CONTENT_MAX)
+    if (n > 0 && content[n - 1] != '\n')
         content[n++] = '\n';
-    /* A note that filled the buffer exactly has no terminator: the file is then
-     * one full unbroken line, which is a long note, not a corrupt one. */
+    /* A payload that filled the buffer exactly has no terminator: the file is
+     * then one full unbroken line, which is a long note, not a corrupt one. */
+    return n;
+}
 
-    long fd = wc_open_flags(path, WC_O_WRONLY | WC_O_CREAT | WC_O_TRUNC);
+/* Store `n` bytes of `content` at `path` in one write() — one call is what makes
+ * the file land whole rather than half-written for anyone reading it in
+ * between. Returns 0 on success. */
+static int store(const char *p, unsigned n)
+{
+    long fd = wc_open_flags(p, WC_O_WRONLY | WC_O_CREAT | WC_O_TRUNC);
     if (fd < 0) {
         unsigned h = wc_app_str(line, 0, "save: open failed on ");
-        h = wc_app_str(line, h, path);
+        h = wc_app_str(line, h, p);
         h = wc_app_str(line, h, ", error ");
         h = wc_app_signed(line, h, fd);
         say_len(h);
@@ -139,7 +154,7 @@ static int do_write(int argc, char **argv)
         h = wc_app_str(line, h, " of ");
         h = wc_app_dec(line, h, n);
         h = wc_app_str(line, h, " bytes ");
-        h = wc_app_str(line, h, path);
+        h = wc_app_str(line, h, p);
         say_len(h);
         return 1;
     }
@@ -147,11 +162,56 @@ static int do_write(int argc, char **argv)
     unsigned h = wc_app_str(line, 0, "save: wrote ");
     h = wc_app_dec(line, h, n);
     h = wc_app_str(line, h, " bytes ");
-    h = wc_app_str(line, h, path);
+    h = wc_app_str(line, h, p);
     h = wc_app_str(line, h, " pid ");
     h = wc_app_dec(line, h, (unsigned long)pid);
     say_len(h);
     return 0;
+}
+
+/* --- save write <name> <words...> --------------------------------------- */
+static int do_write(int argc, char **argv)
+{
+    if (argc < 3) {
+        say("save: usage save write <name> <words...>");
+        return 1;
+    }
+    if (!note_path(argv[2])) {
+        say_bad_name(argv[2]);
+        return 1;
+    }
+
+    unsigned n = build_content(argc, argv, 3, 0);
+    if (n == 0) {
+        say("save: nothing to write");
+        return 1;
+    }
+    return store(path, n);
+}
+
+/* --- save script <name> <words...> -------------------------------------- */
+/* The batch file the shell's `bat` runs. This verb is the only place a newline
+ * can come from, and it is what turns `save` from "a program that writes a
+ * string" into "a program that writes a program": the bytes stored here become
+ * commands the shell obeys, which is the first time anything in this OS takes
+ * instructions out of a file a ring-3 process made. */
+static int do_script(int argc, char **argv)
+{
+    if (argc < 3) {
+        say("save: usage save script <name> <cmd> nl <cmd> ...");
+        return 1;
+    }
+    if (!note_path_ext(argv[2], BAT_EXT)) {
+        say_bad_name(argv[2]);
+        return 1;
+    }
+
+    unsigned n = build_content(argc, argv, 3, 1);
+    if (n == 0) {
+        say("save: nothing to write");
+        return 1;
+    }
+    return store(path, n);
 }
 
 /* --- save read <name> ---------------------------------------------------- */
@@ -256,17 +316,19 @@ void _start(int argc, char **argv)
     int code;
 
     if (argc < 2) {
-        say("save: usage save write|read|list <name> [words...]");
+        say("save: usage save write|read|list|script <name> [words...]");
         wc_exit(1);
     }
     if (wc_streq(argv[1], "write"))
         code = do_write(argc, argv);
     else if (wc_streq(argv[1], "read"))
         code = do_read(argc, argv);
+    else if (wc_streq(argv[1], "script"))
+        code = do_script(argc, argv);
     else if (wc_streq(argv[1], "list"))
         code = do_list();
     else {
-        say("save: unknown verb; try write, read or list");
+        say("save: unknown verb; try write, read, script or list");
         code = 1;
     }
 
