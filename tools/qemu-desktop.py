@@ -44,6 +44,10 @@ Scenarios (each one asserts the serial markers the kernel prints):
     cursor     prove the resize cursor: hover the status window's left edge, its
                bottom-right corner, and its body, and require the kernel to log
                the border mask it is showing (a plain arrow off the border)
+    snap       prove Aero Snap: drag a window's title bar to the left edge of the
+               screen and it tiles as a half, then drag the tiled window to the
+               top-right corner and it tiles as a quarter. The kernel logs the
+               zone and the rect it applied, and the test asserts that geometry
 
 Exit status 0 = every step did what the serial log says it did.
 SPDX-License-Identifier: MIT
@@ -110,6 +114,22 @@ def last_cursor():
     if not hits:
         return None
     return int(hits[-1])
+
+
+def last_snap():
+    """Return (code, w, h, x, y) from the LAST `wm: snapped <c> <W>x<H> at
+    <x>,<y>` line, or None. The kernel logs it only when a drag ends on a screen
+    edge, so this reads the tile it actually applied - the geometry, not a
+    guess. code is the kernel's SNAP_* enum (1 left, 2 right, 3..6 corners)."""
+    try:
+        with open(LOG, errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    hits = re.findall(r"wm: snapped (\d+) (\d+)x(\d+) at (-?\d+),(-?\d+)", text)
+    if not hits:
+        return None
+    return tuple(int(v) for v in hits[-1])
 
 
 class Monitor:
@@ -514,6 +534,38 @@ def scenario_actions(sc, mon, W, H):
         m = last_cursor()
         if m != 0:
             raise SystemExit("body showed cursor %r, want 0 (arrow)" % (m,))
+    elif sc == "snap":
+        # v0.1.17 Aero Snap: drop a dragged title bar on a screen edge and the
+        # window tiles to a half or a quarter. Raise the status window, drag it
+        # to the left edge, then drag the tiled window to the top-right corner.
+        # The kernel logs the zone code and the rect it chose, so the assertion
+        # reads geometry the WM computed - not pixels the test guessed.
+        sx, sy = 116, 88
+        work = H - TASKBAR_H
+        SNAP_LEFT, SNAP_TR = 1, 4              # the kernel's SNAP_* enum
+        mon.click(sx + 40, sy + TITLE_H + 40)  # raise it, clear of every border
+        # grab the title bar - below the 5 px top resize band, far from the
+        # buttons - and release 6 px inside the left edge at mid height
+        gx, gy = sx + 40, sy + TITLE_H // 2
+        mon.drag(gx, gy, 6 - gx, H // 2 - gy)
+        time.sleep(0.5)
+        s = last_snap()
+        if s is None:
+            raise SystemExit("dragging to the left edge logged no snap")
+        want = (SNAP_LEFT, W // 2, work, 0, 0)
+        if s != want:
+            raise SystemExit("left snap %r, want %r" % (s, want))
+        # the window is now the left half at (0,0). Grab its title and release in
+        # the top-right corner: the quarter must be sized from the work area
+        # (work // 2 tall), not from the half it was living in - which is what
+        # proves the drag-out kept the pre-snap rect instead of reusing the tile.
+        gx, gy = 40, TITLE_H // 2
+        mon.drag(gx, gy, (W - 6) - gx, 6 - gy)
+        time.sleep(0.5)
+        s = last_snap()
+        want = (SNAP_TR, W // 2, work // 2, W // 2, 0)
+        if s != want:
+            raise SystemExit("top-right snap %r, want %r" % (s, want))
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -560,6 +612,9 @@ MARKERS = {
     # the per-position mask is asserted in the scenario; this marker proves the
     # kernel reports which border the pointer is hovering (the resize cursor)
     "cursor":    ["wm: cursor resize"],
+    # the half/quarter geometry is asserted in the scenario against the rect the
+    # kernel logged; this marker is what a snap turns on
+    "snap":      ["wm: snapped"],
 }
 
 

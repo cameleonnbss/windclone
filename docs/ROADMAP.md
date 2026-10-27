@@ -515,6 +515,23 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       headlessly by `tools/qemu-desktop.py cursor`: it hovers the status window's
       left edge, its bottom-right corner and its body, and reads the border mask
       the kernel logs on each hover change — the geometry, not a screenshot.
+- [x] Window snapping / Aero Snap (v0.1.17): drag a window's title bar onto a
+      screen edge and it tiles. The cursor's *release point* picks the zone —
+      left or right edge for a half, and the top or bottom corner of that edge
+      for a quarter — within `SNAP_MARGIN` px of the border. The tile is computed
+      from the work area (`H - TASKBAR_H`), never the full screen, so no snapped
+      window can hide under the taskbar. The pre-snap rect already lives in
+      `rx/ry/rw/rh`, and a drag started on a *snapped* window keeps it rather than
+      overwriting it with the tile — so detaching a tiled window and snapping it
+      again still restores to where the window really came from. A snapped window
+      is still a normal window: it can be dragged out, resized, maximised,
+      minimised and closed, and `set_maximised(0)` clears the snap. Proven
+      headlessly by `tools/qemu-desktop.py snap`: a real PS/2 title-bar drag to
+      the left edge, then a second drag of the tiled window to the top-right
+      corner, asserting the zone code and the exact rect out of the kernel's own
+      `wm: snapped <zone> <W>x<H> at <x>,<y>` line. Still open here: the snap
+      *overlay* (the preview ghost Windows shows while you hover an edge), which
+      needs its own damage rect and is its own next step.
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
 

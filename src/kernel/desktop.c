@@ -69,6 +69,7 @@
 #define RESIZE_EDGE 5          /* px band that counts as a border grab */
 #define MIN_W       200        /* floors: keep console/program text usable */
 #define MIN_H       120
+#define SNAP_MARGIN 24         /* drag the title this close to an edge to snap */
 
 enum { WIN_STATUS, WIN_TRASH, WIN_TERM, WIN_PROGRAM };
 enum { BTN_MIN, BTN_MAX, BTN_CLOSE, BTN_NONE };
@@ -77,6 +78,10 @@ enum { BTN_MIN, BTN_MAX, BTN_CLOSE, BTN_NONE };
 enum { RS_NONE = 0, RS_LEFT = 1, RS_RIGHT = 2, RS_TOP = 4, RS_BOTTOM = 8 };
 /* Which cursor glyph draw_cursor() paints for a border mask (cursor_shape_id). */
 enum { CUR_ARROW, CUR_NS, CUR_EW, CUR_NWSE, CUR_NESW };
+/* Where a dragged window snapped to, and what it restores from. 0 is floating;
+ * 1/2 are the left/right halves, 3..6 the four corners (top-left, top-right,
+ * bottom-left, bottom-right). The pre-snap rect lives in rx/ry/rw/rh. */
+enum { SNAP_NONE, SNAP_LEFT, SNAP_RIGHT, SNAP_TL, SNAP_TR, SNAP_BL, SNAP_BR };
 
 /* Three windows are fixed (status, trash, terminal) and live at indices 0..2,
  * their kind equalling their index. Beyond them is a pool of program windows —
@@ -98,6 +103,7 @@ struct window {
     int open;                  /* closed windows leave until an icon reopens them */
     int min;                   /* minimised: open, hidden, taskbar only */
     int max;                   /* maximised: fills the desktop          */
+    int snap;                  /* SNAP_*: tiled by a drag to a screen edge */
     int slot;                  /* program surface id, or -1 for a fixed window */
     int pid;                   /* the launched program's pid (window marker) */
 };
@@ -226,8 +232,38 @@ static void set_maximised(struct window *w, int on, int W, int H)
     } else {
         w->x = w->rx; w->y = w->ry; w->w = w->rw; w->h = w->rh;
         w->max = 0;
+        w->snap = SNAP_NONE;
         klog("wm: window restored");
     }
+}
+
+/* Aero Snap: drop a dragged window's title bar near a screen edge and it tiles.
+ * The cursor's release point picks the zone — left/right edge for a half, and a
+ * top or bottom corner of that edge for a quarter. The pre-snap rect is already
+ * in rx/ry/rw/rh (captured when the drag began), so grabbing the title again
+ * floats it back. A maximised window is never dragged here. Returns 1 when it
+ * re-tiled, which the caller uses to force a full repaint. */
+static int try_snap(int id, int mx, int my, int W, int H)
+{
+    struct window *w = &wins[id];
+    int work = H - TASKBAR_H;
+    int left  = mx <= SNAP_MARGIN;
+    int right = mx >= W - SNAP_MARGIN;
+    if (w->max || (!left && !right)) {
+        w->snap = SNAP_NONE;          /* dropped in open space: it floats */
+        return 0;
+    }
+    int top = my <= SNAP_MARGIN;
+    int bot = my >= work - SNAP_MARGIN;
+
+    w->x = left ? 0 : W / 2;
+    w->w = W / 2;
+    if (top)      { w->y = 0;      w->h = work / 2; w->snap = left ? SNAP_TL : SNAP_TR; }
+    else if (bot) { w->y = work/2; w->h = work / 2; w->snap = left ? SNAP_BL : SNAP_BR; }
+    else          { w->y = 0;      w->h = work;     w->snap = left ? SNAP_LEFT : SNAP_RIGHT; }
+
+    klog("wm: snapped %d %dx%d at %d,%d", w->snap, w->w, w->h, w->x, w->y);
+    return 1;
 }
 
 /* --- painting ---------------------------------------------------------- */
@@ -940,7 +976,7 @@ static void handle_press(int mx, int my, int W, int H)
                 w->slot = -1;
                 w->pid = 0;
             }
-            w->open = 0; w->min = 0; w->max = 0;
+            w->open = 0; w->min = 0; w->max = 0; w->snap = SNAP_NONE;
             klog("wm: window closed");
             return;
         case BTN_MIN:
@@ -955,6 +991,14 @@ static void handle_press(int mx, int my, int W, int H)
         }
         if (w->max)
             return;                     /* a maximised window does not drag */
+        /* Remember where to restore if this drag ends in a snap — but keep the
+         * existing rect when the window is already snapped, so grabbing a tiled
+         * title detaches it and a later snap still restores to the original
+         * floating spot, not to the tiled size. */
+        if (!w->snap) {
+            w->rx = w->x; w->ry = w->y; w->rw = w->w; w->rh = w->h;
+        }
+        w->snap = SNAP_NONE;
         dragging = 1;
         drag_win = id;
         grab_dx = mx - w->x;
@@ -1052,6 +1096,7 @@ static void layout(void)
     for (int i = 0; i < WIN_TOTAL; i++) {
         wins[i].rx = wins[i].x;  wins[i].ry = wins[i].y;
         wins[i].rw = wins[i].w;  wins[i].rh = wins[i].h;
+        wins[i].snap = SNAP_NONE;
     }
 
     laid_out = 1;
@@ -1099,6 +1144,7 @@ void wm_open_program(int slot, int pid)
     w->open  = 1;
     w->min   = 0;
     w->max   = 0;
+    w->snap  = SNAP_NONE;
     raise_window(id);
 }
 
@@ -1121,11 +1167,14 @@ void desktop_frame(void)
 
     /* Release closes whichever gesture was live. A resize logs its final
      * geometry once - and only if the size actually changed, so a stray grab
-     * with no move is silent. */
+     * with no move is silent. A drag that ends on a screen edge snaps. */
+    int snap_now = 0;
     if (!left && (dragging || resizing)) {
         if (resizing && resize_changed)
             klog("wm: window resized %dx%d",
                  wins[resize_win].w, wins[resize_win].h);
+        if (dragging && !resizing)
+            snap_now = try_snap(drag_win, mx, my, W, H);
         dragging = 0;
         resizing = 0;
         resize_mask = 0;
@@ -1194,6 +1243,7 @@ void desktop_frame(void)
             || press
             || dragging
             || resizing
+            || snap_now
             || (menu_open != prev_menu_open)
             || !gfx_has_backbuffer();
 

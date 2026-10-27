@@ -666,6 +666,14 @@ echo '==> resize cursor (the pointer changes over a border)'
 python3 tools/qemu-desktop.py windclone.iso cursor \
     || fail 'the cursor did not change shape over a window border'
 
+# v0.1.17: Aero Snap. Drag the status window's title bar to the left edge and the
+# WM tiles it as a half; drag that tiled window to the top-right corner and it
+# tiles as a quarter. The scenario compares the rect the kernel logged against
+# the work area it computed from its own banner size - the geometry is the claim.
+echo '==> window snapping (drag a title bar to an edge: halves, quarters)'
+python3 tools/qemu-desktop.py windclone.iso snap \
+    || fail 'a window did not snap to a screen edge when dragged by its title bar'
+
 # v0.1.12: the double buffer + damage claim, measured. The scenario reads the
 # kernel's own "gfx: flip <n> rects, <area> px" lines and requires three things:
 # the boot frame flipped the whole screen, a pure mouse move flipped only a
