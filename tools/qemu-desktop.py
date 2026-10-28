@@ -83,6 +83,19 @@ Scenarios (each one asserts the serial markers the kernel prints):
                typed, and a *different* process (`save read demo`) has to read
                exactly that many bytes back, with the words typed only into the
                editor present between its two lines.
+    highlight  prove a syntax-highlighting code viewer: type `view /src/hello.c`
+               so /bin/view opens a source file that ships in the initrd, decides
+               what each token is, and paints the answer with the in-band colour
+               escape (FS + a palette digit). The kernel says it consumed one -
+               `wm: colour pid N` comes out of the parser and not out of a byte
+               count - and the escape has to be found on the wire in front of the
+               words it names: the comment ink on the file's own first row, a
+               keyword in front of `include`, a number in front of `42`, a type
+               in front of `int`, the string ink in front of a quote. Three
+               Ctrl+F page-downs have to deliver them, because they are on the
+               second, third and fourth screens and not the first, and the status
+               row at the last page has to agree with the line count the program
+               reported when it opened.
 
 Exit status 0 = every step did what the serial log says it did.
 SPDX-License-Identifier: MIT
@@ -1100,6 +1113,111 @@ def scenario_actions(sc, mon, W, H):
             raise SystemExit("the editor drew %d frames, and an editor that "
                              "paints once does not show an edit"
                              % count_serial(r"NOTEPAD - /tmp/demo\.txt"))
+    elif sc == "highlight":
+        # v0.1.22: colour inside a program window. /bin/view opens a source file
+        # that is already in the initrd, decides what every token *is*, and says
+        # so with FS+digit. Three separate facts are proven below, in the order
+        # that makes each one depend on the last: the program put escapes on the
+        # wire attached to the words they name, the kernel consumed a pair and
+        # moved a pen (its own serial line, emitted by the parser and not by a
+        # byte counter), and the rows that carry them are the rows the file
+        # contains - which is what scrolling proves, because a keyword that only
+        # appears on the third screen cannot be painted from a table that was
+        # never consulted.
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+        mon.type_text("view /src/hello.c\n")
+
+        m = wait_serial(r"wm: program window opened 'view' pid (\d+)")
+        vpid = int(m.group(1))
+        m = wait_serial(r"view: opened /src/hello\.c, (\d+) bytes pid (\d+)")
+        nbytes, opid = int(m.group(1)), int(m.group(2))
+        if opid != vpid:
+            raise SystemExit("the file was read by pid %s and the window belongs "
+                             "to pid %d" % (opid, vpid))
+        # The specimen has to be longer than one screen or the scroll assertions
+        # below would be provable by a viewer that showed the same twelve rows
+        # forever, and shorter than the viewer's own 2048-byte budget or the rows
+        # past that budget would not exist and the page-downs below would be
+        # waiting for text the file never delivered. Both numbers are src/user/
+        # view.c's VIEW_MAX and the specimen's length, mirrored here the same way
+        # RESIZE_EDGE and MIN_W are mirrored from desktop.c.
+        if nbytes < 1024:
+            raise SystemExit("the specimen is %d bytes, too short to overflow a "
+                             "twelve-row view" % nbytes)
+        if nbytes >= 2048:
+            raise SystemExit("the specimen is %d bytes, past the viewer's "
+                             "budget: it truncated the file" % nbytes)
+        m = wait_serial(r"view: highlighted (\d+) keywords in (\d+) lines "
+                        r"pid (\d+)")
+        nkey, nlines, kpid = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if kpid != vpid or nkey < 5 or nlines < 2 * 12:
+            raise SystemExit("the viewer counted %d keywords in %d lines "
+                             "(pid %s, window %d)" % (nkey, nlines, kpid, vpid))
+
+        # A frame is a screen and not a scrollback, and the pen moved in it.
+        wait_serial(r"wm: screen cleared pid %d" % vpid)
+        wait_serial(r"wm: colour pid %d" % vpid)
+
+        # The first screen is the block comment at the top of the specimen, so
+        # every row on it is painted in the comment ink: one escape per row, and
+        # the row content is the file's own text with no digits of its own.
+        wait_serial(r"\x1c7/\* WindClone")
+
+        # Ctrl+F once: rows 13..24, which is where the preprocessor lines are.
+        # `include` and `define` are in the keyword table and `42` is a number,
+        # so a viewer that painted everything in one ink could not produce these
+        # three bytes in this order.
+        mark = len(read_log())
+        mon.key("ctrl-f")
+        mark, _ = wait_serial_after(mark, r"\x1c2include")
+        mark, _ = wait_serial_after(mark, r"\x1c2define")
+        mark, _ = wait_serial_after(mark, r"\x1c442")
+
+        # Again: rows 25..36, where a type and a control keyword sit on
+        # consecutive rows. Both come from a table lookup per token, so the two
+        # colours are the evidence the scan ran over the whole file at open
+        # rather than over what was already on screen.
+        mon.key("ctrl-f")
+        mark, _ = wait_serial_after(mark, r"\x1c2static")
+        mark, _ = wait_serial_after(mark, r"\x1c6int")
+
+        # And again, to the row with the string literal on it.
+        mon.key("ctrl-f")
+        mark, _ = wait_serial_after(mark, r'\x1c3"')
+
+        # Ctrl+E jumps to the last page. The status row is written by the viewer
+        # from its own counts, so the numbers it has to agree with are the ones
+        # taken from the open lines above and not from a transcription of the
+        # specimen - a file that gained a line moves the expectation with it.
+        mon.key("ctrl-e")
+        mark, _ = wait_serial_after(
+            mark, r"LIGNES %d-%d SUR %d" % (nlines - 11, nlines, nlines))
+
+        # Ctrl+A back to the top, and the first row of the file reappears.
+        mon.key("ctrl-a")
+        mark, _ = wait_serial_after(mark, r"\x1c7/\* WindClone")
+
+        # Ctrl+Q, and the exit code the window keeps showing.
+        mon.key("ctrl-q")
+        wait_serial(r"view: quit pid %d" % vpid)
+        wait_serial(r"proc: pid %d died holding the keyboard" % vpid)
+        wait_serial(r"shell: view exited with 0")
+
+        # Exactly one window named view: the path was typed once, at the prompt,
+        # and no fragment of it or of the viewer's own output came back as a
+        # second command. A key that landed on the prompt would show up here as
+        # a launch nobody asked for or a name the shell could not find.
+        if count_serial(r"wm: program window opened 'view'") != 1:
+            raise SystemExit("the view opened %d windows, not one"
+                             % count_serial(r"wm: program window opened 'view'"))
+        for leak in (r"shell: no program /bin/",
+                     r"shell: running 'static'",
+                     r"shell: running 'include'"):
+            if count_serial(leak) != 0:
+                raise SystemExit("something the viewer was given reached the "
+                                 "command line: %s" % leak)
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -1183,6 +1301,15 @@ MARKERS = {
                   "note: editing /tmp/demo.txt", "note: saved",
                   "note: quit", "shell: note exited with 0",
                   "save: read back"],
+    # the token-by-token colour, the page-downs and the status row are asserted in
+    # the scenario; these are the lines the claim turns on - a source file out of
+    # the initrd, a window the parser moved the pen inside, and a viewer that
+    # counted the tokens it was about to colour before it painted any
+    "highlight": ["shell: running 'view' from the prompt",
+                  "wm: program window opened 'view'",
+                  "view: opened /src/hello.c", "wm: screen cleared pid",
+                  "wm: colour pid", "view: highlighted",
+                  "view: quit", "shell: view exited with 0"],
 }
 
 

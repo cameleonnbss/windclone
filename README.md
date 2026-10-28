@@ -266,6 +266,31 @@ On boot the kernel:
    reads `/tmp/demo.txt` back through the save tool, so the proof is that the
    bytes are still there, not that a window looked right.
 
+25. paints **a syntax-highlighting code viewer** — `/bin/view`. Type
+   `view /src/hello.c` and a program window opens on a real C file that ships in
+   the initrd, with the keywords in cyan, the types in violet, the numbers in
+   magenta, the strings in yellow and the comments dimmed. Colour needed one byte
+   and no syscall: a program writes FS (`0x1C`, the control byte ASCII reserved
+   for "file separator" and that no document text has ever wanted) followed by a
+   digit `0`–`7`, and every glyph after it lands in that ink. It is in-band for
+   the same reason `\f` is — the request travels on the same wire as the text it
+   decorates, so it cannot be reordered against the row it belongs to, and the
+   eight inks are a table in `shell.c` rather than RGB in every program. Index 0
+   *is* the green this OS has drawn text with since the first window, which is why
+   the nineteen programs that never mention a colour paint exactly the screen they
+   painted before. The kernel keeps one attribute byte per cell, scrolls the
+   attributes with the rows, and draws a row in runs of equal ink at
+   `x + column*6` — the font is a fixed 5+1 grid, so a cell is an addressable
+   column and not a pixel count. `wm: colour pid N` is logged by the parser when
+   it *consumes* a complete pair, not by a byte counter that would fire on a lone
+   FS. Like `/bin/note` this is one program on syscalls that already exist, and it
+   is read-only on purpose: editing a highlighted file is the next step, not this
+   one. The `highlight` scenario types the path, then pages down with Ctrl+F three
+   times, and asserts on the wire that the escape sits in front of `include`,
+   `42`, `int` and a string quote — tokens that live on the second, third and
+   fourth screens, so the page-downs are what prove the whole file was classified
+   and not merely the twelve rows that happened to be visible.
+
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
 triple-faulting.

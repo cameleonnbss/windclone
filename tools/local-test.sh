@@ -724,6 +724,18 @@ echo '==> a text editor (open, edit, save a file in its own window)'
 python3 tools/qemu-desktop.py windclone.iso editing \
     || fail 'the editor could not open, edit or save a file, or the save did not persist'
 
+# v0.1.22: colour in a program window, and a code viewer that uses it. The
+# scenario opens a source file that ships in the initrd, requires the kernel to
+# report that it consumed a colour escape, and then looks for the escape on the
+# wire in front of the specific words it names - a keyword before `include`, a
+# type before `int`, a number before `42`, a string before a quote. Those tokens
+# live on the second, third and fourth screens, so the three page-downs that have
+# to deliver them are what proves the whole file was classified and not just the
+# rows that happened to be visible when it opened.
+echo '==> a syntax-highlighting code viewer (colour in a program window)'
+python3 tools/qemu-desktop.py windclone.iso highlight \
+    || fail 'the viewer could not open, colour or scroll a source file'
+
 # v0.1.12: the double buffer + damage claim, measured. The scenario reads the
 # kernel's own "gfx: flip <n> rects, <area> px" lines and requires three things:
 # the boot frame flipped the whole screen, a pure mouse move flipped only a

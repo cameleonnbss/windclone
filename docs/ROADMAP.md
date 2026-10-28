@@ -775,25 +775,87 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         channel lives next to the monitor socket, and the scenario reads the *raw*
         serial log for the byte comparison, because the driver puts a carriage return
         after every line feed and Python would hand that back as a second newline.
+- [x] Per-cell colour in a program window, and **a code viewer** that uses it
+      (v0.1.22): `/bin/view` opens a real C file out of the initrd and paints its
+      keywords, types, numbers, strings and comments in different inks. The
+      release is two decisions, and both were made to avoid a third.
+      - **A colour request is a byte, not a syscall.** `FS` (`0x1C`) followed by a
+        digit `0`–`7` moves the pen; every glyph after it lands in that ink. The
+        alternative — `wc_color(fd, index)` — would have needed a new ABI number, a
+        new kernel entry point and a new struct in the contract every program
+        shares, and it would have been *worse*: an out-of-band request can arrive
+        after the row it was meant to decorate, because writes and syscalls are
+        ordered per process and a highlighter thinks in rows. FS is what ASCII
+        reserved for "file separator", which is a control byte no document text has
+        ever wanted, and it is the same trick `\f` was used for in v0.1.21: the
+        request rides on the wire the program is already writing to. The parser
+        keeps a one-byte flag rather than a two-byte window because FS can arrive at
+        the end of one write and its digit at the start of the next, which is the
+        normal case for a program that builds a frame row by row.
+      - **One attribute byte per cell, and a palette of eight roles.** A surface
+        grew an `attr[17][62]` beside its `rows`, scrolls with it, and is painted in
+        *runs* of equal attribute at `x + column * 6` — the font is a fixed 5+1 grid,
+        so a cell is an addressable column and a run is one `gfx_text` call instead
+        of six. RGB per cell would have cost more RAM than the text it decorated, and
+        a program can only name eight inks anyway; what it names is a *role* (keyword,
+        string, number, comment) and not a hue, which is the right shape because
+        highlighting is readable exactly when `int` and `return` are coloured for the
+        same reason. Index 0 is the `0x22C55E` this OS has always drawn with, so the
+        nineteen programs that never mention a colour paint the identical screen — a
+        compatibility claim you can check rather than a promise.
+      - **`wm: colour pid N` is logged by the parser, not by a byte counter.** The
+        first version emitted it when a `0x1C` appeared in the buffer, which would
+        have fired on a lone FS from a program that had not finished speaking: the
+        line would have claimed a pen move that had not happened. The surface now
+        latches "a complete pair was consumed", and the router reads that.
+      - **The viewer classifies the whole file once, at open,** into a byte-per-byte
+        table — block comment, line comment, string, char literal, number, keyword,
+        type — so painting a row is a lookup and not a re-lex, which is what lets it
+        repaint on every page-down. `view: highlighted 8 keywords in 56 lines` is
+        counted over the file, not over the twelve rows on screen, and a file longer
+        than the 2048-byte budget says `, truncated` in its own log line instead of
+        quietly showing half.
+      - **What it is not, stated plainly.** It is *read-only*: a highlighter that
+        could also delete a user's source with one wrong key would need a dirty flag,
+        an undo and a save dialog, and none of those are this program's job. Two word
+        lists and a left-to-right scan, not a grammar: no nesting, no macro
+        expansion, no context, and the one lie it tells on purpose is that a keyword
+        inside a comment is coloured as a comment (which is what a reader wants, not
+        what a compiler does). Line numbers cost five of the 56 cells, and lines
+        longer than the rest of the budget are cut rather than wrapped, because a
+        viewer that wraps is a viewer whose row count no longer matches the file's.
+      - **The proof is the token, not the picture.** `tools/qemu-desktop.py highlight`
+        types `view /src/hello.c`, requires `wm: colour pid`, and then looks for the
+        escape *in front of the words it names* on the wire: `\x1c7` on the file's own
+        first row, `\x1c2include`, `\x1c4` before `42`, `\x1c6int`, `\x1c3` before a
+        quote. Those four tokens are on the second, third and fourth screens, so the
+        three Ctrl+F page-downs that have to deliver them are what prove the whole
+        file was classified and not the twelve rows that happened to be visible; the
+        final `LIGNES 45-56 SUR 56` is computed from the line count the program
+        reported at open, so a specimen that gains a line moves the expectation with
+        it instead of breaking it.
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
-- [ ] A **code** editor as a program window. The text editor shipped in v0.1.21 and
-      settled the three problems that were standing in front of it: a buffer that
-      survives a repaint is one 17-row `write()` behind a `\f`, Ctrl+letter is a
-      real wire protocol, and saving is the write path a program can already call.
-      What a code editor still needs is its own work. First, the keys that are not
-      characters: arrows and Home/End arrive as E0-prefixed scancodes that
-      `keyboard.c` currently swallows, and putting them on the wire means either an
-      escape sequence per program or a small key-code channel beside the byte
-      stream — a decision `note` deliberately did not make for it. Second, syntax
-      highlighting: the compositor draws a 5x7 glyph per cell with no per-cell
-      colour, so coloured keywords is either a palette on the surface router's rows
-      or a program that draws its own window body, and that choice is a
-      presentation decision that wants a test of its own. Third, an open/save-as
-      *dialog*, which means either a second window per program slot or a modal
-      drawn inside the first. Fourth, a document bigger than one buffer: 512 bytes
-      and 12 visible rows is a notepad, not an IDE, and paging a file through the
-      VFS is the honest next cost.
+- [ ] A **code editor that writes back** — a program window that highlights and
+      edits the same file. Two releases settled the problems that were standing in
+      front of it: the text editor in v0.1.21 (a buffer that survives a repaint is
+      one 17-row `write()` behind a `\f`, Ctrl+letter is a real wire protocol, and
+      saving is the write path a program can already call) and v0.1.22, which put
+      per-cell colour on the surface router and settled the highlighting question by
+      deciding it in favour of a palette on the rows rather than a program drawing
+      its own window body. `/bin/view` is the half that is done. What the editor
+      still needs is its own work. First, joining the two: `view` classifies a
+      byte-per-byte table at open and note owns a mutable buffer, and an edit
+      invalidates the classes from the caret to the end of the token — re-classify
+      the window rather than the file, or the colours will disagree with the text.
+      Second, the keys that are not characters: arrows and Home/End arrive as
+      E0-prefixed scancodes that `keyboard.c` currently swallows, and putting them
+      on the wire means either an escape sequence per program or a small key-code
+      channel beside the byte stream — a decision `note` deliberately did not make
+      for it. Third, an open/save-as *dialog*, which means either a second window
+      per program slot or a modal drawn inside the first. Fourth, a document bigger
+      than one buffer: 512 bytes for an editor and 2048 for a viewer, and neither is
+      an IDE; paging a file through the VFS is the honest next cost.
 - [ ] A block device driver (ATA or NVMe), so `tmpfs` can stop being the only
       place a byte a program wrote can go
 

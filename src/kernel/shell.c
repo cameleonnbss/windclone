@@ -34,22 +34,68 @@
 #define SHELL_ROWS 17
 #define SHELL_COLS 62
 #define LINE_H     11
+#define GLYPH_W    6              /* 5 columns of font + 1 of spacing (gfx.c) */
 
 /* One scrollback grid, and the code that writes and paints it, lifted out of
  * the terminal so it can be shared. The terminal is one instance; every
  * launched program gets another (see `struct program` below). Text stays cells
  * rather than pixels for the reason a real terminal does: a window can be
  * dragged, overlapped and repainted as often as it likes and the scrollback is
- * still there. */
+ * still there.
+ *
+ * The colour escape: a program writes FS (0x1C) followed by one digit 0..7 and
+ * every glyph after that is painted in palette[index] until it says otherwise.
+ * It is in-band for the same reason the form feed is (see surf_write): a byte
+ * that is not a glyph, already on the wire the program is writing, so a
+ * highlighter needs no syscall and no new ABI. FS is what ASCII reserved for
+ * exactly this — "file separator", a control byte no document text wants. */
+#define COLOR_ESC    0x1C
+#define COLOR_PALETTE 8
+
+/* One row of the grid, and the colour each of its cells was painted in. The
+ * attribute is a palette index and not an RGB: 17x62 cells per window, six
+ * windows and one terminal, and a uint32 per cell would cost more RAM than the
+ * text itself while a program can only ever name one of eight inks anyway. */
 struct surface {
-    char rows[SHELL_ROWS][SHELL_COLS + 1];
-    int  next_row;                    /* where the next line goes        */
-    char pending[SHELL_COLS + 1];     /* the line still being assembled  */
-    int  pending_len;
-    int  dirty;                       /* this surface changed since paint */
+    char    rows[SHELL_ROWS][SHELL_COLS + 1];
+    uint8_t attr[SHELL_ROWS][SHELL_COLS];
+    int     next_row;                   /* where the next line goes        */
+    char    pending[SHELL_COLS + 1];     /* the line still being assembled  */
+    uint8_t pending_attr[SHELL_COLS];
+    int     pending_len;
+    int     fg;                          /* the pen the next glyph lands in */
+    int     awaiting_attr;               /* 1 = the next byte is a digit    */
+    int     saw_color;                   /* 1 = a complete FS+digit pair was
+                                          * consumed since the last check. It is
+                                          * the surface that knows a colour was
+                                          * asked for, not the byte stream: a
+                                          * lone FS is a program that has not
+                                          * finished speaking, and logging the
+                                          * first byte would claim a pen move
+                                          * that has not happened. */
+    int     dirty;                       /* this surface changed since paint */
 };
 
 static struct surface term;           /* the shell's own window */
+
+/* The eight inks a program may name. Index 0 is the green every cell starts in
+ * — the same 0x22C55E this OS has drawn its text with since the first window —
+ * so a program that never mentions a colour paints exactly the screen it
+ * painted before this existed. The others are the roles a code viewer needs,
+ * named for what they are used for rather than for their hue: a keyword, a
+ * string, a number, a comment. Written as literals because gfx_rgb() is a
+ * function and a table has to be a constant; the values are that function's
+ * output for the (r,g,b) triples in the comments. */
+static const uint32_t color_ink[COLOR_PALETTE] = {
+    0x22C55E,   /* 0 default: the terminal's green   */
+    0xF8FAFC,   /* 1 white:   plain text, emphasized */
+    0x38BDF8,   /* 2 cyan:    keywords               */
+    0xFDE68A,   /* 3 yellow:  strings                */
+    0xF472B6,   /* 4 magenta: numbers                */
+    0xEF4444,   /* 5 red:     a name that failed     */
+    0xA78BFA,   /* 6 violet:  types                  */
+    0x64748B,   /* 7 dim:     comments               */
+};
 
 static char input[SHELL_COLS + 1];
 static int  input_len;
@@ -58,18 +104,27 @@ static int  input_len;
 
 static void surf_clear(struct surface *s)
 {
-    for (int r = 0; r < SHELL_ROWS; r++)
+    for (int r = 0; r < SHELL_ROWS; r++) {
         memset(s->rows[r], 0, sizeof s->rows[r]);
+        memset(s->attr[r], 0, sizeof s->attr[r]);
+    }
     s->next_row = 0;
     s->pending_len = 0;
+    /* The pen is deliberately not reset: a form feed says "this is a screen",
+     * not "start over in green". A program that paints a frame sets its own
+     * colours row by row, and a pen that survives the clear is the simpler
+     * contract to write a frame against. */
     s->dirty = 1;
 }
 
 static void surf_scroll(struct surface *s)
 {
-    for (int r = 1; r < SHELL_ROWS; r++)
+    for (int r = 1; r < SHELL_ROWS; r++) {
         memcpy(s->rows[r - 1], s->rows[r], SHELL_COLS + 1);
+        memcpy(s->attr[r - 1], s->attr[r], SHELL_COLS);
+    }
     memset(s->rows[SHELL_ROWS - 1], 0, SHELL_COLS + 1);
+    memset(s->attr[SHELL_ROWS - 1], 0, SHELL_COLS);
     s->next_row = SHELL_ROWS - 1;
 }
 
@@ -80,17 +135,28 @@ static char upper(char c)
     return (c >= 'a' && c <= 'z') ? (char)(c - 32) : c;
 }
 
-static void surf_put_line(struct surface *s, const char *str)
+/* Commit one finished row. `attrs` is the colour of each cell, or NULL for the
+ * default: every kernel-written line (banner, echo, help, the prompt) passes
+ * NULL and lands in green, which is why this can be an optional argument rather
+ * than a second writer to keep in sync. */
+static void surf_row(struct surface *s, const char *str, const uint8_t *attrs)
 {
     if (s->next_row >= SHELL_ROWS)
         surf_scroll(s);
 
     int c = 0;
-    for (; str[c] != '\0' && c < SHELL_COLS; c++)
+    for (; str[c] != '\0' && c < SHELL_COLS; c++) {
         s->rows[s->next_row][c] = upper(str[c]);
+        s->attr[s->next_row][c] = attrs ? attrs[c] : 0;
+    }
     s->rows[s->next_row][c] = '\0';
     s->next_row++;
     s->dirty = 1;
+}
+
+static void surf_put_line(struct surface *s, const char *str)
+{
+    surf_row(s, str, NULL);
 }
 
 /* "TEXT" + decimal, without dragging printf in. */
@@ -146,12 +212,40 @@ static void surf_put_exit(struct surface *s, int code)
 }
 
 /* Paint a surface's rows at (x,y). Shared by the terminal and every program
- * window; neither knows the other's cells. */
+ * window; neither knows the other's cells.
+ *
+ * Text is drawn in runs of equal attribute rather than one glyph at a time:
+ * gfx_text() is a loop over the font and a call costs what a call costs, so
+ * painting "int main" as two runs (cyan, then green) is cheaper than painting
+ * it as six glyphs of two inks, and it is exactly what the row means. The cell
+ * columns map to pixels through GLYPH_W because the font is a fixed 5+1 grid —
+ * the same reason a terminal can put the caret at a character. */
 static void surf_draw(const struct surface *s, int x, int y)
 {
-    for (int r = 0; r < SHELL_ROWS; r++)
-        if (s->rows[r][0] != '\0')
-            gfx_text(x, y + r * LINE_H, s->rows[r], gfx_rgb(0x22, 0xC5, 0x5E), 1);
+    for (int r = 0; r < SHELL_ROWS; r++) {
+        if (s->rows[r][0] == '\0')
+            continue;
+
+        int n = 0;
+        while (s->rows[r][n] != '\0' && n < SHELL_COLS)
+            n++;
+
+        int c = 0;
+        while (c < n) {
+            uint8_t a = s->attr[r][c];
+            int start = c;
+            while (c < n && s->attr[r][c] == a)
+                c++;
+
+            char run[SHELL_COLS + 1];
+            int len = c - start;
+            for (int i = 0; i < len; i++)
+                run[i] = s->rows[r][start + i];
+            run[len] = '\0';
+
+            gfx_text(x + start * GLYPH_W, y + r * LINE_H, run, color_ink[a], 1);
+        }
+    }
 }
 
 /* The terminal's own line writer: every banner, echo, help and prompt line in
@@ -186,6 +280,7 @@ static void cmd_help(void)
     put_line("  REAPER         ENFANT, KILL, WAIT - DANS CET ORDRE");
     put_line("  SAVE           ECRIT OU LIT UN FICHIER DANS /TMP");
     put_line("  NOTE <NOM>     EDITE /TMP/<NOM>.TXT");
+    put_line("  VIEW <FICHIER> AFFICHE UN FICHIER EN COULEUR");
     put_line("CE QUE TU LANCES ICI EST UN PROCESSUS: PID REEL,");
     /* The shell's pid is printed as the number the table holds, not as a "1"
      * written into this file: the claim on the screen is then whatever the
@@ -221,6 +316,11 @@ struct program {
                               * that repaints says it every keystroke, and a log
                               * line per frame would bury the one fact worth
                               * knowing: that \f reaches a window at all.        */
+    int      color_logged;   /* emit "wm: colour" only once, on the same rule:
+                              * the fact worth testing is that FS+digit was
+                              * *parsed* by the kernel, not that a program wrote
+                              * a byte — the serial port already knows about the
+                              * byte, and CI would grep that just as easily.     */
     char     name[PROC_NAME_MAX];
     struct surface s;
 };
@@ -246,6 +346,25 @@ static void surf_write(struct surface *s, const char *data, uint64_t len)
         char c = data[i];
         if (c == '\r')
             continue;
+        if (s->awaiting_attr) {
+            /* The byte after FS names the pen. Anything else is not a colour
+             * request, so it is dropped rather than painted: a stray FS must
+             * not eat a glyph, and a digit out of range must not index past the
+             * palette. `awaiting_attr` is a flag and not a two-byte window
+             * because writes arrive in whatever sizes the program chose — FS at
+             * the end of one buffer and its digit at the start of the next is
+             * the normal case, not a corner. */
+            s->awaiting_attr = 0;
+            if (c >= '0' && c < '0' + COLOR_PALETTE) {
+                s->fg = c - '0';
+                s->saw_color = 1;
+            }
+            continue;
+        }
+        if (c == COLOR_ESC) {
+            s->awaiting_attr = 1;
+            continue;
+        }
         if (c == '\f') {
             /* Form feed means "this is a screen, not another line". A program
              * that draws a whole frame — an editor, a viewer, a status panel —
@@ -260,13 +379,14 @@ static void surf_write(struct surface *s, const char *data, uint64_t len)
         if (c == '\n' || s->pending_len >= SHELL_COLS) {
             if (s->pending_len > 0) {
                 s->pending[s->pending_len] = '\0';
-                surf_put_line(s, s->pending);
+                surf_row(s, s->pending, s->pending_attr);
                 s->pending_len = 0;
             }
             if (c != '\n')
                 s->pending[s->pending_len++] = c;   /* wrap: keep the byte */
             continue;
         }
+        s->pending_attr[s->pending_len] = (uint8_t)s->fg;
         s->pending[s->pending_len++] = c;
     }
     s->dirty = 1;
@@ -301,6 +421,16 @@ static void console_router(const char *data, uint64_t len)
             }
         }
         surf_write(&pr->s, data, len);
+        /* Read from the surface and not from `data`: this line is the kernel
+         * saying it moved a pen, and only the parser knows whether the byte it
+         * was given was the start of a request or the whole of one. */
+        if (pr->s.saw_color && !pr->color_logged) {
+            pr->s.saw_color = 0;
+            pr->color_logged = 1;
+            serial_write("wm: colour pid ");
+            serial_write_dec((uint64_t)pr->pid);
+            serial_write("\n");
+        }
         return;
     }
     surf_write(&term, data, len);
@@ -324,11 +454,20 @@ int shell_program_open(const char *name, int pid)
         pr->bytes = 0;
         pr->routed_logged = 0;
         pr->screen_logged = 0;
+        pr->color_logged = 0;
         int n = 0;
         for (; name[n] != '\0' && n + 1 < PROC_NAME_MAX; n++)
             pr->name[n] = name[n];
         pr->name[n] = '\0';
         surf_clear(&pr->s);
+        /* The pen is reset here and not in surf_clear: a slot can be recycled
+         * from a closed highlighter to a plain program, and a fresh window must
+         * start in the default ink even if its tenant never names a colour. A
+         * live program's own \f keeps the pen, because that clear is one frame
+         * of a running painting, not the birth of a window. */
+        pr->s.fg = 0;
+        pr->s.awaiting_attr = 0;
+        pr->s.saw_color = 0;
         pr->s.dirty = 0;          /* opening a window is not new output */
         return i;
     }
