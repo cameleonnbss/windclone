@@ -751,7 +751,8 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         scancodes are still swallowed; Ctrl+B/F/P/N/A/E are the stand-ins Windows
         users met in EDIT), no selection, no clipboard, no open/save-as *dialog* —
         the file name comes from the command line or a batch file, which is also how
-        a `.bat` reaches it. The document is 512 bytes and 12 rows are visible, and
+        a `.bat` reaches it. The document was 512 bytes at this release (v0.1.23
+        raised it to 2048) and 12 rows are visible, and
         there is no horizontal scroll: lines wrap in the buffer, not on screen. The
         rows are uppercased because the 5x7 font has no lowercase glyphs.
       - **The proof is the file, not the picture.** `tools/qemu-desktop.py editing`
@@ -854,28 +855,60 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         where it closes the opposite hole — a terminal repaint from a boot program
         landing between two of `/bin/hold`'s rounds would have proved hold's damage
         without hold.
+- [x] A **code editor that writes back** — one window that highlights and edits
+      the same file (v0.1.23). `/bin/note` now opens a file under the name that was
+      typed (`note work.c`, dot and all), paints it with the colours `/bin/view`
+      paints, and Ctrl+S puts the bytes back where they came from. Four decisions,
+      and the interesting ones are about what a test is actually able to see.
+      - **One classifier instead of two.** `view` decided what every token was at
+        open and `note` owned a mutable buffer, and an editor whose colours come
+        from a different table than its own text is showing two answers about one
+        file. So the tables moved into `src/user/highlight.h` as `static inline`
+        functions that take the buffer as an argument, and the viewer was
+        re-pointed at them — its rules did not change, and the `highlight` scenario
+        passes untouched. The editor re-scans on every repaint, because a letter
+        typed in front of `int` makes it `oint`, and a highlighter that still
+        called it a type would be painting what the file used to be.
+      - **A file had to be able to arrive.** The initrd is a boot archive and `/tmp`
+        is a RAM store, and until this release nothing could carry a byte from one
+        to the other: the editor could only edit what a keyboard had typed into it.
+        `/bin/copy` is a *program*, not a shell builtin and not a syscall, because
+        `open()` and `write()` already exist and the kernel needs no third way to
+        say the same thing. It reads the whole source before it opens the
+        destination, so `copy misspelled.c important.c` leaves important.c exactly
+        as it was.
+      - **Colour on a text file is a claim, so it is gated on the name.** Only `.c`
+        and `.h` put FS+digit on the wire. That is not cosmetic: the `editing`
+        scenario has compared the editor's frames since v0.1.21, and an escape in
+        front of a shopping list would have made those bytes mean the highlighter
+        instead of the text. `.txt` frames are byte for byte what they were.
+      - **The hazard a bigger buffer brought, and the refusal.** `NOTE_DOC_MAX` is
+        2048 and `TMPFS_FILE_MAX` is 4096, so a file can be longer than the document
+        that opens it. Writing the part it holds back over the whole file is a
+        deletion wearing the face of a save — and the store would report a clean
+        write, because it would be telling the truth about the bytes it was handed.
+        So `load()` keeps reading past a full buffer to *count* what it could not
+        hold, the title row says `(TRONQUE)`, Ctrl+S is refused in words, the editor
+        stays open, and Ctrl+Q ends with exit code 7 and the edits unsaved.
+        `/src/big.c` is a specimen written on purpose to be too long.
+      - **A digest, because a 62-column window cannot show a long line.** A program
+        surface clips a row that is wider than it is, so the byte-for-byte
+        comparison that worked on a ten-byte note cannot work on real source. The
+        tests compare an FNV-1a digest over the bytes instead — computed
+        independently in Python from the file on disk, and printed by the copier, by
+        the editor, and by a second copier that never met the first two. The offset
+        where the typed character has to land is read out of the editor's own ruler
+        row rather than assumed, so a CRLF checkout and an LF one both produce the
+        same expectation.
+      What is still missing, and why it is the next work: the arrow keys still are
+      not on the wire (E0-prefixed scancodes `keyboard.c` swallows, and putting them
+      there means an escape sequence per program or a key-code channel beside the
+      byte stream), there is no open/save-as *dialog* — which means a second window
+      per program slot or a modal drawn inside the first — and a document is still
+      one buffer, so 2048 bytes is the ceiling and paging a file through the VFS is
+      the honest next cost.
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
-- [ ] A **code editor that writes back** — a program window that highlights and
-      edits the same file. Two releases settled the problems that were standing in
-      front of it: the text editor in v0.1.21 (a buffer that survives a repaint is
-      one 17-row `write()` behind a `\f`, Ctrl+letter is a real wire protocol, and
-      saving is the write path a program can already call) and v0.1.22, which put
-      per-cell colour on the surface router and settled the highlighting question by
-      deciding it in favour of a palette on the rows rather than a program drawing
-      its own window body. `/bin/view` is the half that is done. What the editor
-      still needs is its own work. First, joining the two: `view` classifies a
-      byte-per-byte table at open and note owns a mutable buffer, and an edit
-      invalidates the classes from the caret to the end of the token — re-classify
-      the window rather than the file, or the colours will disagree with the text.
-      Second, the keys that are not characters: arrows and Home/End arrive as
-      E0-prefixed scancodes that `keyboard.c` currently swallows, and putting them
-      on the wire means either an escape sequence per program or a small key-code
-      channel beside the byte stream — a decision `note` deliberately did not make
-      for it. Third, an open/save-as *dialog*, which means either a second window
-      per program slot or a modal drawn inside the first. Fourth, a document bigger
-      than one buffer: 512 bytes for an editor and 2048 for a viewer, and neither is
-      an IDE; paging a file through the VFS is the honest next cost.
 - [ ] A block device driver (ATA or NVMe), so `tmpfs` can stop being the only
       place a byte a program wrote can go
 

@@ -97,6 +97,24 @@ Scenarios (each one asserts the serial markers the kernel prints):
                second, third and fourth screens and not the first, and the status
                row at the last page has to agree with the line count the program
                reported when it opened.
+    editcode   prove one program does both halves: /bin/copy puts a real source
+               file from the boot archive into the writable store, /bin/note
+               opens it under the name typed (`work.c`, with the dot), paints it
+               with the same classifier the viewer paints, edits it with a real
+               PS/2 keystroke, and writes it back. A digest over the bytes
+               (FNV-1a, printed by both programs) is compared three ways: the
+               file as the test reads it off the disk, the document as the editor
+               loaded it, and the file as a *second* copy process reads it out of
+               the store after the save. Every byte that round-tripped is a byte
+               the kernel moved, and the offset the editor's own ruler reports is
+               what says where the typed character landed.
+    edittrunc  prove the refusal. /src/big.c is a specimen deliberately bigger
+               than a document buffer and smaller than the store, so the editor
+               loads part of it and says so. One Ctrl+D makes the document dirty;
+               Ctrl+S then has to be *refused* rather than quietly writing half a
+               file back over a whole one, Ctrl+Q has to end with unsaved bytes
+               and exit 7, and a third process copying the file afterwards has to
+               report the digest it had before the editor ever opened it.
 
 Exit status 0 = every step did what the serial log says it did.
 SPDX-License-Identifier: MIT
@@ -113,6 +131,12 @@ MON = os.environ.get("WM_MON", "/tmp/wc-wmmon")
 LOG = os.environ.get("WM_LOG", "/tmp/wc-wm.log")
 # A second control channel, used only for key chords; see Qmp below.
 QMP = os.environ.get("WM_QMP", "/tmp/wc-wmqmp")
+# The tree the initrd was built out of, so a test can hold the specimen in one
+# hand and the guest's word about it in the other. Read from disk rather than
+# transcribed: a file that gained a byte moves the expectation with it, and the
+# spelling the checkout happens to use (CRLF on Windows, LF on Linux) is the
+# spelling the initrd carries, because mkinitrd.sh tars rootfs/ as it finds it.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Geometry as layout() computes it for the Limine mode QEMU gives us; the
 # real size is read back from the serial banner and everything recomputed.
@@ -245,6 +269,31 @@ def read_log_raw():
             return fh.read()
     except OSError:
         return ""
+
+
+def spec(rel):
+    """The specimen's own bytes, from the tree the initrd was built out of.
+    `rel` is relative to the repo, so "/src/hello.c" in the guest is
+    "rootfs/src/hello.c" here - the same file, the same bytes, and the length
+    and content the copy program has to report."""
+    with open(os.path.join(ROOT, rel), "rb") as fh:
+        return fh.read()
+
+
+def fnv1a(data):
+    """FNV-1a over 32 bits, the same one src/user/wcstr.h's wc_fnv1a() runs.
+
+    This is the test keeping its own copy of an algorithm rather than trusting
+    the program's, and that is the point: a copier, an editor and a viewer that
+    all shared a broken hash would agree with each other and with nothing else.
+    The programs print eight hex digits because a 64-bit `unsigned long` still
+    has only 32 bits worth of FNV-1a in its low half - every step here is
+    truncated the same way, so the two spellings land on the same number."""
+    h = 2166136261
+    for byte in data:
+        h ^= byte
+        h = (h * 16777619) & 0xFFFFFFFF
+    return "%08x" % h
 
 
 def last_snap():
@@ -1286,6 +1335,311 @@ def scenario_actions(sc, mon, W, H):
             if count_serial(leak) != 0:
                 raise SystemExit("something the viewer was given reached the "
                                  "command line: %s" % leak)
+    elif sc == "editcode":
+        # v0.1.23: the editor and the highlighter became one program, and a file
+        # became able to cross from the boot archive into the store. Four claims
+        # are checked below in the order that makes each one depend on the last:
+        # a *program* moved the bytes (copy, not a syscall and not a builtin), the
+        # editor holds exactly those bytes (its digest matches the copier's and
+        # the test's), it paints them as source (the escapes on the wire), and
+        # what it wrote back is the file plus one typed key and nothing else (a
+        # second copy process, with no memory of the editor, agrees).
+        data = spec("rootfs/src/hello.c")
+        digest = fnv1a(data)
+        typed = "x"                          # the one keystroke the edit is
+        DOC_MAX = 2047                       # NOTE_DOC_MAX - 1, src/user/note.c
+        # Both numbers are the program's own budget and the specimen's length,
+        # mirrored here the way the viewer scenario mirrors VIEW_MAX: a file that
+        # stopped fitting would make the assertions below prove a truncation the
+        # scenario never claimed to test.
+        if len(data) >= DOC_MAX:
+            raise SystemExit("the specimen is %d bytes, at the editor's buffer: "
+                             "it would have opened truncated" % len(data))
+
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+
+        # The archive holds the specimen and the editor only reads /tmp, so the
+        # crossing has to happen first, and it happens in a process the shell
+        # launched from a line typed at the prompt.
+        mon.type_text("copy /src/hello.c /tmp/work.c\n")
+        m = wait_serial(r"wm: program window opened 'copy' pid (\d+)")
+        cpid = int(m.group(1))
+        m = wait_serial(r"copy: read (\d+) bytes from /src/hello\.c pid (\d+)")
+        read_n, rpid = int(m.group(1)), int(m.group(2))
+        if read_n != len(data):
+            raise SystemExit("the copier read %d bytes out of the archive and the "
+                             "archive holds %d" % (read_n, len(data)))
+        if rpid != cpid:
+            raise SystemExit("the bytes were read by pid %s, the window belongs to "
+                             "pid %d" % (rpid, cpid))
+        m = wait_serial(r"copy: digest 0x([0-9a-f]{8}) pid (\d+)")
+        if int(m.group(2)) != cpid or m.group(1) != digest:
+            raise SystemExit("the copier digested %s, the file on disk digests to "
+                             "%s (pid %s, window %d)"
+                             % (m.group(1), digest, m.group(2), cpid))
+        m = wait_serial(r"copy: wrote (\d+) bytes to /tmp/work\.c pid (\d+)")
+        if int(m.group(1)) != read_n or int(m.group(2)) != cpid:
+            raise SystemExit("the store took %s of the %d bytes it was handed "
+                             "(pid %s)" % (m.group(1), read_n, m.group(2)))
+        wait_serial(r"shell: copy exited with 0")
+
+        # The editor opens it under the name that was typed, dot and all: a
+        # program that had to invent ".txt" would be opening /tmp/work.c.txt and
+        # nobody would have asked for that file.
+        mark = len(read_log())
+        mon.type_text("note work.c\n")
+        mark, m = wait_serial_after(mark,
+                                    r"wm: program window opened 'note' pid (\d+)")
+        epid = int(m.group(1))
+        mark, m = wait_serial_after(mark,
+                                    r"note: loaded (\d+) bytes from /tmp/work\.c "
+                                    r"pid (\d+)")
+        if int(m.group(2)) != epid:
+            raise SystemExit("the document belongs to pid %s and the window that "
+                             "gets the keys is pid %d" % (m.group(2), epid))
+        if int(m.group(1)) != len(data):
+            raise SystemExit("the editor loaded %s bytes of a %d-byte file"
+                             % (m.group(1), len(data)))
+        mark, m = wait_serial_after(mark, r"note: digest 0x([0-9a-f]{8}) pid (\d+)")
+        if m.group(1) != digest or int(m.group(2)) != epid:
+            raise SystemExit("the editor's copy of the file digests to %s and the "
+                             "archive's digests to %s (pid %s)"
+                             % (m.group(1), digest, m.group(2)))
+
+        # Source, so the colour is on: the same table /bin/view reads, the same
+        # escape the kernel says it consumed, and the comment ink in front of the
+        # file's own first row. These three are read out of the log as a whole and
+        # not from a mark, because they are emitted while the kernel parses the
+        # editor's *first* frame - which the program writes before it logs the
+        # keyword count that frame was computed from.
+        wait_serial(r"wm: screen cleared pid %d" % epid)
+        wait_serial(r"wm: colour pid %d" % epid)
+        wait_serial(r"\x1c7/\* WindClone")
+        mark, m = wait_serial_after(mark,
+                                    r"note: highlighted (\d+) keywords in (\d+) "
+                                    r"lines pid (\d+)")
+        nkey, nlines, kpid = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if kpid != epid or nkey < 5 or nlines < 24:
+            raise SystemExit("the editor counted %d keywords in %d lines (pid %s, "
+                             "window %d)" % (nkey, nlines, kpid, epid))
+        mark, _ = wait_serial_after(mark, r"note: editing /tmp/work\.c pid %d"
+                                    % epid)
+        if count_serial(r" OCTETS  \d+ MOTS-CLES") < 1:
+            raise SystemExit("an editor that paints keywords reports no keyword "
+                             "count on its ruler row")
+
+        # Ctrl+E to the end of the first line, and the column has to be the
+        # offset the test computes from the file: a line ends where its newline
+        # is, in a CRLF checkout as much as in an LF one, because the carriage
+        # return is *inside* the line the editor walks. So the caret lands on byte
+        # `data.index(b"\n")` either way and the ruler can be held to a number
+        # rather than to a range.
+        mark = len(read_log())
+        mon.key("ctrl-e")
+        mark, m = wait_serial_after(mark, r"LN 1 COL (\d+)  (\d+) OCTETS")
+        col0, size0 = int(m.group(1)), int(m.group(2))
+        if size0 != len(data):
+            raise SystemExit("the ruler says the document holds %d bytes and the "
+                             "file holds %d" % (size0, len(data)))
+        if col0 != data.index(b"\n") + 1:
+            raise SystemExit("Ctrl+E left the caret at column %d; the first line "
+                             "of the file ends at byte %d"
+                             % (col0, data.index(b"\n")))
+
+        # One key, and the frame after it has to be one byte bigger with the
+        # caret one cell along: an edit is a size change before it is anything
+        # else, and the size here is the document's own count.
+        mon.type_text(typed)
+        mark, _ = wait_serial_after(
+            mark, r"LN 1 COL %d  %d OCTETS" % (col0 + 1, size0 + 1))
+        if count_serial(r"NOTEPAD - /tmp/work\.c  \(MODIFIE\)") < 1:
+            raise SystemExit("the document grew by a byte and no frame said it "
+                             "was unsaved")
+
+        # Ctrl+S. The bytes written have to be the file with the typed character
+        # at the offset the ruler reported - not the file, not the file with the
+        # character at the end, and not the file with a colour escape leaked into
+        # it, which is the failure a highlighter inside an editor is prone to.
+        want = data[:col0 - 1] + typed.encode() + data[col0 - 1:]
+        want_digest = fnv1a(want)
+        mon.key("ctrl-s")
+        mark, m = wait_serial_after(mark,
+                                    r"note: saved (\d+) bytes to /tmp/work\.c "
+                                    r"pid (\d+)")
+        saved, spid = int(m.group(1)), int(m.group(2))
+        if saved != size0 + 1 or spid != epid:
+            raise SystemExit("pid %s wrote %s bytes; the editor is pid %d and its "
+                             "document holds %d" % (spid, saved, epid, size0 + 1))
+        mark, m = wait_serial_after(mark, r"note: digest 0x([0-9a-f]{8}) pid (\d+)")
+        if m.group(1) != want_digest or int(m.group(2)) != spid:
+            raise SystemExit("the editor saved bytes digesting to %s, not the %s "
+                             "the file plus one typed %r should be (pid %s)"
+                             % (m.group(1), want_digest, typed, m.group(2)))
+        mark, _ = wait_serial_after(mark, r"NOTEPAD - /tmp/work\.c  \(SAUVE\)")
+
+        mon.key("ctrl-q")
+        mark, _ = wait_serial_after(mark, r"note: quit pid %d" % epid)
+        mark, _ = wait_serial_after(mark,
+                                    r"proc: pid %d died holding the keyboard"
+                                    % epid)
+        wait_serial(r"shell: note exited with 0")
+
+        # The other half of the proof, in a process that never saw the editor:
+        # read the saved file out of the store again and digest it. Same bytes,
+        # same number, and a count that a copy of the *original* would not give.
+        mark = len(read_log())
+        mon.type_text("copy /tmp/work.c /tmp/work2.c\n")
+        mark, m = wait_serial_after(mark,
+                                    r"copy: read (\d+) bytes from /tmp/work\.c "
+                                    r"pid (\d+)")
+        back, bpid = int(m.group(1)), int(m.group(2))
+        if back != saved:
+            raise SystemExit("a second process read %d bytes back from the file "
+                             "the editor saved as %d" % (back, saved))
+        if bpid == epid or bpid == cpid:
+            raise SystemExit("the reader is pid %d, a process that already ran: "
+                             "nothing crossed a boundary" % bpid)
+        mark, m = wait_serial_after(mark, r"copy: digest 0x([0-9a-f]{8}) pid (\d+)")
+        if m.group(1) != want_digest or int(m.group(2)) != bpid:
+            raise SystemExit("the bytes in the store digest to %s and the document "
+                             "the editor saved digested to %s"
+                             % (m.group(1), want_digest))
+        mark, _ = wait_serial_after(mark,
+                                    r"copy: wrote \d+ bytes to /tmp/work2\.c pid")
+        mark, _ = wait_serial_after(mark, r"shell: copy exited with 0")
+
+        # Nothing typed into the editor may have reached the prompt: a leak would
+        # turn `x` or `work` into a program the shell went looking for.
+        if count_serial(r"wm: program window opened 'note'") != 1:
+            raise SystemExit("the editor opened %d windows, not one"
+                             % count_serial(r"wm: program window opened 'note'"))
+        for leak in (r"shell: no program /bin/", r"shell: running 'x'",
+                     r"shell: running 'work'", r"shell: running 'c'"):
+            if count_serial(leak) != 0:
+                raise SystemExit("something the editor was given reached the "
+                                 "command line: %s" % leak)
+    elif sc == "edittrunc":
+        # v0.1.23's second half, and the one that matters more: an editor that
+        # cannot hold a file must not write it. /src/big.c is bigger than a
+        # document buffer and smaller than the store, so note loads the first
+        # 2047 bytes, says (TRONQUE), and then has to refuse to save. A quiet
+        # half-write would have been reported by the store as a clean write of a
+        # shorter file - success, wearing the face of a deletion.
+        data = spec("rootfs/src/big.c")
+        digest = fnv1a(data)
+        DOC_MAX = 2047                       # NOTE_DOC_MAX - 1, src/user/note.c
+        if len(data) <= DOC_MAX:
+            raise SystemExit("the specimen is %d bytes: it fits a document, so "
+                             "this scenario would prove nothing" % len(data))
+        if len(data) > 4096:
+            raise SystemExit("the specimen is %d bytes: past the store's "
+                             "TMPFS_FILE_MAX, so copy would refuse it instead of "
+                             "the editor refusing to save it" % len(data))
+
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+
+        mark = len(read_log())
+        mon.type_text("copy /src/big.c /tmp/big.c\n")
+        mark, m = wait_serial_after(mark,
+                                    r"copy: read (\d+) bytes from /src/big\.c "
+                                    r"pid (\d+)")
+        if int(m.group(1)) != len(data):
+            raise SystemExit("the copier read %s bytes of a %d-byte file"
+                             % (m.group(1), len(data)))
+        mark, m = wait_serial_after(mark, r"copy: digest 0x([0-9a-f]{8}) pid (\d+)")
+        whole = m.group(1)
+        if whole != digest:
+            raise SystemExit("the archive copy digests to %s and the file on disk "
+                             "to %s" % (m.group(1), digest))
+        wait_serial(r"shell: copy exited with 0")
+
+        mark = len(read_log())
+        mon.type_text("note big.c\n")
+        mark, m = wait_serial_after(mark,
+                                    r"wm: program window opened 'note' pid (\d+)")
+        epid = int(m.group(1))
+        mark, m = wait_serial_after(mark,
+                                    r"note: loaded (\d+) bytes from /tmp/big\.c "
+                                    r"pid (\d+)")
+        if int(m.group(1)) != DOC_MAX or int(m.group(2)) != epid:
+            raise SystemExit("the editor holds %s of the %d bytes the store has "
+                             "(pid %s, window %d)"
+                             % (m.group(1), len(data), m.group(2), epid))
+        mark, m = wait_serial_after(mark,
+                                    r"note: truncated (\d+) of (\d+) bytes pid "
+                                    r"(\d+)")
+        if (int(m.group(1)) != DOC_MAX or int(m.group(2)) != len(data)
+                or int(m.group(3)) != epid):
+            raise SystemExit("the editor says it holds %s of %s bytes; the file is "
+                             "%d and a document is %d"
+                             % (m.group(1), m.group(2), len(data), DOC_MAX))
+        mark, m = wait_serial_after(mark, r"note: digest 0x([0-9a-f]{8}) pid (\d+)")
+        if m.group(1) != fnv1a(data[:DOC_MAX]):
+            raise SystemExit("the truncated document digests to %s and the first "
+                             "%d bytes of the file to %s"
+                             % (m.group(1), DOC_MAX, fnv1a(data[:DOC_MAX])))
+        mark, _ = wait_serial_after(mark, r"NOTEPAD - /tmp/big\.c  \(TRONQUE\)")
+        mark, _ = wait_serial_after(mark, r"wm: colour pid %d" % epid)
+
+        # The buffer is full, so an insert can only be refused - which is a fact
+        # about a 2048-byte document and not about truncation, so the edit that
+        # makes the document dirty is a deletion: one byte removed is a document
+        # that is neither the file nor a whole reading of it.
+        mark = len(read_log())
+        mon.key("ctrl-d")
+        mark, _ = wait_serial_after(mark, r"LN 1 COL 1  %d OCTETS"
+                                    % (DOC_MAX - 1))
+        # The title row and the ruler row are two rows of the *same* frame, and
+        # the title comes first, so this one is read from the whole log: nothing
+        # before the deletion could have written (TRONQUE MODIFIE).
+        wait_serial(r"NOTEPAD - /tmp/big\.c  \(TRONQUE MODIFIE\)")
+
+        # Ctrl+S: refused, in words, on the serial line and on the screen.
+        mon.key("ctrl-s")
+        mark, _ = wait_serial_after(
+            mark, r"note: refused to save a truncated document pid %d" % epid)
+        if count_serial(r"note: saved (\d+) bytes to /tmp/big\.c") != 0:
+            raise SystemExit("the editor refused and still saved: a truncated "
+                             "document went into the file")
+
+        # Ctrl+Q: the edits are unsaved, and the exit code says so.
+        mon.key("ctrl-q")
+        mark, m = wait_serial_after(mark, r"note: quit with (\d+) unsaved bytes "
+                                           r"pid (\d+)")
+        if int(m.group(1)) != DOC_MAX - 1 or int(m.group(2)) != epid:
+            raise SystemExit("pid %s quit with %s unsaved bytes, expected %d"
+                             % (m.group(2), m.group(1), DOC_MAX - 1))
+        wait_serial(r"shell: note exited with 7")
+
+        # And the file is exactly what it was. A copier in a third process reads
+        # the whole thing back: the count and the digest from before the editor
+        # ever opened it, which is the only proof that the refusal was a refusal
+        # and not a save that forgot to say it happened.
+        mark = len(read_log())
+        mon.type_text("copy /tmp/big.c /tmp/big2.c\n")
+        mark, m = wait_serial_after(mark,
+                                    r"copy: read (\d+) bytes from /tmp/big\.c "
+                                    r"pid (\d+)")
+        if int(m.group(1)) != len(data):
+            raise SystemExit("the store holds %s bytes where %d went in: the "
+                             "refused save wrote anyway"
+                             % (m.group(1), len(data)))
+        mark, m = wait_serial_after(mark, r"copy: digest 0x([0-9a-f]{8}) pid (\d+)")
+        if m.group(1) != whole:
+            raise SystemExit("the file digested to %s before the editor and %s "
+                             "after it" % (whole, m.group(1)))
+        mark, _ = wait_serial_after(mark,
+                                    r"copy: wrote \d+ bytes to /tmp/big2\.c pid")
+        mark, _ = wait_serial_after(mark, r"shell: copy exited with 0")
+        for leak in (r"shell: no program /bin/", r"shell: running 'big'",
+                     r"shell: running 'c'"):
+            if count_serial(leak) != 0:
+                raise SystemExit("something the editor was given reached the "
+                                 "command line: %s" % leak)
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -1378,6 +1732,27 @@ MARKERS = {
                   "view: opened /src/hello.c", "wm: screen cleared pid",
                   "wm: colour pid", "view: highlighted",
                   "view: quit", "shell: view exited with 0"],
+    # the digests, the caret offset, the byte counts and the cross-process read
+    # back are all asserted in the scenario; these are the lines the claim turns
+    # on - a program that moved a file from the archive into the store, the editor
+    # that loaded those exact bytes, painted them as source, and wrote back the
+    # document a keystroke had changed
+    "editcode":  ["shell: running 'copy' from the prompt", "copy: read",
+                  "copy: digest 0x", "copy: wrote",
+                  "wm: program window opened 'note'", "note: loaded",
+                  "note: highlighted", "wm: colour pid",
+                  "note: editing /tmp/work.c", "note: saved",
+                  "shell: note exited with 0"],
+    # the truncation arithmetic and the state of the file afterwards are asserted
+    # in the scenario; these are the lines the claim turns on - a document that
+    # says it is not the whole file, a save that was refused out loud, an exit
+    # code that names the unsaved bytes, and the digest that proves the refused
+    # file was never written to at all
+    "edittrunc": ["copy: digest 0x", "note: loaded 2047 bytes",
+                  "note: truncated 2047 of", "NOTEPAD - /tmp/big.c  (TRONQUE)",
+                  "note: refused to save a truncated document",
+                  "note: quit with 2046 unsaved bytes",
+                  "shell: note exited with 7"],
 }
 
 

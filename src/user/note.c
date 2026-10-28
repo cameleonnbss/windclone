@@ -34,15 +34,36 @@
  * Those log lines are the observable contract: one syscall each, so a tick
  * cannot tear one across another process's output.
  *
+ * What v0.1.23 joined: the two halves that used to live in separate programs.
+ * Note had the buffer, the caret and the save; /bin/view had the classifier. A
+ * file now reaches the editor under its own name — `note work.c` opens
+ * /tmp/work.c, and the one dot a name may carry is what makes that possible —
+ * the screen paints the same roles the viewer paints, out of the same table, and
+ * Ctrl+S writes the bytes back.
+ *
+ * And with that came a hazard a note never had: holding less than the file
+ * holds. A 512-byte buffer could not meet a big source file; a 2048-byte one
+ * can. So a document that did not fit says (TRONQUE) on the row a person reads
+ * first, and its save is refused. Writing half a file back over a whole one is
+ * the one failure an editor is not allowed to have, and it is the kind of
+ * failure that looks like success — the store would report a clean write,
+ * because it would be telling the truth about the bytes it was given.
+ *
  * SPDX-License-Identifier: MIT
  */
 #include "wcstr.h"
+#include "highlight.h"
 
 #define NOTE_DIR         "/tmp/"
 #define NOTE_EXT         ".txt"
-#define NOTE_NAME_MAX    12             /* letters, digits or _, like /bin/save */
+#define NOTE_NAME_MAX    12             /* letters, digits or _, one dot        */
 #define NOTE_PATH_MAX    32
-#define NOTE_DOC_MAX     512            /* one document, in RAM, like the store */
+/* One document, in RAM. 2048 because that is what /bin/view already holds, and
+ * an editor whose buffer is smaller than its viewer is an editor that cannot
+ * open the files it claims to edit. It is *not* the store's limit: TMPFS_FILE_MAX
+ * is 4096, so a file too big for this buffer is a real thing, and load() below
+ * notices rather than quietly showing half of it. */
+#define NOTE_DOC_MAX     2048
 
 /* The frame is the surface a program window paints: 17 rows, and the kernel
  * wraps anything longer than 62 columns. Rows are capped at 56 so a document
@@ -50,7 +71,12 @@
 #define NOTE_ROWS        17
 #define NOTE_BODY_ROWS   12
 #define NOTE_LINE_MAX    56
-#define NOTE_FRAME_MAX   1152
+/* Worst case, and the reason it grew with the colour: a row of 56 cells can
+ * change ink on every cell, and an escape is two bytes that cost no cell — so
+ * 3 bytes per column, 168 a row, 12 rows of body, plus title, status, keys and
+ * the blanks. NOTE_FRAME_MAX is 3072 with room to spare, and the caps in
+ * f_addc()/f_esc() enforce it rather than the arithmetic proving it. */
+#define NOTE_FRAME_MAX   3072
 
 /* What the decoder hands a program when Ctrl is held with a letter: the byte
  * that letter names, exactly as every PC keyboard has meant it since the IBM
@@ -85,11 +111,22 @@ static unsigned dlen;             /* bytes of document           */
 static unsigned dpos;             /* the caret, 0..dlen          */
 static unsigned dtop;             /* first document line shown   */
 static int dirty;                 /* 1 = the edits are not in the file */
+static int truncated;             /* 1 = the file is bigger than doc[] */
+static int colour;                /* 1 = this name is source, paint it */
+static unsigned nkey;             /* keyword tokens in the document    */
+
+/* One palette index per byte of the document, filled by highlight.h on every
+ * repaint. It is a separate array and not a spare field in the character,
+ * because a byte of text has no room for a colour and a colour must not cost a
+ * byte of text: the document keeps its exact bytes, which is what lets a save
+ * write back the file it read plus the keys typed into it and nothing else. */
+static unsigned char cls[NOTE_DOC_MAX];
 
 static char path[NOTE_PATH_MAX];
 static char line[64];             /* one log line's worth */
 static char frame[NOTE_FRAME_MAX];
 static unsigned fn;
+static char probe[64];            /* the load() overflow read, see truncated */
 
 /* --- log lines --------------------------------------------------------
  * One line, one write(), the rule every program here follows: a switch cannot
@@ -149,6 +186,22 @@ static unsigned caret_col(void)
     return dpos - line_start_of(dpos);
 }
 
+/* Lines in the document: a line is what lies between two newlines, and a file
+ * that ends with one has no empty line after it. The same rule /bin/view counts
+ * by, so the two programs say one number about the same bytes rather than two
+ * that a test would have to reconcile. */
+static unsigned doc_lines(void)
+{
+    unsigned n = 1;
+
+    if (dlen == 0)
+        return 0;
+    for (unsigned i = 0; i < dlen; i++)
+        if (doc[i] == '\n')
+            n++;
+    return n;
+}
+
 /* Keep the caret inside the twelve rows the frame can show. The view follows
  * the cursor rather than the other way round because a document longer than a
  * screen is the normal case, and scrolling a window with the mouse is not
@@ -173,6 +226,18 @@ static unsigned row_len;
 static void f_begin(void)
 {
     row_len = 0;
+}
+
+/* An ink change, in the two bytes the kernel's surface parser eats and the zero
+ * cells it counts. Separate from f_addc for exactly that reason: a row whose
+ * escapes were charged to its 56-cell budget would be a row that lost the ends
+ * of long lines to the highlighter. */
+static void f_esc(int a)
+{
+    if (fn + 2 >= NOTE_FRAME_MAX)
+        return;
+    frame[fn++] = (char)HL_ESC;
+    frame[fn++] = (char)('0' + a);
 }
 
 static void f_addc(char c)
@@ -223,18 +288,46 @@ static char show_byte(char c)
     return ' ';
 }
 
-/* One document line, with the caret drawn into it. */
+/* One document line, with the caret drawn into it.
+ *
+ * `cur` carries the pen from cell to cell, so a run of the same ink costs no
+ * bytes at all: an escape goes on the wire when the class *changes* and not on
+ * every character, which is why a coloured frame is barely larger than the
+ * plain one it replaces. It starts at -1 for each row rather than keeping the
+ * previous row's value, because the kernel's pen does survive from one write to
+ * the next — a row that inherited its first cell's colour from the row above
+ * would be showing a colour the classifier never asked for.
+ *
+ * With `colour` off — any name that is not source — put_byte() is exactly what
+ * this function used to do, byte for byte: the same keys, the same caret, and
+ * not one escape on the wire. That is not a compatibility note for the .txt
+ * tests, it is the proof that highlighting is paint and not structure. */
+static int cur;
+
+static void put_byte(unsigned p)
+{
+    if (colour) {
+        int a = cls[p];
+        if (a != cur) {
+            f_esc(a);
+            cur = a;
+        }
+    }
+    f_addc(show_byte(doc[p]));
+}
+
 static void f_doc_row(unsigned start, unsigned end, int caret_here)
 {
     unsigned p = start;
 
+    cur = -1;
     f_begin();
     while (p < end && (caret_here == 0 || p < dpos))
-        f_addc(show_byte(doc[p++]));
+        put_byte(p++);
     if (caret_here)
         f_addc('|');
     while (p < end)
-        f_addc(show_byte(doc[p++]));
+        put_byte(p++);
     f_end();
 }
 
@@ -243,14 +336,30 @@ static void draw(void)
     unsigned i, shown, ln;
     int caret_shown;
 
-    fn = 0;
-    f_addc('\f');                     /* a screen, not another line */
+    /* Repaint means re-decide. The document changed between one frame and the
+     * next — that is the only reason an editor repaints — so the classes are
+     * recomputed over the whole buffer here rather than kept from the open: a
+     * letter typed in front of `int` turns it into `oint`, and a highlighter
+     * that still called it a type would be showing what the file used to be.
+     * Two thousand bytes of byte-at-a-time scan per keypress is what a machine
+     * with no cache to invalidate can afford, and the frame is written once. */
+    if (colour)
+        nkey = hl_scan(doc, dlen, cls);
 
-    /* Row 0: which file, and whether what is on screen is in it. */
+    fn = 0;
+    f_addc('\f');                     /* a screen, not another line, and not a
+                                       * row either: the title goes on row 0 */
+
+    /* Row 0: which file, and whether what is on screen is in it. A truncated
+     * document says so here, in the row a person reads first, because the
+     * alternative is a file that looks complete. */
     f_begin();
     f_add("NOTEPAD - ");
     f_add(path);
-    f_add(dirty ? "  (MODIFIE)" : "  (SAUVE)");
+    if (truncated)
+        f_add(dirty ? "  (TRONQUE MODIFIE)" : "  (TRONQUE)");
+    else
+        f_add(dirty ? "  (MODIFIE)" : "  (SAUVE)");
     f_end();
 
     f_begin();
@@ -308,6 +417,13 @@ static void draw(void)
     f_add("  ");
     f_addn(dlen);
     f_add(" OCTETS");
+    if (colour) {
+        /* The same count the viewer's status row carries, from the same scan.
+         * On a text file this row is byte for byte what it has always been. */
+        f_add("  ");
+        f_addn(nkey);
+        f_add(" MOTS-CLES");
+    }
     f_end();
 
     f_begin();
@@ -422,14 +538,23 @@ static void obey(int c)
 
 /* --- the file --------------------------------------------------------- */
 
-/* Compose "/tmp/<name>.txt" and refuse anything that is not a word. The store
- * is flat and the archive is searched first, so nothing here could actually be
- * fooled — but a name that cannot be a traversal is a name a person can read
- * back, and it is the program's own filter rather than the kernel's. */
+/* Compose "/tmp/<name>", adding ".txt" only when the name carries no extension,
+ * and refuse anything that is not a readable word.
+ *
+ * The dot is new and it is the whole difference between "a note" and "a file":
+ * `note work.c` has to open the file /bin/copy just put in the store, under the
+ * name the person typed, and not the /tmp/work.c.txt a name-forcing editor
+ * would have invented. The rules stay tight for it — letters, digits and _ as
+ * before, at most one '.', and never first or last — so `..`, `.c` and `a..b`
+ * are refused rather than cleverly interpreted. The store is flat and the
+ * archive is searched first, so nothing here could actually be fooled; a name
+ * that cannot be a traversal is a name a person can read back, and this is the
+ * program's own filter rather than the kernel's. */
 static int build_path(const char *name)
 {
     unsigned long l = wc_strlen(name);
     unsigned n = 0;
+    int dots = 0;
 
     if (l == 0 || l > NOTE_NAME_MAX)
         return 0;
@@ -440,16 +565,40 @@ static int build_path(const char *name)
         char c = name[i];
         int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
                  (c >= '0' && c <= '9') || c == '_';
+        if (c == '.') {
+            if (dots != 0 || i == 0 || i + 1 >= l)
+                return 0;             /* one dot, with a word either side */
+            dots = 1;
+            ok = 1;
+        }
         if (!ok)
             return 0;
         path[n++] = c;
     }
-    for (const char *p = NOTE_EXT; *p != '\0'; p++)
-        path[n++] = *p;
+    if (dots == 0) {
+        for (const char *p = NOTE_EXT; *p != '\0'; p++)
+            path[n++] = *p;
+    }
     if (n + 1 > NOTE_PATH_MAX)
         return 0;                     /* unreachable with the caps above, stated */
     path[n] = '\0';
     return 1;
+}
+
+/* Does this name hold source? Colour goes on the wire only then. A note about a
+ * shopping list has no keywords in it, and painting every byte of one in the
+ * default ink would put an escape in front of text that means nothing — and
+ * would make the plain-text frames the .txt tests already depend on depend on
+ * the highlighter as well. */
+static int name_is_source(void)
+{
+    unsigned long l = wc_strlen(path);
+
+    if (l < 2)
+        return 0;
+    if (path[l - 1] != 'c' && path[l - 1] != 'h')
+        return 0;
+    return path[l - 2] == '.';
 }
 
 /* Read the whole file into the document. Returns 0 when the editor should open
@@ -485,23 +634,83 @@ static int load(long pid)
             break;
         dlen += (unsigned)got;
     }
+
+    /* A buffer that filled up is not a file that ended. Read on and count what
+     * is left: the difference between "loaded 2047 bytes" and "2047 of 2400" is
+     * the difference between an editor and a lie, and it is the second number
+     * that makes the refusal in save_file() mean something to whoever reads
+     * this log afterwards. */
+    unsigned long extra = 0;
+    if (dlen + 1 >= NOTE_DOC_MAX) {
+        long more;
+
+        while ((more = wc_read(fd, probe, sizeof probe)) > 0)
+            extra += (unsigned long)more;
+        if (more < 0) {
+            wc_close(fd);
+            unsigned n = wc_app_str(line, 0, "note: read failed on ");
+            n = wc_app_str(line, n, path);
+            n = wc_app_str(line, n, ", error ");
+            n = wc_app_signed(line, n, more);
+            say_pid(n, pid);
+            return 1;
+        }
+    }
     doc[dlen] = '\0';
     wc_close(fd);
 
-    unsigned n = wc_app_str(line, 0, "note: loaded ");
-    n = wc_app_dec(line, n, dlen);
-    n = wc_app_str(line, n, " bytes from ");
-    n = wc_app_str(line, n, path);
-    say_pid(n, pid);
+    {
+        unsigned n = wc_app_str(line, 0, "note: loaded ");
+        n = wc_app_dec(line, n, dlen);
+        n = wc_app_str(line, n, " bytes from ");
+        n = wc_app_str(line, n, path);
+        say_pid(n, pid);
+    }
+    if (extra > 0) {
+        unsigned n;
+
+        truncated = 1;
+        n = wc_app_str(line, 0, "note: truncated ");
+        n = wc_app_dec(line, n, dlen);
+        n = wc_app_str(line, n, " of ");
+        n = wc_app_dec(line, n, dlen + extra);
+        n = wc_app_str(line, n, " bytes");
+        say_pid(n, pid);
+    }
+    /* The document as it came out of the store, before anybody typed a key.
+     * /bin/copy prints the same number for the same bytes from the other side
+     * of the archive boundary, and a test can put the two next to each other. */
+    {
+        unsigned n = wc_app_str(line, 0, "note: digest 0x");
+        n = wc_app_hex(line, n, wc_fnv1a(doc, dlen));
+        say_pid(n, pid);
+    }
     return 0;
 }
 
 static int save_file(long pid)
 {
-    long fd = wc_open_flags(path, WC_O_WRONLY | WC_O_CREAT | WC_O_TRUNC);
+    long fd;
+    long wrote;
+    unsigned n;
+
+    /* The one thing an editor must never do. Half a file written back over a
+     * whole one is not a save with a bug in it, it is a deletion wearing the
+     * face of success — and the store would report it as a clean write, because
+     * it would be telling the truth about the bytes it was handed. So the
+     * document that is not the whole file does not go into the file, and the
+     * answer is said out loud. The caller keeps running: what is on screen is
+     * still worth reading, and Ctrl+Q will still report the edits as unsaved. */
+    if (truncated) {
+        n = wc_app_str(line, 0, "note: refused to save a truncated document");
+        say_pid(n, pid);
+        return 0;
+    }
+
+    fd = wc_open_flags(path, WC_O_WRONLY | WC_O_CREAT | WC_O_TRUNC);
 
     if (fd < 0) {
-        unsigned n = wc_app_str(line, 0, "note: open to write failed on ");
+        n = wc_app_str(line, 0, "note: open to write failed on ");
         n = wc_app_str(line, n, path);
         n = wc_app_str(line, n, ", error ");
         n = wc_app_signed(line, n, fd);
@@ -509,11 +718,11 @@ static int save_file(long pid)
         return 1;
     }
 
-    long wrote = wc_write(fd, doc, dlen);
+    wrote = wc_write(fd, doc, dlen);
     wc_close(fd);
 
     if (wrote != (long)dlen) {
-        unsigned n = wc_app_str(line, 0, "note: wrote ");
+        n = wc_app_str(line, 0, "note: wrote ");
         n = wc_app_dec(line, n, (unsigned long)(wrote < 0 ? 0 : wrote));
         n = wc_app_str(line, n, " of ");
         n = wc_app_dec(line, n, dlen);
@@ -525,11 +734,19 @@ static int save_file(long pid)
     dirty = 0;
     /* The count here is what the store reported back rather than what the
      * program holds, so "saved" is the file's word and not the program's hope. */
-    unsigned n = wc_app_str(line, 0, "note: saved ");
+    n = wc_app_str(line, 0, "note: saved ");
     n = wc_app_dec(line, n, dlen);
     n = wc_app_str(line, n, " bytes to ");
     n = wc_app_str(line, n, path);
     say_pid(n, pid);
+    /* And the bytes behind the count. A length can be matched by the wrong
+     * content; this number, printed by /bin/copy over the file read back from
+     * another process, cannot be matched by a document that lost one. */
+    {
+        unsigned m = wc_app_str(line, 0, "note: digest 0x");
+        m = wc_app_hex(line, m, wc_fnv1a(doc, dlen));
+        say_pid(m, pid);
+    }
     return 0;
 }
 
@@ -544,15 +761,27 @@ void _start(int argc, char **argv)
         unsigned n = wc_app_str(line, 0, "note: bad name ");
         n = wc_app_bytes(line, n, name, wc_strnlen(name, 20));
         say_len(n);
-        say("note: a name is letters, digits or _ , up to 12");
+        say("note: a name is letters digits or _ with one dot, up to 12");
         wc_exit(NOTE_EXIT_USAGE);
     }
+    colour = name_is_source();
 
     if (load(me) != 0)
         wc_exit(NOTE_EXIT_USAGE);
 
     reveal_caret();
     draw();
+    if (colour) {
+        /* Said after the first frame, because the first frame is what computed
+         * it: the count and the colours a test is about to grep came out of the
+         * same scan of the same bytes. */
+        unsigned n = wc_app_str(line, 0, "note: highlighted ");
+        n = wc_app_dec(line, n, nkey);
+        n = wc_app_str(line, n, " keywords in ");
+        n = wc_app_dec(line, n, doc_lines());
+        n = wc_app_str(line, n, " lines");
+        say_pid(n, me);
+    }
     {
         unsigned n = wc_app_str(line, 0, "note: editing ");
         n = wc_app_str(line, n, path);

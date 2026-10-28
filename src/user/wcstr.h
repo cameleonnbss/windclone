@@ -133,4 +133,43 @@ static inline unsigned wc_app_signed(char *out, unsigned n, long value)
     return wc_app_dec(out, n, mag);
 }
 
+/* Hex, eight lower-case digits, no prefix. It exists for one number: the
+ * digest a copier and an editor print so that a byte which vanished can be
+ * caught by a test. Decimal would let two different bit patterns look
+ * plausible to a human reading a log; hex at a fixed width does not, and the
+ * fixed width is why the digits are counted from 7 down rather than emitted
+ * until the value runs out. */
+static inline unsigned wc_app_hex(char *out, unsigned n, unsigned long value)
+{
+    static const char digits[] = "0123456789abcdef";
+
+    for (int i = 7; i >= 0; i--) {
+        if (n >= 56)
+            return n;                 /* the same 56-byte cap as every appender */
+        out[n++] = digits[(value >> (i * 4)) & 0xF];
+    }
+    return n;
+}
+
+/* FNV-1a, 32 bits: prime 16777619, offset basis 2166136261. One byte at a
+ * time, because the whole point is that the number depends on every byte, in
+ * order, and on nothing else.
+ *
+ * It lives here for the same reason the lexer lives in highlight.h: /bin/copy
+ * and /bin/note have to print the *same* number for the same bytes without ever
+ * talking to each other, and two implementations of a "simple" hash are one
+ * off-by-one away from a test that can never pass. Not cryptographic, and
+ * nothing here claims it is — it is a checksum that turns "the count matched"
+ * into "the bytes matched". */
+static inline unsigned long wc_fnv1a(const char *p, unsigned long n)
+{
+    unsigned long h = 2166136261UL;
+
+    for (unsigned long i = 0; i < n; i++) {
+        h ^= (unsigned long)(unsigned char)p[i];
+        h *= 16777619UL;
+    }
+    return h;
+}
+
 #endif

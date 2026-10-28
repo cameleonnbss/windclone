@@ -736,6 +736,26 @@ echo '==> a syntax-highlighting code viewer (colour in a program window)'
 python3 tools/qemu-desktop.py windclone.iso highlight \
     || fail 'the viewer could not open, colour or scroll a source file'
 
+# v0.1.23: the viewer's classifier and the editor's buffer are one program. The
+# scenario has /bin/copy move a real source file out of the boot archive into the
+# writable store, opens it as `work.c` (the dot is what makes it a file and not a
+# note), requires the editor to paint the same colours the viewer paints, types
+# one character, saves, and then digests the file a *second* process reads back.
+# A digest over the bytes is the proof a terminal cannot give: a program window is
+# 62 columns wide and would silently clip a source line to fit.
+echo '==> a code editor that writes back (archive -> store -> editor -> store)'
+python3 tools/qemu-desktop.py windclone.iso editcode \
+    || fail 'the editor could not open, colour, edit or save a real source file'
+
+# ... and the half that has to say no. /src/big.c is bigger than a document
+# buffer, so the editor loads part of it, calls it truncated on the row a person
+# reads first, refuses Ctrl+S, quits with unsaved bytes and exit code 7 - and the
+# file it refused to write still digests to exactly what it was before it was
+# opened. An editor that saved half a file would report a clean write.
+echo '==> an editor that refuses to save half a file (truncation guard)'
+python3 tools/qemu-desktop.py windclone.iso edittrunc \
+    || fail 'the editor saved a truncated document, or would not admit it was one'
+
 # v0.1.12: the double buffer + damage claim, measured. The scenario reads the
 # kernel's own "gfx: flip <n> rects, <area> px" lines and requires three things:
 # the boot frame flipped the whole screen, a pure mouse move flipped only a

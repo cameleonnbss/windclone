@@ -34,8 +34,9 @@
  * would need a dirty flag, an undo, and a save dialog, and none of those are
  * this program's job. View is the half of a code editor that is genuinely
  * harder than it looks: reading a file, deciding what each token *is*, and
- * saying so on screen while somebody scrolls. Editing came in note and stays
- * there.
+ * saying so on screen while somebody scrolls. Note has the other half, and
+ * from v0.1.23 the two programs share the one lexer below — the only way an
+ * editor's colours can mean what the viewer's mean.
  *
  * The words on screen are French, like every other window in this OS. The
  * lines it logs are English, because they are the lines CI greps.
@@ -43,6 +44,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "wcstr.h"
+#include "highlight.h"
 
 #define VIEW_MAX       2048           /* the whole file, in RAM          */
 #define VIEW_PATH_MAX  40
@@ -64,20 +66,11 @@
  * buffer's own limit that keeps it true rather than an argument. */
 #define VIEW_FRAME_MAX   3072
 
-/* The palette, by role. These numbers are the indices in shell.c's color_ink[]
- * and nothing here can check that: the table is the kernel's, the meaning is
- * the program's, and the test that ties them together is that the colours
- * appear on the screen where this file says they should. */
-#define C_TEXT     0      /* the default green: identifiers, punctuation */
-#define C_WHITE    1      /* emphasis: the file name in the title        */
-#define C_KEYWORD  2      /* if, for, return ...                         */
-#define C_STRING   3      /* "..." and '...'                             */
-#define C_NUMBER   4      /* 42, 0x1C, 8                               */
-#define C_ERROR    5      /* a name that failed, an unmatched quote     */
-#define C_TYPE     6      /* int, char, void, struct ...                 */
-#define C_COMMENT  7      /* both kinds, and the line-number gutter      */
+/* The palette and the escape byte live in highlight.h, shared with the editor;
+ * see the header for why the indices are the kernel's table and the roles are
+ * the program's. */
 
-#define VIEW_ESC   0x1C
+#define VIEW_ESC   HL_ESC
 
 #define K_HOME   1    /* Ctrl+A — first line                  */
 #define K_PAGEUP 2    /* Ctrl+B — one screen up               */
@@ -131,138 +124,19 @@ static void say_pid(unsigned n, long pid)
 }
 
 /* --- the highlighter --------------------------------------------------
- * Two word lists and a scanner. They are C's because that is the language this
- * OS is written in and the file it opens; a real editor's lexer is a generated
- * table driven by a grammar, and a generated table is not something a freestanding
- * program can carry. What is deliberately *not* done: no nesting, no macro
- * expansion, no context. A token is what its bytes say in isolation, which is
- * the same rule a human highlighting by hand follows, and it is honest about
- * its one known lie — a word inside a comment is coloured as a comment, which
- * is what a reader wants and not what a compiler does. */
-static const char *const keywords[] = {
-    "if", "else", "while", "for", "do", "return", "break", "continue",
-    "switch", "case", "default", "goto", "static", "const", "extern",
-    "sizeof", "volatile", "inline", "define", "undef", "include", 0
-};
-
-static const char *const types[] = {
-    "int", "char", "void", "long", "short", "float", "double",
-    "unsigned", "signed", "struct", "union", "enum", "typedef",
-    "size_t", "uint8_t", "bool", 0
-};
-
-static int is_word(char c)
-{
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-           (c >= '0' && c <= '9') || c == '_';
-}
-
-/* Exact, case-sensitive, bounded by the token's own length: `w` points into
- * src[] and holds exactly n bytes, so a table entry longer than the token
- * cannot read past it. */
-static int matches(const char *s, const char *w, unsigned n)
-{
-    unsigned i = 0;
-
-    while (i < n && s[i] != '\0') {
-        if (s[i] != w[i])
-            return 0;
-        i++;
-    }
-    return i == n && s[i] == '\0';
-}
-
-static int word_class(unsigned start, unsigned n)
-{
-    for (int i = 0; keywords[i] != 0; i++)
-        if (matches(keywords[i], src + start, n))
-            return C_KEYWORD;
-    for (int i = 0; types[i] != 0; i++)
-        if (matches(types[i], src + start, n))
-            return C_TYPE;
-    return C_TEXT;
-}
-
-static void set_class(unsigned start, unsigned end, int a)
-{
-    for (unsigned i = start; i < end; i++)
-        cls[i] = (uint8_t)a;
-}
-
+ * The lexer is in highlight.h, shared with /bin/note, because a viewer and an
+ * editor that disagreed about which words are keywords would be a bug no test
+ * can catch: each program would be right about its own table. What lives here
+ * is only the question of when to scan. */
 /* One pass over the whole file, once, at open. Painting then costs nothing:
  * drawing a row is a lookup per byte rather than a re-lex, which is what lets a
  * repaint happen on every keypress with no thought about how long the file is.
- * nkey is counted here, so "highlighted N keywords" is a fact about the file
- * and not about the twelve rows currently on screen. */
-static void classify(void)
+ * The keyword count comes back from the scan itself, so "highlighted N
+ * keywords" is a fact about the file and not about the twelve rows currently on
+ * screen. */
+static unsigned nkey_of(void)
 {
-    unsigned i = 0;
-
-    nkey = 0;
-    for (unsigned k = 0; k < slen; k++)
-        cls[k] = C_TEXT;
-
-    while (i < slen) {
-        char c = src[i];
-
-        if (c == '/' && i + 1 < slen && src[i + 1] == '/') {
-            unsigned end = i;
-            while (end < slen && src[end] != '\n')
-                end++;
-            set_class(i, end, C_COMMENT);
-            i = end;
-            continue;
-        }
-        if (c == '/' && i + 1 < slen && src[i + 1] == '*') {
-            unsigned end = i + 2;
-            while (end + 1 < slen && !(src[end] == '*' && src[end + 1] == '/'))
-                end++;
-            /* Unclosed, the comment runs to the end of the file. A block
-             * comment that never terminates is a bug in the specimen, and the
-             * honest response is to stop painting at the file rather than read
-             * past it looking for a terminator that is not there. */
-            end = end + 1 < slen ? end + 2 : slen;
-            set_class(i, end, C_COMMENT);
-            i = end;
-            continue;
-        }
-        if (c == '"' || c == '\'') {
-            unsigned end = i + 1;
-            while (end < slen && src[end] != c && src[end] != '\n')
-                end++;
-            if (end < slen && src[end] == c) {
-                set_class(i, end + 1, C_STRING);
-                i = end + 1;          /* include the closing quote */
-                continue;
-            }
-            /* No close on this line: paint what there is in the error ink and
-             * carry on, because a string that does not end is exactly the kind
-             * of thing a viewer should make visible instead of hiding. */
-            set_class(i, end, C_ERROR);
-            i = end;
-            continue;
-        }
-        if (c >= '0' && c <= '9') {
-            unsigned end = i;
-            while (end < slen && is_word(src[end]))
-                end++;
-            set_class(i, end, C_NUMBER);
-            i = end;
-            continue;
-        }
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
-            unsigned end = i;
-            while (end < slen && is_word(src[end]))
-                end++;
-            int a = word_class(i, end - i);
-            if (a == C_KEYWORD)
-                nkey++;
-            set_class(i, end, a);
-            i = end;
-            continue;
-        }
-        i++;
-    }
+    return hl_scan(src, slen, cls);
 }
 
 /* --- the frame --------------------------------------------------------
@@ -344,7 +218,7 @@ static void f_code_row(unsigned start, unsigned end, unsigned n)
     unsigned col = 0;
 
     f_begin();
-    f_esc(C_COMMENT);
+    f_esc(HL_COMMENT);
     f_addn(n);
     while (row_cells < VIEW_GUTTER)
         f_addc(' ');
@@ -372,7 +246,7 @@ static void draw(void)
     f_end();
 
     f_begin();
-    f_esc(C_WHITE);
+    f_esc(HL_WHITE);
     f_add("VIEW - ");
     f_add(path);
     f_end();
@@ -422,7 +296,7 @@ static void draw(void)
     f_end();
 
     f_begin();
-    f_esc(C_WHITE);
+    f_esc(HL_WHITE);
     f_add("LIGNES ");
     f_addn(top + 1);
     f_add("-");
@@ -430,13 +304,13 @@ static void draw(void)
     f_add(" SUR ");
     f_addn(nlines);
     f_add("  ");
-    f_esc(C_KEYWORD);
+    f_esc(HL_KEYWORD);
     f_addn(nkey);
     f_add(" MOTS-CLES");
     f_end();
 
     f_begin();
-    f_esc(C_TEXT);
+    f_esc(HL_TEXT);
     f_add("N/P=LIGNE  B/F=PAGE  A/E=DEBUT-FIN  Q=QUITTER (CTRL)");
     f_end();
 
@@ -531,7 +405,7 @@ static int load(long pid)
     wc_close(fd);
 
     nlines = (unsigned)count_lines();
-    classify();
+    nkey = nkey_of();
     return 0;
 }
 

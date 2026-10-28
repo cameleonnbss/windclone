@@ -279,7 +279,8 @@ static void cmd_help(void)
     put_line("  WHOAMI         MON PID - ON NE TUE PAS PID 1");
     put_line("  REAPER         ENFANT, KILL, WAIT - DANS CET ORDRE");
     put_line("  SAVE           ECRIT OU LIT UN FICHIER DANS /TMP");
-    put_line("  NOTE <NOM>     EDITE /TMP/<NOM>.TXT");
+    put_line("  COPY <A> <B>   DUPLIE UN FICHIER OCTET PAR OCTET");
+    put_line("  NOTE <NOM>     EDITE /TMP/<NOM> (OU <NOM>.TXT)");
     put_line("  VIEW <FICHIER> AFFICHE UN FICHIER EN COULEUR");
     put_line("CE QUE TU LANCES ICI EST UN PROCESSUS: PID REEL,");
     /* The shell's pid is printed as the number the table holds, not as a "1"

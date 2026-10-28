@@ -259,12 +259,12 @@ On boot the kernel:
    second page of any segment longer than 4 KiB was copied 4 KiB past the end of
    its own frame — into the next frame the allocator had just handed out, which
    was the process's own page table. Every image before this editor kept each
-   segment inside one page, so it had never fired. What the editor does *not*
-   have yet: arrow keys (Ctrl+B/F/P/N/A/E stand in), a selection, an open/save-as
-   *dialog*, and any document longer than 512 bytes. The `editing` scenario drives
-   the real PS/2 path — type the command, type text, press Ctrl+S, quit — and then
-   reads `/tmp/demo.txt` back through the save tool, so the proof is that the
-   bytes are still there, not that a window looked right.
+   segment inside one page, so it had never fired. What the editor did *not* have
+   at this release: arrow keys (Ctrl+B/F/P/N/A/E stand in), a selection, an
+   open/save-as *dialog*, and any document longer than 512 bytes. The `editing`
+   scenario drives the real PS/2 path — type the command, type text, press Ctrl+S,
+   quit — and then reads `/tmp/demo.txt` back through the save tool, so the proof
+   is that the bytes are still there, not that a window looked right.
 
 25. paints **a syntax-highlighting code viewer** — `/bin/view`. Type
    `view /src/hello.c` and a program window opens on a real C file that ships in
@@ -284,12 +284,48 @@ On boot the kernel:
    column and not a pixel count. `wm: colour pid N` is logged by the parser when
    it *consumes* a complete pair, not by a byte counter that would fire on a lone
    FS. Like `/bin/note` this is one program on syscalls that already exist, and it
-   is read-only on purpose: editing a highlighted file is the next step, not this
-   one. The `highlight` scenario types the path, then pages down with Ctrl+F three
-   times, and asserts on the wire that the escape sits in front of `include`,
-   `42`, `int` and a string quote — tokens that live on the second, third and
-   fourth screens, so the page-downs are what prove the whole file was classified
-   and not merely the twelve rows that happened to be visible.
+   was read-only on purpose: editing a highlighted file was the next step, and
+   item 26 is that step. The `highlight` scenario types the path, then pages down
+   with Ctrl+F three times, and asserts on the wire that the escape sits in front
+   of `include`, `42`, `int` and a string quote — tokens that live on the second,
+   third and fourth screens, so the page-downs are what prove the whole file was
+   classified and not merely the twelve rows that happened to be visible.
+
+26. edits **the file it highlights** — `/bin/note` put on the viewer's colours and
+   a real file's name, and the two programs started sharing one classifier. The
+   viewer and the editor are still two programs; what merged is the code that
+   decides what a token is. None of it needed a syscall. The classifier moved
+   into `src/user/highlight.h`, a header of `static inline` functions with the
+   buffer passed in as an argument,
+   so the viewer's read-only table and the editor's mutable document decide what a
+   token is by the same code — colours that came from two tables would be two
+   claims about the same bytes. `/bin/note` grew a 2048-byte document (the viewer
+   already held that much; an editor smaller than its own viewer cannot open what
+   it claims to edit), accepts one dot in a name so `note work.c` opens
+   `/tmp/work.c` instead of inventing `/tmp/work.c.txt`, and paints with the
+   FS+digit escape only when the name ends `.c` or `.h` — which is why every frame
+   the `editing` test has checked since v0.1.21 is still byte for byte what it
+   was. And `/bin/copy` is a *program* that moves a file from the initrd into the
+   writable store, because the kernel already has `open` and `write` and needs no
+   third way to say the same thing. It reads the whole source before writing a
+   byte, so a mistyped name cannot destroy the destination.
+   What came with a bigger buffer is a hazard a 512-byte note never met: a file
+   can be longer than the document, and half a file written back over a whole one
+   is a deletion that reports success — the store would be telling the truth about
+   the bytes it was handed. So a document that is not the whole file says
+   `(TRONQUE)` on the title row, refuses Ctrl+S out loud, and quits with exit code
+   7 and its edits unsaved. Proving any of that needed a number a terminal cannot
+   give: a program window is 62 columns wide and clips a source line silently, so
+   the tests compare an FNV-1a digest over the bytes instead — printed by the
+   copier, by the editor, and by a second copier that never met the first two.
+   `/src/big.c` is a specimen written to be too long. The `editcode` scenario
+   copies `/src/hello.c` into the store, opens it as source, checks the digest
+   agrees three ways, presses Ctrl+E and reads the caret's column out of the
+   editor's own ruler to work out where a typed `x` has to land, saves, and has a
+   second process digest the result. The `edittrunc` scenario opens the specimen,
+   makes the document dirty with one Ctrl+D, requires the save to be refused, and
+   then proves the file still digests to exactly what it was before the editor saw
+   it.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
@@ -339,11 +375,13 @@ src/kernel/        C kernel: entry (kmain), console + memory managers,
                    (proc), interrupt stubs (NASM), string + port-I/O helpers
 src/user/          the programs that run in ring 3 — hello, motd, ls, cat,
                    echo, tick, spin, exit, waiter, bell, reaper, vanish,
-                   whoami, orphan, nest, hold, save, keys, note — with no libc of their own: a header of inline
-                   `int 0x80` wrappers and eight static inline string helpers
+                   whoami, orphan, nest, hold, save, keys, note, view, copy — with no libc of their own: a header of inline
+                   `int 0x80` wrappers and ten static inline string and digest
+                   helpers
 src/boot/          hand-written NASM boot code (two-stage educational MBR)
 rootfs/            what goes into the initrd: packed to a ustar tar, loaded
-                   by the bootloader as a module, read in place by the kernel
+                   by the bootloader as a module, read in place by the kernel,
+                   and — since `/bin/copy` — a place a file can be edited *from*
 linkers/           ELF64 linker scripts — kernel.ld (higher-half kernel),
                    user.ld (programs linked at 0x400000, small model)
 vendor/limine.h    vendored bootloader API header (BSD-0, upstream Limine)
