@@ -933,8 +933,9 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         instant.
       What comes next is the phase's real edge: no network. It is being crossed one
       honest slice at a time — the driver and a proven transmit is v0.1.25, ARP and
-      a proven receive is v0.1.26, and the DHCP + TCP + HTTP-GET-into-a-window plus
-      a package manager over it is v0.1.27.
+      a proven receive is v0.1.26, an IPv4/ICMP ping round-trip is v0.1.27, and the
+      UDP + DHCP + TCP + HTTP-GET-into-a-window plus a package manager over it are
+      the releases that follow.
 - [x] The **network card wakes up** (v0.1.25). The first honest slice of that edge:
       not a stack, but a driver that finds real silicon and moves a frame through
       it. `pci` grew a public lookup/config API (`pci_find`, `pci_bar`,
@@ -966,9 +967,21 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       hard-code the emulator's address, because the claim is that a real, distinct
       reply came back and was understood, not that it equalled a number the test
       wrote down.
-- [ ] ICMP + UDP on top of the now-proven receive path, and a DHCP handshake
-      against the emulator's BOOTP server to replace the static test address
-- [ ] TCP + an HTTP GET landing in a window, and a package manager over it (v0.1.27)
+- [x] The network **pings** (v0.1.27). With the gateway MAC resolved, the client now
+      builds a whole IPv4 packet by hand — header plus ICMP echo request, each with
+      the Internet checksum computed over the bytes it actually sends — ships it to
+      10.0.2.2, and parses the echo reply back out of the receive ring
+      (`icmp: reply from 10.0.2.2: seq 0 ttl 255 - host reachable`). This is the
+      first full IP round-trip: not a link-layer frame but a packet the emulator's
+      own network stack accepted and answered. Getting it honest caught a real bug —
+      the ICMP checksum was first written to the wrong offset, so SLIRP silently
+      refused the malformed request; the fix moved the store to the checksum field,
+      which is what turned "never answered" into a live reply. The scenario keeps the
+      two ARP guards and adds a third: an out-of-range ttl means a mis-parse, not a
+      receive, so it is rejected rather than trusted.
+- [ ] UDP on top of the now-proven IPv4 path, and a DHCP handshake against the
+      emulator's BOOTP server to replace the static test address (v0.1.28)
+- [ ] TCP + an HTTP GET landing in a window, and a package manager over it (v0.1.29)
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
 - [ ] A block device driver (ATA or NVMe), so `tmpfs` can stop being the only

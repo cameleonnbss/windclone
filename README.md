@@ -376,6 +376,18 @@ On boot the kernel:
    request echoed back, not an answer from another host). It does not hard-code the
    emulator's address — the witness is simply that a real, distinct reply came back
    through the card and was understood.
+30. **pings its gateway in IPv4**. With the gateway's MAC known, the client builds a
+   whole packet by hand: an IPv4 header and an ICMP echo request, each carrying the
+   Internet checksum (one's-complement of the 16-bit one's-complement sum) computed
+   over the bytes it will actually send. It ships that frame to 10.0.2.2, and when
+   SLIRP's echo reply arrives it parses the header length, checks the packet is
+   really addressed back to us, and reads the time-to-live off the live hop
+   (`icmp: reply from 10.0.2.2: seq 0 ttl 255 - host reachable`). This is the first
+   full IP round-trip in the kernel — not a link-layer frame but a packet the
+   emulator's own network stack accepted and answered — and it is the rung under
+   DHCP and TCP. The test guards the same two lies as ARP did and adds a third: a
+   reply whose ttl is out of range means the packet was mis-parsed, not received, so
+   the scenario rejects it rather than trusting a green line.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

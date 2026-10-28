@@ -1,4 +1,4 @@
-/* WindClone — a minimal ARP client on top of the e1000 driver.
+/* WindClone — an ARP client and an ICMP pinger on top of the e1000 driver.
  *
  * This module exists to answer one question the v0.1.25 release could not:
  * can the card *receive*? Sending was proven by a descriptor the card wrote
@@ -14,6 +14,13 @@
  * proof that a real packet landed in our memory via DMA. The MAC we log is
  * whatever the emulator answered — we assert that a well-formed reply for our
  * address arrived, not a specific number we hard-coded.
+ *
+ * Once the gateway is resolved the client moves on to ICMP: it builds a full
+ * IPv4 header and an echo request, computes the Internet checksum over both,
+ * sends them, and parses the reply. This is the first real IP round-trip — a
+ * packet we constructed reaching the emulator's stack and an answer coming
+ * back — and it is the ladder rung under DHCP and TCP, which arrive next. The
+ * Shipped version uses the static SLIRP addresses; a real lease is a later step.
  *
  * SPDX-License-Identifier: MIT
  */

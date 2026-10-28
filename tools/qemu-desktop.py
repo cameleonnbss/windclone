@@ -1693,12 +1693,11 @@ def scenario_actions(sc, mon, W, H):
                 raise SystemExit("something the editor was given reached the "
                                  "command line: %s" % leak)
     elif sc == "net":
-        # v0.1.26: the card receives. The idle-loop ARP client broadcast
-        # who-has 10.0.2.2 and the emulator's user-mode network answered - but
-        # that reply only parses if it really landed in the DMA receive ring.
-        # Wait for the kernel to name the gateway's MAC, then prove it is a real
-        # answer and not the driver reading zeros out of an empty buffer or
-        # echoing its own transmitted frame back at itself.
+        # v0.1.26 + v0.1.27: the card receives, and now speaks IP. The idle-loop
+        # client broadcast who-has 10.0.2.2, the emulator's user-mode network
+        # answered through the DMA receive ring, then we built a full IPv4/ICMP
+        # echo request, sent it, and read the reply back. Each check below is a
+        # guard against a false positive, not a hard-coded expectation.
         m = wait_serial(r"arp: 10\.0\.2\.2 is at ([0-9a-f:]{17}) - gateway resolved")
         got = m.group(1)
         if got == "00:00:00:00:00:00":
@@ -1708,6 +1707,14 @@ def scenario_actions(sc, mon, W, H):
         if own and own.group(1) == got:
             raise SystemExit("gateway MAC equals our own NIC - that is an echo of "
                              "the request, not a reply from another host")
+        # The echo reply is the prize: it only parses if a valid IPv4 packet we
+        # built (correct header AND ICMP checksums) reached SLIRP and a
+        # well-formed answer came back. A bogus ttl means we mis-parsed a frame.
+        r = wait_serial(r"icmp: reply from 10\.0\.2\.2: seq (\d+) ttl (\d+) - host reachable")
+        ttl = int(r.group(2))
+        if ttl <= 0 or ttl > 255:
+            raise SystemExit("implausible ttl %d in the icmp reply - the packet "
+                             "was likely mis-parsed, not genuinely received" % ttl)
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -1826,12 +1833,14 @@ MARKERS = {
     # surface, and a taskbar showing the CMOS chip's own decoded time and date
     "chrome":    ["wm: wallpaper cached", "rtc: hardware clock",
                   "rtc: date"],
-    # the gateway MAC being neither zeros nor our own address is asserted in the
-    # scenario; these are the lines the receive claim turns on - the client armed
-    # on top of the driver, a request broadcast, and a reply parsed back out of
-    # the DMA receive ring naming the gateway
-    "net":       ["net: arp client armed", "arp: who-has 10.0.2.2",
-                  "arp: 10.0.2.2 is at", "gateway resolved"],
+    # the gateway MAC being neither zeros nor our own address, and the icmp ttl
+    # being plausible, are asserted in the scenario; these are the lines the
+    # receive-then-ping claim turns on - the client armed on top of the driver,
+    # a request broadcast, a reply parsed out of the DMA receive ring naming the
+    # gateway, and a full IPv4/ICMP echo that SLIRP answered
+    "net":       ["net: arp/icmp client armed", "arp: who-has 10.0.2.2",
+                  "arp: 10.0.2.2 is at", "gateway resolved",
+                  "icmp: echo request to 10.0.2.2", "host reachable"],
 }
 
 
