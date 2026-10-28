@@ -27,6 +27,7 @@
 #include "log.h"
 #include "pci.h"
 #include "e1000.h"
+#include "net.h"
 #include "keyboard.h"
 #include "initrd.h"
 #include "vfs.h"
@@ -535,6 +536,7 @@ void kmain(void)
      * found, its BAR mapped, and its rings stood up before anything can talk to
      * it. A polled driver, so there is no IRQ plumbing to arm. */
     e1000_init();
+    net_init();
 
     /* Phase 8 - the screen. Composed here, then again from the idle loop for
      * every mouse packet, every key and every line a live program writes: the
@@ -571,6 +573,12 @@ void kmain(void)
     int user_ran = 0;
     for (;;) {
         hlt();
+
+        /* The network is fed here, not at boot: a received frame only exists
+         * once QEMU's user-mode network gets the CPU, and that happens while we
+         * sleep in hlt. So the idle loop is the pump — take whatever arrived,
+         * resend on a cadence, and never block the desktop on it. */
+        net_visit();
 
         /* Input-driven redraw: the drivers only queue state, the idle loop
          * decides when to repaint. It has to happen on every wake-up, not

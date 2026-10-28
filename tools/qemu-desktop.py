@@ -1692,6 +1692,22 @@ def scenario_actions(sc, mon, W, H):
             if count_serial(leak) != 0:
                 raise SystemExit("something the editor was given reached the "
                                  "command line: %s" % leak)
+    elif sc == "net":
+        # v0.1.26: the card receives. The idle-loop ARP client broadcast
+        # who-has 10.0.2.2 and the emulator's user-mode network answered - but
+        # that reply only parses if it really landed in the DMA receive ring.
+        # Wait for the kernel to name the gateway's MAC, then prove it is a real
+        # answer and not the driver reading zeros out of an empty buffer or
+        # echoing its own transmitted frame back at itself.
+        m = wait_serial(r"arp: 10\.0\.2\.2 is at ([0-9a-f:]{17}) - gateway resolved")
+        got = m.group(1)
+        if got == "00:00:00:00:00:00":
+            raise SystemExit("resolved gateway MAC was all zeros - the reply was "
+                             "parsed from an empty buffer, not a real frame")
+        own = re.search(r"e1000: link up, mac ([0-9a-f:]{17})", read_log())
+        if own and own.group(1) == got:
+            raise SystemExit("gateway MAC equals our own NIC - that is an echo of "
+                             "the request, not a reply from another host")
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -1810,6 +1826,12 @@ MARKERS = {
     # surface, and a taskbar showing the CMOS chip's own decoded time and date
     "chrome":    ["wm: wallpaper cached", "rtc: hardware clock",
                   "rtc: date"],
+    # the gateway MAC being neither zeros nor our own address is asserted in the
+    # scenario; these are the lines the receive claim turns on - the client armed
+    # on top of the driver, a request broadcast, and a reply parsed back out of
+    # the DMA receive ring naming the gateway
+    "net":       ["net: arp client armed", "arp: who-has 10.0.2.2",
+                  "arp: 10.0.2.2 is at", "gateway resolved"],
 }
 
 

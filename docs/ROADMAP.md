@@ -932,9 +932,9 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         with a known instant and requires the printed hour and date to be that
         instant.
       What comes next is the phase's real edge: no network. It is being crossed one
-      honest slice at a time — the driver and a proven transmit is v0.1.25 (below),
-      ARP/ICMP and a proven receive is v0.1.26, and the DHCP + TCP + HTTP-GET-into-
-      a-window plus a package manager over it is v0.1.27.
+      honest slice at a time — the driver and a proven transmit is v0.1.25, ARP and
+      a proven receive is v0.1.26, and the DHCP + TCP + HTTP-GET-into-a-window plus
+      a package manager over it is v0.1.27.
 - [x] The **network card wakes up** (v0.1.25). The first honest slice of that edge:
       not a stack, but a driver that finds real silicon and moves a frame through
       it. `pci` grew a public lookup/config API (`pci_find`, `pci_bar`,
@@ -953,10 +953,22 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       The trap worth recording: a tight guest spin never yields to QEMU's main
       loop, so SLIRP never gets the CPU to answer — which is why *receiving* is
       deliberately not claimed here. It is next.
-- [ ] The network **listens**: an idle-loop packet pump, ARP and ICMP, so the
-      round-trip is proven against QEMU's virtual subnet (v0.1.26)
-- [ ] IPv4/UDP + a DHCP handshake against the emulator's BOOTP server, then TCP +
-      an HTTP GET landing in a window, and a package manager over it (v0.1.27)
+- [x] The network **listens** (v0.1.26). The receive half, and the trap that
+      shapes it: a frame coming back only exists once QEMU's user-mode network
+      (SLIRP) gets CPU, which happens only while the guest sleeps in `hlt`, so a
+      boot-time spin could never read one. `net` is an idle-loop pump — `net_visit`
+      runs every wake-up, drains the receive ring, and re-asks on a half-second
+      cadence. It speaks ARP, the smallest protocol that closes the loop: it
+      broadcasts `who-has 10.0.2.2`, the reply lands through DMA, and the driver
+      names the gateway MAC (`arp: 10.0.2.2 is at … - gateway resolved`). The
+      scenario refuses the two lazy ways a receive test lies — an all-zero MAC
+      (empty buffer) and our own NIC's MAC (the request echoed back) — and does not
+      hard-code the emulator's address, because the claim is that a real, distinct
+      reply came back and was understood, not that it equalled a number the test
+      wrote down.
+- [ ] ICMP + UDP on top of the now-proven receive path, and a DHCP handshake
+      against the emulator's BOOTP server to replace the static test address
+- [ ] TCP + an HTTP GET landing in a window, and a package manager over it (v0.1.27)
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
 - [ ] A block device driver (ATA or NVMe), so `tmpfs` can stop being the only

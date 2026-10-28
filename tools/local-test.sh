@@ -788,6 +788,19 @@ echo '==> the desktop skin (cached wallpaper + hardware clock)'
 python3 tools/qemu-desktop.py windclone.iso chrome \
     || fail 'the wallpaper was not cached at the desktop size, or the clock was not read from the chip'
 
+# v0.1.26: the card listens. The boot self-check above already proved the e1000
+# can send; this is the other half. From the idle loop the ARP client broadcasts
+# who-has 10.0.2.2, and QEMU's user-mode network (SLIRP) answers - a reply the
+# driver can only parse if it truly landed in the DMA receive ring. The scenario
+# waits for the kernel to name the gateway's MAC and rejects two cheats: an
+# all-zero address (parsed from an empty buffer) and our own NIC's address (an
+# echo of the request, not a reply from another host). The exact SLIRP address is
+# deliberately not hard-coded - the claim is that a real reply came back, and the
+# emulator's own answer is the witness.
+echo '==> the network receives (arp resolve against the emulator subnet)'
+python3 tools/qemu-desktop.py windclone.iso net \
+    || fail 'the card could not receive: the arp reply never came back through the rx ring'
+
 # v0.1.12: the double buffer + damage claim, measured. The scenario reads the
 # kernel's own "gfx: flip <n> rects, <area> px" lines and requires three things:
 # the boot frame flipped the whole screen, a pure mouse move flipped only a

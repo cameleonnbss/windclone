@@ -360,9 +360,22 @@ On boot the kernel:
    the card has read that frame out of memory and written the descriptor's done bit
    back (`e1000: tx probe 60 bytes, descriptor done`). Because a done bit lands in
    RAM and not in our cache, the driver flushes before every look — the blunt,
-   correct version of the per-descriptor flush a real driver uses. This release
-   proves the card can *send*; receiving (ARP, IP, the rest of the stack) is the next
-   increment, and no line here pretends otherwise.
+   correct version of the per-descriptor flush a real driver uses. That release
+   proved the card could *send*; the next one had to prove it could *hear*.
+29. **hears the network come back**. Sending was half the story; a frame the other
+   way only exists once QEMU's user-mode network (SLIRP) gets CPU time, and that
+   happens only while the guest sleeps in `hlt` — so nothing here busy-spins. The
+   idle loop is the pump: `net_visit` runs every wake-up, takes whatever landed in
+   the receive ring, and re-asks on a half-second cadence. It speaks ARP, the
+   smallest protocol that closes the loop (no checksums, and SLIRP always answers a
+   `who-has` for its gateway). The client broadcasts `who-has 10.0.2.2`, the reply
+   arrives through DMA, and the driver parses it and names the gateway's MAC
+   (`arp: 10.0.2.2 is at 52:55:0a:00:02:02 - gateway resolved`). The scenario is
+   ruthless about the two ways a lazy receive test lies: it rejects an all-zero MAC
+   (parsed from an empty buffer) and rejects our *own* NIC's MAC (that would be the
+   request echoed back, not an answer from another host). It does not hard-code the
+   emulator's address — the witness is simply that a real, distinct reply came back
+   through the card and was understood.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
