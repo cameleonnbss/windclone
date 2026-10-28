@@ -99,6 +99,7 @@ echo '    ok: kernel is scalar (no SSE)'
 #    + uptime markers; the injected `sendkey` must come back decoded.
 rm -f /tmp/wc-bios.log /tmp/wc-biosmon
 timeout "$TIMEOUT" $Q -cdrom windclone.iso -m 512 -display none -no-reboot \
+    -device e1000,netdev=n0 -netdev user,id=n0 \
     -serial file:/tmp/wc-bios.log \
     -monitor unix:/tmp/wc-biosmon,server,nowait &
 BIOPID=$!
@@ -129,7 +130,12 @@ for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "boot complete" "step: interrupts armed" \
             "irq0: timer interrupt firing" "uptime: 1s" \
             "step: log ring armed" "pci: enumeration done" \
-            "pci: host bridge" "step: keyboard live" \
+            "pci: host bridge" \
+            "e1000: found 82540EM" \
+            "e1000: link up, mac 52:54:00:12:34:56" \
+            "e1000: rx ring 8 desc" \
+            "e1000: tx probe 60 bytes, descriptor done" \
+            "step: keyboard live" \
             "keyboard: key decoded end-to-end" "shell: running 'hello'" \
             "log ring (most recent):" \
             "step: initrd ok" "initrd: /etc/motd" \

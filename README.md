@@ -347,6 +347,22 @@ On boot the kernel:
    to everything. The scenario seeds the CMOS with a known instant and requires the
    hour and the date the kernel prints to *be* that instant, not merely to look
    plausible.
+28. drives a real **Intel 82540EM network card**. The kernel finds the card on the
+   PCI bus (`8086:100e`), turns on its memory space and bus mastering, maps BAR0
+   uncached the same way the framebuffer is mapped, resets the link, and reads the
+   burned-in MAC straight out of the receive-address registers (`e1000: link up,
+   mac 52:54:00:12:34:56` — the scenario pins that exact address, so it fails if the
+   registers only answer zero). It then stands up transmit and receive descriptor
+   rings, giving every buffer exactly one physical frame so each is contiguous by
+   construction and its DMA address is its own base (`e1000: rx ring 8 desc @0x…`).
+   And it does not stop at registers answering: at the end of init it hands the card
+   one real Ethernet frame, rings the doorbell, and refuses to claim success until
+   the card has read that frame out of memory and written the descriptor's done bit
+   back (`e1000: tx probe 60 bytes, descriptor done`). Because a done bit lands in
+   RAM and not in our cache, the driver flushes before every look — the blunt,
+   correct version of the per-descriptor flush a real driver uses. This release
+   proves the card can *send*; receiving (ARP, IP, the rest of the stack) is the next
+   increment, and no line here pretends otherwise.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

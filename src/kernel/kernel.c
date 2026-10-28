@@ -26,6 +26,7 @@
 #include "kassert.h"
 #include "log.h"
 #include "pci.h"
+#include "e1000.h"
 #include "keyboard.h"
 #include "initrd.h"
 #include "vfs.h"
@@ -528,6 +529,12 @@ void kmain(void)
      * very first frame, and a desktop that paints "12:00" because the driver
      * has not been asked yet is a desktop showing a decoration. */
     rtc_init();
+
+    /* The network card before the screen too: the desktop's first frame is a
+     * moment where nothing has asked for a packet yet, but the card must be
+     * found, its BAR mapped, and its rings stood up before anything can talk to
+     * it. A polled driver, so there is no IRQ plumbing to arm. */
+    e1000_init();
 
     /* Phase 8 - the screen. Composed here, then again from the idle loop for
      * every mouse packet, every key and every line a live program writes: the

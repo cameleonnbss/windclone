@@ -931,9 +931,32 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         still fails both modes and is refused. The `chrome` scenario seeds the CMOS
         with a known instant and requires the printed hour and date to be that
         instant.
-      What comes next is the phase's real edge: no network. An e1000 driver, a
-      IPv4/UDP/TCP stack and a DHCP handshake, proven headless by an HTTP GET that
-      lands in a window, is v0.1.25; a package manager over that stack is v0.1.26.
+      What comes next is the phase's real edge: no network. It is being crossed one
+      honest slice at a time — the driver and a proven transmit is v0.1.25 (below),
+      ARP/ICMP and a proven receive is v0.1.26, and the DHCP + TCP + HTTP-GET-into-
+      a-window plus a package manager over it is v0.1.27.
+- [x] The **network card wakes up** (v0.1.25). The first honest slice of that edge:
+      not a stack, but a driver that finds real silicon and moves a frame through
+      it. `pci` grew a public lookup/config API (`pci_find`, `pci_bar`,
+      `pci_enable_mmio_and_bus_master`), and a new `e1000` module drives the Intel
+      82540EM: it maps BAR0 uncached like the framebuffer, resets the link, reads
+      the burned-in MAC from the receive-address registers, and builds tx/rx
+      descriptor rings — one physical frame per buffer so each is contiguous by
+      construction. The boot log carries the proof (`e1000: found 82540EM`,
+      `e1000: link up, mac 52:54:00:12:34:56`, `e1000: rx ring 8 desc @0x…`) and
+      the boot smoke test pins the *exact* MAC, so a card that only answers zero
+      fails. It does not stop at registers answering: init ends by handing the card
+      one real Ethernet frame, ringing the doorbell, and refusing to report success
+      until the card has DMA'd it out of memory and written the descriptor done bit
+      back (`e1000: tx probe 60 bytes, descriptor done`) — and because that done
+      bit lands in RAM, not in our cache, the driver flushes before every look.
+      The trap worth recording: a tight guest spin never yields to QEMU's main
+      loop, so SLIRP never gets the CPU to answer — which is why *receiving* is
+      deliberately not claimed here. It is next.
+- [ ] The network **listens**: an idle-loop packet pump, ARP and ICMP, so the
+      round-trip is proven against QEMU's virtual subnet (v0.1.26)
+- [ ] IPv4/UDP + a DHCP handshake against the emulator's BOOTP server, then TCP +
+      an HTTP GET landing in a window, and a package manager over it (v0.1.27)
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
 - [ ] A block device driver (ATA or NVMe), so `tmpfs` can stop being the only

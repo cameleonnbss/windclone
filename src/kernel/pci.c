@@ -45,6 +45,107 @@ static uint32_t pci_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off)
     return inl(PCI_DATA);
 }
 
+static void pci_write32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off,
+                        uint32_t v)
+{
+    outl(PCI_CMD, cfg_addr(bus, dev, func, off));
+    io_wait();
+    outl(PCI_DATA, v);
+    io_wait();
+}
+
+/* Byte and word access is the dword read plus a shift: mechanism #1 only
+ * guarantees the 32-bit window, so the sub-dword widths are assembled from it
+ * rather than poked at the odd data ports (0xCFD..0xCFF) that some bridges
+ * route inconsistently. */
+uint32_t pci_cfg_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off)
+{
+    return pci_read32(bus, dev, func, off);
+}
+
+void pci_cfg_write32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off,
+                     uint32_t v)
+{
+    pci_write32(bus, dev, func, off, v);
+}
+
+uint16_t pci_cfg_read16(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off)
+{
+    uint32_t d = pci_read32(bus, dev, func, (uint8_t)(off & 0xFC));
+    return (uint16_t)(d >> ((off & 2) * 4));
+}
+
+void pci_cfg_write16(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off,
+                     uint16_t v)
+{
+    uint8_t a = (uint8_t)(off & 0xFC);
+    uint32_t d = pci_read32(bus, dev, func, a);
+    uint32_t shift = (off & 2) * 4;
+    d = (d & ~(0xFFFFu << shift)) | ((uint32_t)v << shift);
+    pci_write32(bus, dev, func, a, d);
+}
+
+uint8_t pci_cfg_read8(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off)
+{
+    uint32_t d = pci_read32(bus, dev, func, (uint8_t)(off & 0xFC));
+    return (uint8_t)(d >> ((off & 3) * 8));
+}
+
+void pci_cfg_write8(uint8_t bus, uint8_t dev, uint8_t func, uint8_t off,
+                    uint8_t v)
+{
+    uint8_t a = (uint8_t)(off & 0xFC);
+    uint32_t d = pci_read32(bus, dev, func, a);
+    uint32_t shift = (off & 3) * 8;
+    d = (d & ~(0xFFu << shift)) | ((uint32_t)v << shift);
+    pci_write32(bus, dev, func, a, d);
+}
+
+int pci_find(uint16_t vendor, uint16_t device, uint8_t out[3])
+{
+    for (uint32_t bus = 0; bus < 256; bus++)
+        for (uint32_t dev = 0; dev < 32; dev++)
+            for (uint32_t func = 0; func < 8; func++) {
+                uint32_t vd = pci_read32((uint8_t)bus, (uint8_t)dev,
+                                         (uint8_t)func, 0x00);
+                if (vd == 0xFFFFFFFFu || vd == 0) {
+                    if (func == 0) break;
+                    continue;
+                }
+                if ((uint16_t)(vd & 0xFFFF) == vendor &&
+                    (uint16_t)(vd >> 16) == device) {
+                    out[0] = (uint8_t)bus; out[1] = (uint8_t)dev;
+                    out[2] = (uint8_t)func;
+                    return 1;
+                }
+                uint8_t hdr = (uint8_t)(pci_read32((uint8_t)bus, (uint8_t)dev,
+                                        (uint8_t)func, 0x0C) >> 16);
+                if ((hdr & 0x80u) == 0) break;
+            }
+    return 0;
+}
+
+void pci_enable_mmio_and_bus_master(uint8_t bus, uint8_t dev, uint8_t func)
+{
+    uint16_t cmd = pci_cfg_read16(bus, dev, func, 0x04);
+    cmd |= 0x02 | 0x04;   /* bit1 = memory space, bit2 = bus master */
+    pci_cfg_write16(bus, dev, func, 0x04, cmd);
+}
+
+uint64_t pci_bar(uint8_t bus, uint8_t dev, uint8_t func, int n)
+{
+    uint32_t bar = pci_cfg_read32(bus, dev, func, (uint8_t)(0x10 + n * 4));
+    if (bar & 1u)
+        return bar & ~3u;                     /* I/O space BAR */
+    uint64_t addr = bar & ~15u;               /* memory space  */
+    uint8_t type = (uint8_t)((bar >> 1) & 3u);
+    if (type == 2 && n < 5)
+        addr |= (uint64_t)pci_cfg_read32(bus, dev, func,
+                                         (uint8_t)(0x10 + (n + 1) * 4)) << 32;
+    return addr;
+}
+
+
 /* Decode the six type-0 BARs: bit 0 selects the address space,
  * memory bits 1-2 the width (16/32/64 — a 64-bit BAR eats two slots). */
 static void decode_bars(uint8_t bus, uint8_t dev, uint8_t func)

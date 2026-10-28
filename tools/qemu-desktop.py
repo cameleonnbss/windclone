@@ -1824,6 +1824,7 @@ def main():
     proc = subprocess.Popen(
         ["qemu-system-x86_64", "-cdrom", iso, "-m", "512", "-display", "none",
          "-rtc", "base=2026-08-21T05:37:13,clock=vm",
+         "-device", "e1000,netdev=n0", "-netdev", "user,id=n0",
          "-no-reboot", "-serial", "file:%s" % LOG,
          "-monitor", "unix:%s,server,nowait" % MON,
          "-qmp", "unix:%s,server,nowait" % QMP],
