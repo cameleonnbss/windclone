@@ -27,9 +27,10 @@ Scenarios (each one asserts the serial markers the kernel prints):
                exit code but stays open), and closing it is the click that
                finally dismisses it
     damage     prove the double buffer + damage claim: the boot composite flips
-               the whole screen, a pure mouse move after it flips only a
-               cursor-sized band (a fraction of the pixels), and a click on a
-               window body is structural and flips the whole screen again
+               the whole screen, a pure mouse move on a desktop that has gone
+               quiet flips only a cursor-sized band (a fraction of the pixels),
+               and a click on a window body is structural and flips the whole
+               screen again
     progdamage prove a *running program* repaints only its own window: launch
                /bin/hold from the menu, then require a whole-screen-sized
                program's output to land strictly between two of its own rounds
@@ -440,6 +441,9 @@ def wait_serial(pattern, timeout=25.0):
     raise SystemExit("serial never said %s (%s)" % (pattern, LOG))
 
 
+FLIP_RE = r"gfx: flip (\d+) rects, (\d+) px"
+
+
 def wait_flip_after(mark, pred, timeout=15.0):
     """Poll the serial log for a `gfx: flip <n> rects, <area> px` line that
     appears *after* byte offset `mark` and whose (rects, area) satisfies `pred`.
@@ -448,14 +452,50 @@ def wait_flip_after(mark, pred, timeout=15.0):
     earlier frames from satisfying a later step's predicate."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        try:
-            with open(LOG, errors="replace") as fh:
-                tail = fh.read()[mark:]
-        except OSError:
-            tail = ""
-        for n, a in re.findall(r"gfx: flip (\d+) rects, (\d+) px", tail):
+        for n, a in re.findall(FLIP_RE, read_log()[mark:]):
             if pred(int(n), int(a)):
                 return (int(n), int(a))
+        time.sleep(0.2)
+    return None
+
+
+def wait_quiet(timeout=60.0, still=2.0):
+    """The log offset of the moment the compositor stopped flipping, or None if
+    it never does. The kernel paints a frame only when something is dirty, so
+    "no flip line for `still` seconds" is the definition of a quiet desktop -
+    and it is measured on the flip lines, not on the byte count, because the
+    idle loop prints a one-hertz `uptime:` heartbeat whatever happens.
+
+    This is a *precondition*, and the damage scenarios need it: the boot's own
+    demo programs keep writing into the terminal for seconds after the desktop
+    marker the preamble waits for, and every one of those frames repaints the
+    window body - the largest rectangle on the screen. A mouse move issued in
+    the middle of that is not evidence about mouse moves."""
+    deadline = time.time() + timeout
+    prev = None
+    since = time.time()
+    while time.time() < deadline:
+        text = read_log()
+        n = len(re.findall(FLIP_RE, text))
+        if n != prev:
+            prev = n
+            since = time.time()
+        elif time.time() - since >= still:
+            return len(text)
+        time.sleep(0.2)
+    return None
+
+
+def first_flip_after(mark, timeout=15.0):
+    """The first `gfx: flip` line after offset `mark`, or None if none arrives.
+    Knowing *which* frame a measurement belongs to is the difference between
+    'some flip in the neighbourhood was small' and 'this event caused a small
+    flip', so a scenario that quiesced the desktop asks for the first one."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        m = re.search(FLIP_RE, read_log()[mark:])
+        if m:
+            return (int(m.group(1)), int(m.group(2)))
         time.sleep(0.2)
     return None
 
@@ -604,11 +644,10 @@ def scenario_actions(sc, mon, W, H):
         # what changed. The claim has three parts, all read from the kernel's own
         # "gfx: flip <n> rects, <area> px" lines - nothing about the pixel counts
         # is guessed, W and H come from the composited banner the caller parsed.
-        text = open(LOG, errors="replace").read()
+        text = read_log()
         if "gfx: back buffer" not in text:
             raise SystemExit("no back buffer was allocated - direct-to-framebuffer fallback")
-        flips = [(int(n), int(a)) for n, a in
-                 re.findall(r"gfx: flip (\d+) rects, (\d+) px", text)]
+        flips = [(int(n), int(a)) for n, a in re.findall(FLIP_RE, text)]
         if not flips:
             raise SystemExit("the compositor never reported a flip")
         # the boot frame has no back buffer to update, so it is whole-screen:
@@ -619,14 +658,35 @@ def scenario_actions(sc, mon, W, H):
                              % (n0, area0))
         # a pure mouse move (no button) is the case the release is about: it must
         # repaint only the band the cursor swept, a rounding error against W*H.
-        mark = len(text)
+        # It has to start from a quiet desktop, and that is not a nicety but the
+        # measurement itself. The preamble waits for the desktop marker, while
+        # the boot's own demo programs keep streaming into the terminal for
+        # seconds after it; every one of those frames damages the window body -
+        # the largest rectangle on the screen - so a move issued in the middle
+        # of them is being judged against flips that are not its own. This is
+        # how the tag build of v0.1.22 failed on a loaded CI runner and passed
+        # twice on a laptop: same kernel, same pixels, a mouse move that landed
+        # in a busy second. So wait for the compositor to stop flipping (a frame
+        # only happens when something is dirty, so an absence of flips is what a
+        # quiet desktop means), then move, then take the *first* frame after the
+        # silence - it can belong to the cursor and to nothing else, which is a
+        # stronger claim than "some flip in the neighbourhood was small".
+        mark = wait_quiet()
+        if mark is None:
+            raise SystemExit("the desktop never went quiet - something repaints with no input")
         mon.move_rel(40, 30)
-        small = wait_flip_after(mark, lambda n, a: a * 8 < W * H)
+        small = first_flip_after(mark)
         if small is None:
-            raise SystemExit("a mouse move still repainted the whole screen")
+            raise SystemExit("a mouse move on a quiet desktop caused no frame at all")
+        if small[1] * 8 >= W * H:
+            raise SystemExit("a mouse move repainted %d rects, %d px - not a band"
+                             % (small[0], small[1]))
         # a click on a window body is a structural change (z-order/raise), so the
         # honesty of the smaller blit depends on this still flipping everything.
-        mark = len(open(LOG, errors="replace").read())
+        # Same precondition, same reason: quiet first, then click.
+        mark = wait_quiet()
+        if mark is None:
+            raise SystemExit("the desktop never went quiet after the mouse move")
         mon.click(tx + 60, ty + TITLE_H + 60)
         full = wait_flip_after(mark, lambda n, a: n == 1 and a >= W * H)
         if full is None:
@@ -651,6 +711,14 @@ def scenario_actions(sc, mon, W, H):
         if n0 != 1 or area0 != W * H:
             raise SystemExit("boot flip was not the whole screen: %d rects, %d px"
                              % (n0, area0))
+        # The same precondition `damage` learned the hard way: the boot's own
+        # demo programs keep streaming into the terminal for seconds after the
+        # desktop marker, and a terminal repaint is a sub-screen flip as well.
+        # Quiescing before the launch is what makes a sub-screen flip found
+        # between two of hold's rounds belong to *hold* rather than to a boot
+        # program that happened to be printing at the same moment.
+        if wait_quiet() is None:
+            raise SystemExit("the desktop never went quiet - something repaints with no input")
         # launch /bin/hold from the menu (the launch click is a full flip - fine)
         mon.click(START_X + START_W // 2, H - TASKBAR_H + 22)
         idx = int(wait_serial(r"wm: menu row (\d+) hold\n").group(1))

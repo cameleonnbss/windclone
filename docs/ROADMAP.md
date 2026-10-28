@@ -834,6 +834,26 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         final `LIGNES 45-56 SUR 56` is computed from the line count the program
         reported at open, so a specimen that gains a line moves the expectation with
         it instead of breaking it.
+      - **A test that measures the wrong frame has a bug in it, and this release
+        found one.** The tag build of v0.1.22 failed on `damage` — four minutes
+        after the *same commit* had passed it on `main`: "a mouse move still
+        repainted the whole screen". The kernel had not changed and neither had the
+        pixels; what was missing was a precondition. The preamble waits for the
+        desktop marker, but the boot's own demo programs keep streaming into the
+        terminal for seconds after it, and every one of those frames damages the
+        window body — the largest sub-screen rectangle on the display. On a loaded
+        runner the entire fifteen-second window was busy, so the small flip the
+        scenario was looking for never existed. `wait_quiet()` now returns the log
+        offset of the moment the compositor stops flipping — no flip line for two
+        seconds is what a quiet desktop *is*, since a frame only happens when
+        something is dirty, and it is measured on the flips rather than on the byte
+        count because the idle loop prints a one-hertz heartbeat whatever happens.
+        The assertion then moved from "some flip after the mark was small" to
+        `first_flip_after()`: the first frame after the silence belongs to the
+        cursor and to nothing else. The same precondition went into `progdamage`,
+        where it closes the opposite hole — a terminal repaint from a boot program
+        landing between two of `/bin/hold`'s rounds would have proved hold's damage
+        without hold.
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
 - [ ] A **code editor that writes back** — a program window that highlights and
