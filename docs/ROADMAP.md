@@ -933,9 +933,9 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         instant.
       What comes next is the phase's real edge: no network. It is being crossed one
       honest slice at a time — the driver and a proven transmit is v0.1.25, ARP and
-      a proven receive is v0.1.26, an IPv4/ICMP ping round-trip is v0.1.27, and the
-      UDP + DHCP + TCP + HTTP-GET-into-a-window plus a package manager over it are
-      the releases that follow.
+      a proven receive is v0.1.26, an IPv4/ICMP ping round-trip is v0.1.27, UDP plus a
+      DHCP lease is v0.1.28, and the TCP + HTTP-GET-into-a-window plus a package
+      manager over it are the releases that follow.
 - [x] The **network card wakes up** (v0.1.25). The first honest slice of that edge:
       not a stack, but a driver that finds real silicon and moves a frame through
       it. `pci` grew a public lookup/config API (`pci_find`, `pci_bar`,
@@ -979,8 +979,16 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       which is what turned "never answered" into a live reply. The scenario keeps the
       two ARP guards and adds a third: an out-of-range ttl means a mis-parse, not a
       receive, so it is rejected rather than trusted.
-- [ ] UDP on top of the now-proven IPv4 path, and a DHCP handshake against the
-      emulator's BOOTP server to replace the static test address (v0.1.28)
+- [x] UDP + a **DHCP lease** (v0.1.28). The transport layer, at last: the client
+      builds its first UDP datagram — an IPv4 packet (protocol 17) whose UDP header
+      carries ports 68→67, a length, and a checksum over a pseudo-header — wrapping a
+      BOOTP DISCOVER with the DHCP magic cookie, our MAC, and the option that asks for
+      an address, broadcast to 255.255.255.255. The emulator's BOOTP server answers, the
+      client matches the echoed transaction id and reads the offered address out of the
+      reply (`dhcp: offer 10.0.2.15 from 10.0.2.2 - lease understood`). The address is
+      now negotiated, not assumed. The scenario refuses a zero yiaddr as a mis-read, and
+      the claim stays honest: this is a DISCOVER/OFFER round-trip, not yet a full
+      four-step REQUEST/ACK — that would overstate what the receive path has proven.
 - [ ] TCP + an HTTP GET landing in a window, and a package manager over it (v0.1.29)
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar

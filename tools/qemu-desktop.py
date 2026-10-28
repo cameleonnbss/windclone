@@ -1693,11 +1693,11 @@ def scenario_actions(sc, mon, W, H):
                 raise SystemExit("something the editor was given reached the "
                                  "command line: %s" % leak)
     elif sc == "net":
-        # v0.1.26 + v0.1.27: the card receives, and now speaks IP. The idle-loop
-        # client broadcast who-has 10.0.2.2, the emulator's user-mode network
-        # answered through the DMA receive ring, then we built a full IPv4/ICMP
-        # echo request, sent it, and read the reply back. Each check below is a
-        # guard against a false positive, not a hard-coded expectation.
+        # v0.1.26 -> v0.1.28: the card receives, speaks IP, and now negotiates a
+        # lease. The idle-loop client broadcast who-has 10.0.2.2, the emulator's
+        # user-mode network answered through the DMA receive ring, we built a full
+        # IPv4/ICMP echo and read the reply, then sent a DHCPDISCOVER over UDP and
+        # read the server's offer back. Each check guards a false positive.
         m = wait_serial(r"arp: 10\.0\.2\.2 is at ([0-9a-f:]{17}) - gateway resolved")
         got = m.group(1)
         if got == "00:00:00:00:00:00":
@@ -1715,6 +1715,15 @@ def scenario_actions(sc, mon, W, H):
         if ttl <= 0 or ttl > 255:
             raise SystemExit("implausible ttl %d in the icmp reply - the packet "
                              "was likely mis-parsed, not genuinely received" % ttl)
+        # The DHCP offer is the first UDP round-trip: it only parses if a
+        # well-formed datagram (correct IPv4 + UDP + pseudo-header checksums, our
+        # xid echoed) reached the emulator's BOOTP server and it answered. An all
+        # zero yiaddr would mean we mis-read the offer rather than got a lease.
+        o = wait_serial(r"dhcp: offer (\d+\.\d+\.\d+\.\d+) from 10\.0\.2\.2 - lease understood")
+        lease = o.group(1)
+        if lease == "0.0.0.0":
+            raise SystemExit("dhcp offer carried yiaddr 0.0.0.0 - the server's "
+                             "reply was mis-parsed, not a real lease")
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -1833,14 +1842,16 @@ MARKERS = {
     # surface, and a taskbar showing the CMOS chip's own decoded time and date
     "chrome":    ["wm: wallpaper cached", "rtc: hardware clock",
                   "rtc: date"],
-    # the gateway MAC being neither zeros nor our own address, and the icmp ttl
-    # being plausible, are asserted in the scenario; these are the lines the
-    # receive-then-ping claim turns on - the client armed on top of the driver,
-    # a request broadcast, a reply parsed out of the DMA receive ring naming the
-    # gateway, and a full IPv4/ICMP echo that SLIRP answered
-    "net":       ["net: arp/icmp client armed", "arp: who-has 10.0.2.2",
+    # the gateway MAC being neither zeros nor our own address, the icmp ttl being
+    # plausible, and the dhcp yiaddr being non-zero are asserted in the scenario;
+    # these are the lines the receive-then-ping-then-lease claim turns on - the
+    # client armed on top of the driver, a request broadcast, a reply parsed out of
+    # the DMA receive ring, an IPv4/ICMP echo SLIRP answered, and a DHCP offer its
+    # BOOTP server handed back over UDP
+    "net":       ["net: arp/icmp/dhcp client armed", "arp: who-has 10.0.2.2",
                   "arp: 10.0.2.2 is at", "gateway resolved",
-                  "icmp: echo request to 10.0.2.2", "host reachable"],
+                  "icmp: echo request to 10.0.2.2", "host reachable",
+                  "dhcp: discover broadcast", "lease understood"],
 }
 
 

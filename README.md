@@ -388,6 +388,18 @@ On boot the kernel:
    DHCP and TCP. The test guards the same two lies as ARP did and adds a third: a
    reply whose ttl is out of range means the packet was mis-parsed, not received, so
    the scenario rejects it rather than trusting a green line.
+31. **negotiates a lease over UDP (DHCP)**. Above ICMP sits the transport layer, and
+   the client sends its first datagram: an IPv4 packet (protocol 17) whose UDP header
+   carries the client port 68 to the server port 67, a length, and a checksum computed
+   over a pseudo-header — the two addresses, the protocol and the length — as well as
+   the payload. Inside is a BOOTP DISCOVER with the DHCP magic cookie, our MAC, and the
+   options that ask for an address, broadcast to 255.255.255.255. The emulator's own
+   BOOTP server answers, the client matches the echoed transaction id and reads the
+   offered address back out of the reply (`dhcp: offer 10.0.2.15 from 10.0.2.2 - lease
+   understood`). For the first time the address is *negotiated*, not assumed — and the
+   scenario refuses a zero yiaddr, which would mean a mis-read rather than a real lease.
+   The one thing this deliberately does not fake is a full four-step REQUEST/ACK: the
+   honest claim here is that a UDP datagram we built was accepted and answered.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

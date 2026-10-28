@@ -1,4 +1,4 @@
-/* WindClone — an ARP client and an ICMP pinger on top of the e1000 driver.
+/* WindClone — an ARP client, an ICMP pinger and a DHCP requester on the e1000.
  *
  * This module exists to answer one question the v0.1.25 release could not:
  * can the card *receive*? Sending was proven by a descriptor the card wrote
@@ -19,8 +19,14 @@
  * IPv4 header and an echo request, computes the Internet checksum over both,
  * sends them, and parses the reply. This is the first real IP round-trip — a
  * packet we constructed reaching the emulator's stack and an answer coming
- * back — and it is the ladder rung under DHCP and TCP, which arrive next. The
- * Shipped version uses the static SLIRP addresses; a real lease is a later step.
+ * back — and it is the ladder rung under DHCP and TCP, which arrive next.
+ *
+ * The last rung so far is DHCP: a UDP datagram (client port 68 to server 67)
+ * with its pseudo-header checksum, a BOOTP DISCOVER carrying our MAC, and the
+ * server's OFFER parsed back out. It is the first transport-layer exchange and
+ * the first time the address is negotiated rather than assumed — the emulator's
+ * BOOTP server hands us the lease, and we match on the transaction id so we
+ * know the offer answers our discover.
  *
  * SPDX-License-Identifier: MIT
  */

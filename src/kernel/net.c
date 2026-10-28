@@ -12,14 +12,20 @@
 #include "serial.h"
 
 /* QEMU's SLIRP user-mode network hands the guest 10.0.2.15, answers for its
- * gateway at 10.0.2.2, and replies to an ICMP echo sent there. Those addresses
- * are static here; a real DHCP handshake is the next increment. The point of
- * this file is the receive path: ARP proves a frame can come back, and the ICMP
- * echo proves a full IPv4 packet - built, checksummed, answered - can too. */
+ * gateway at 10.0.2.2, replies to an ICMP echo sent there, and runs a BOOTP/
+ * DHCP server on 10.0.2.2. This file walks up the stack one honest rung at a
+ * time: ARP proves a frame can come back, the ICMP echo proves a full IPv4
+ * packet - built, checksummed, answered - can too, and the DHCP discover/offer
+ * is the first UDP datagram, so the transport header and its pseudo-header
+ * checksum get exercised against a real server that hands back a lease. */
 static const uint8_t OUR_IP[4] = { 10, 0, 2, 15 };
 static const uint8_t GW_IP[4]  = { 10, 0, 2, 2 };
 
-enum { NET_OFF, NET_ARP, NET_PING, NET_DONE };
+/* A DHCP transaction id is echoed by the server, so matching it proves the
+ * offer is the answer to OUR discover and not some other boot's leftover. */
+#define DHCP_XID 0x0dc1a7e5u
+
+enum { NET_OFF, NET_ARP, NET_PING, NET_DHCP, NET_DONE };
 
 static int      state;
 static uint8_t  our_mac[6];
@@ -44,6 +50,32 @@ static void mac_str(const uint8_t m[6], char out[18])
 /* Big-endian stores: the wire is network byte order, and we write bytes rather
  * than casting structs so the layout is explicit and needs no padding worries. */
 static void put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
+static void put32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);  p[3] = (uint8_t)v;
+}
+static uint32_t get32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8)  | p[3];
+}
+
+/* Render a dotted-quad so the log can name the address the server offered. */
+static void ip_str(const uint8_t *a, char out[16])
+{
+    int pos = 0;
+    for (int i = 0; i < 4; i++) {
+        int v = a[i];
+        char dig[3], tmp[3];
+        int t = 0, r = 0;
+        if (v == 0) tmp[t++] = '0';
+        while (v) { dig[r++] = (char)('0' + v % 10); v /= 10; }
+        while (r) tmp[t++] = dig[--r];
+        for (int j = 0; j < t; j++) out[pos++] = tmp[j];
+        out[pos++] = (i == 3) ? '\0' : '.';
+    }
+}
 
 /* The Internet checksum: one's complement of 16-bit words, one's complement
  * back down to 16 bits. Used for both the IPv4 header and the ICMP message. */
@@ -144,10 +176,114 @@ static int icmp_echo_reply(const uint8_t *f, int n, int *ttl_out)
     return 1;
 }
 
+/* The UDP checksum adds a pseudo-header - the source and destination addresses,
+ * the protocol and the datagram length - to the same one's-complement sum used
+ * for the IP header and ICMP. A wrong value here makes the emulator's stack drop
+ * the datagram before it ever reaches its BOOTP server, so it is computed over
+ * the exact bytes we send. */
+static uint16_t udp_cksum(const uint8_t *ip, const uint8_t *udp, int udplen)
+{
+    uint32_t sum = 0;
+    sum += ((uint32_t)ip[12] << 8) + ip[13];
+    sum += ((uint32_t)ip[14] << 8) + ip[15];
+    sum += ((uint32_t)ip[16] << 8) + ip[17];
+    sum += ((uint32_t)ip[18] << 8) + ip[19];
+    sum += 17u + (uint32_t)udplen;                 /* protocol + length     */
+    for (int i = 0; i + 1 < udplen; i += 2)
+        sum += ((uint32_t)udp[i] << 8) | udp[i + 1];
+    if (udplen & 1)
+        sum += (uint32_t)udp[udplen - 1] << 8;
+    while (sum >> 16)
+        sum = (sum & 0xFFFFu) + (sum >> 16);
+    uint16_t c = (uint16_t)~sum;
+    return c ? c : 0xFFFF;                         /* zero means "unused"    */
+}
+
+/* Build a DHCPDISCOVER: Ethernet broadcast + IPv4 (0.0.0.0 -> 255.255.255.255,
+ * proto 17) + UDP (client 68 -> server 67) + a BOOTP request carrying our MAC
+ * and the DHCP options that ask for an address. Returns the frame length. */
+static int build_dhcp_discover(uint8_t *f)
+{
+    const int OPTS = 17;
+    const int dhcp_len = 240 + OPTS;               /* BOOTP fixed + options  */
+    const int udp_len  = 8 + dhcp_len;
+    const int ip_total = 20 + udp_len;
+
+    for (int i = 0; i < 6; i++)  f[i] = 0xFF;      /* broadcast dst          */
+    for (int i = 0; i < 6; i++)  f[6 + i] = our_mac[i];
+    f[12] = 0x08; f[13] = 0x00;                    /* ethertype IPv4         */
+
+    f[14] = 0x45; f[15] = 0x00;                    /* v4, ihl 20, tos        */
+    put16(&f[16], (uint16_t)ip_total);
+    put16(&f[18], 0x0000);                         /* id                     */
+    put16(&f[20], 0x0000);                         /* flags + frag           */
+    f[22] = 64; f[23] = 17;                        /* ttl, protocol UDP      */
+    put16(&f[24], 0x0000);                         /* chk field, zero first   */
+    for (int i = 0; i < 4; i++) { f[26 + i] = 0x00; f[30 + i] = 0xFF; }
+    put16(&f[24], cksum(&f[14], 20));              /* IPv4 header checksum    */
+
+    put16(&f[34], 68);                             /* src port: client        */
+    put16(&f[36], 67);                             /* dst port: server        */
+    put16(&f[38], (uint16_t)udp_len);
+    put16(&f[40], 0x0000);                         /* chk field, zero first   */
+
+    uint8_t *d = &f[42];                           /* BOOTP/DHCP payload      */
+    for (int i = 0; i < 240; i++) d[i] = 0x00;
+    d[0] = 1;                                      /* op: REQUEST            */
+    d[1] = 1;                                      /* htype: Ethernet        */
+    d[2] = 6;                                      /* hlen                   */
+    put32(&d[4], DHCP_XID);                        /* transaction id         */
+    put16(&d[10], 0x8000);                         /* broadcast flag         */
+    for (int i = 0; i < 6; i++) d[28 + i] = our_mac[i];  /* chaddr           */
+    d[236] = 0x63; d[237] = 0x82; d[238] = 0x53; d[239] = 0x63; /* cookie    */
+    int o = 240;
+    d[o++] = 53; d[o++] = 1; d[o++] = 1;           /* Message Type: DISCOVER */
+    d[o++] = 61; d[o++] = 7; d[o++] = 1;           /* Client Identifier      */
+    for (int i = 0; i < 6; i++) d[o++] = our_mac[i];
+    d[o++] = 55; d[o++] = 2; d[o++] = 1; d[o++] = 3; /* Parameter Request    */
+    d[o++] = 255;                                  /* End                    */
+
+    put16(&f[40], udp_cksum(&f[14], &f[34], udp_len));
+    return 14 + ip_total;
+}
+
+/* A DHCPOFFER answering our discover? Keys on UDP-to-client, BOOTREPLY, our
+ * transaction id, the magic cookie, and the message-type option being OFFER (2);
+ * on success reports the address (yiaddr) the server is holding out for us. */
+static int dhcp_offer(const uint8_t *f, int n, uint8_t out_ip[4])
+{
+    if (n < 14 + 20 + 8 + 240) return 0;
+    if (!(f[12] == 0x08 && f[13] == 0x00)) return 0;   /* IPv4      */
+    if (f[23] != 17) return 0;                          /* UDP       */
+    int ihl = (f[14] & 0x0F) * 4;
+    const uint8_t *u = f + 14 + ihl;
+    if ((int)(u - f) + 8 + 240 > n) return 0;
+    if (((u[2] << 8) | u[3]) != 68) return 0;           /* to client */
+    const uint8_t *d = u + 8;
+    if (d[0] != 2) return 0;                            /* BOOTREPLY */
+    if (get32(&d[4]) != DHCP_XID) return 0;            /* our xid   */
+    if (!(d[236] == 0x63 && d[237] == 0x82 && d[238] == 0x53 && d[239] == 0x63))
+        return 0;                                       /* cookie    */
+    int dl = n - (int)(d - f);
+    for (int i = 240; i + 1 < dl; ) {
+        int opt = d[i];
+        if (opt == 255) break;
+        if (opt == 0) { i++; continue; }
+        int ol = d[i + 1];
+        if (opt == 53 && i + 2 < dl && d[i + 2] == 2) {  /* OFFER     */
+            out_ip[0] = d[16]; out_ip[1] = d[17];
+            out_ip[2] = d[18]; out_ip[3] = d[19];        /* yiaddr    */
+            return 1;
+        }
+        i += 2 + ol;
+    }
+    return 0;
+}
+
 void net_init(void)
 {
     if (e1000_present() != 0) {
-        serial_write("net: no e1000 - arp/icmp client stays offline\n");
+        serial_write("net: no e1000 - arp/icmp/dhcp client stays offline\n");
         state = NET_OFF;
         return;
     }
@@ -156,15 +292,15 @@ void net_init(void)
     tries = 0;
     seq = 0;
     last_send = 0;
-    klog("net: arp/icmp client armed for 10.0.2.2 on top of e1000");
+    klog("net: arp/icmp/dhcp client armed for 10.0.2.2 on top of e1000");
 }
 
 void net_visit(void)
 {
-    if (state != NET_ARP && state != NET_PING)
+    if (state != NET_ARP && state != NET_PING && state != NET_DHCP)
         return;
 
-    uint8_t buf[256];
+    uint8_t buf[340];
 
     /* Drain a few received frames, routing each by ethertype. We never loop
      * forever: the point is to hand the CPU back to hlt for SLIRP's next turn. */
@@ -186,6 +322,18 @@ void net_visit(void)
             if (icmp_echo_reply(buf, n, &ttl)) {
                 klog("icmp: reply from 10.0.2.2: seq %d ttl %d - host reachable",
                      seq - 1, ttl);
+                state = NET_DHCP;                           /* now ask for a lease */
+                tries = 0;
+                last_send = timer_ticks();
+                return;
+            }
+        }
+        if (state == NET_DHCP) {
+            uint8_t ip[4];
+            if (dhcp_offer(buf, n, ip)) {
+                char s[16];
+                ip_str(ip, s);
+                klog("dhcp: offer %s from 10.0.2.2 - lease understood", s);
                 state = NET_DONE;
                 return;
             }
@@ -204,10 +352,14 @@ void net_visit(void)
             if (tries == 0)
                 klog("arp: who-has 10.0.2.2 (broadcast)");
             len = build_who_has(buf);
-        } else {
+        } else if (state == NET_PING) {
             if (tries == 0)
                 klog("icmp: echo request to 10.0.2.2 (seq 0)");
             len = build_echo(buf, seq++);
+        } else {
+            if (tries == 0)
+                klog("dhcp: discover broadcast");
+            len = build_dhcp_discover(buf);
         }
         if (e1000_tx(buf, len) < 0) {
             klog("net: frame %d not sent - card refused it", tries + 1);
