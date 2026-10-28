@@ -11,7 +11,19 @@ cd "$(git rev-parse --show-toplevel 2>/dev/null || dirname "$(dirname "$0")")"
 Q="qemu-system-x86_64"
 # A CI runner is slower than a laptop and the boot path is fixed work, so
 # the timeout is generous; override with e.g. TIMEOUT=10 locally.
-TIMEOUT=${TIMEOUT:-25}
+#
+# It is a ceiling on a *wall*, and the wall has to hold both firmwares: OVMF
+# spends seconds of its own in post before the kernel's first instruction, and
+# the two boot checks then run the whole demo sequence inside what is left. The
+# v0.1.23 tag build failed there — "UEFI log missing: \[exit\] code 9 pid", a
+# marker that had appeared on the same test on the same runner a commit before —
+# because the image is a few kilobytes bigger and the runner was a few seconds
+# slower than the day the number was picked. 25 seconds was never a fact about
+# WindClone; it was a fact about one machine. So the ceiling is now a minute and
+# a half, which no honest boot of this image reaches: when it does expire, the
+# log will be short of a marker for a reason worth reading, not because the
+# runner was having a day.
+TIMEOUT=${TIMEOUT:-90}
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 # Inject keystrokes through a QEMU monitor unix socket once the kernel
