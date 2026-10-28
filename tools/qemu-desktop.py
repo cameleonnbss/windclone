@@ -72,10 +72,22 @@ Scenarios (each one asserts the serial markers the kernel prints):
                keys typed. The same typing must NOT reach the prompt, and when the
                program exits the console has to take the keyboard back and run the
                next word it is given — no click in between.
+    editing    prove a text editor: type `save write demo hello world` so one
+               process puts a known file in /tmp, then `note demo` so /bin/note
+               opens it in its own window, repaints that window as a *screen*
+               (a form feed, not another line of scrollback), and takes the
+               keyboard. Then edit it with real PS/2 events - Ctrl+E to the end
+               of the line, a word typed, a Backspace that removes it again,
+               Enter that breaks the line, a second line - and save with Ctrl+S.
+               The byte count the store reports is computed from what the test
+               typed, and a *different* process (`save read demo`) has to read
+               exactly that many bytes back, with the words typed only into the
+               editor present between its two lines.
 
 Exit status 0 = every step did what the serial log says it did.
 SPDX-License-Identifier: MIT
 """
+import json
 import os
 import re
 import socket
@@ -85,6 +97,8 @@ import time
 
 MON = os.environ.get("WM_MON", "/tmp/wc-wmmon")
 LOG = os.environ.get("WM_LOG", "/tmp/wc-wm.log")
+# A second control channel, used only for key chords; see Qmp below.
+QMP = os.environ.get("WM_QMP", "/tmp/wc-wmqmp")
 
 # Geometry as layout() computes it for the Limine mode QEMU gives us; the
 # real size is read back from the serial banner and everything recomputed.
@@ -112,6 +126,15 @@ RESIZE_EDGE, MIN_W, MIN_H = 5, 200, 120
 # `sendkey slash` really does land as a '/' in the shell's input buffer.
 KEYMAP = {" ": "spc", "\n": "ret", "/": "slash", ".": "dot", "-": "minus",
           "_": "underscore"}
+# Key names the *human* monitor has been proved to deliver: the letters and
+# digits every scenario has always typed, plus the spellings KEYMAP maps to.
+# Anything else goes through QMP, because `sendkey` accepts an unknown name,
+# replies nothing, and sends no scancode - a Backspace spelled "bspace" looked
+# exactly like a guest that had lost the key. QMP answers, so a name QEMU does
+# not know fails the run at the keystroke instead of at the assertion 25
+# seconds later.
+HMP_OK = set("abcdefghijklmnopqrstuvwxyz0123456789") | {
+    "spc", "ret", "slash", "dot", "minus", "underscore"}
 
 
 def count_serial(pattern):
@@ -120,6 +143,33 @@ def count_serial(pattern):
     is happy with the *first* hit and would pass on a stale line - so scenarios
     that expect an event to happen *again* count the hits instead."""
     return len(re.findall(pattern, read_log()))
+
+
+def wait_serial_after(mark, pattern, timeout=25.0):
+    """Wait for `pattern` to match somewhere past byte offset `mark`, and return
+    (new_mark, match).
+
+    An editor repaints the *same* status row over and over, so the plain
+    wait_serial would answer with a frame from before the keystroke and prove
+    nothing at all. Offsetting by how far the log had already got makes the
+    assertion about the frame that came after the key, which is the only one
+    that says anything about the edit.
+
+    The new mark is the end of the match, not the end of the log. A frame goes
+    out in a single write(), so two rows of the same frame can sit one after the
+    other; skipping to the end of the file would put the next assertion past the
+    very frame it is meant to read and it would time out waiting for a repaint
+    that already happened."""
+    rx = re.compile(pattern)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        text = read_log()
+        m = rx.search(text[mark:])
+        if m:
+            return mark + m.end(), m
+        time.sleep(0.25)
+    raise SystemExit("serial never said %s after byte %d (%s)"
+                     % (pattern, mark, LOG))
 
 
 def last_resized(marker="wm: window resized "):
@@ -165,6 +215,24 @@ def read_log():
         return ""
 
 
+def read_log_raw():
+    """The serial log with no newline translation, for the one test that counts
+    bytes rather than matching a line.
+
+    The kernel's serial driver follows every line feed with a carriage return so
+    a real terminal does not staircase down the page, and Python's universal
+    newlines read that pair as *two* line feeds. A pattern that fits on one row
+    cannot tell the difference - the editor's ruler, a window title, an exit
+    status all match either way - but a test that says "the file the reader
+    dumped is these exact bytes" would be comparing against a log with an extra
+    newline after every one the program wrote."""
+    try:
+        with open(LOG, newline="", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
 def last_snap():
     """Return (code, w, h, x, y) from the LAST `wm: snapped <c> <W>x<H> at
     <x>,<y>` line, or None. The kernel logs it only when a drag ends on a screen
@@ -181,6 +249,61 @@ def last_snap():
     return tuple(int(v) for v in hits[-1])
 
 
+class Qmp:
+    """QEMU's machine-readable monitor, used here for key chords only.
+
+    The human monitor *accepts* `sendkey ctrl-e`, replies nothing, and the guest
+    never sees a scancode: the chord is parsed and dropped, and a test that types
+    Ctrl+S then waits for the save is waiting for a keystroke that never left the
+    emulator. QMP's `send-key` takes the same trip through the 8042 — press the
+    modifier, press the key, release both — and answers with a JSON object, so a
+    key QEMU refuses becomes a failed test instead of a silent pause.
+    """
+
+    def __init__(self, path):
+        self.s = socket.socket(socket.AF_UNIX)
+        self.s.settimeout(5)
+        self.s.connect(path)
+        time.sleep(0.2)
+        self.reply()                       # the greeting, not a command result
+        self.cmd("qmp_capabilities")
+
+    def reply(self):
+        """One JSON line, or whatever arrived before the socket went quiet."""
+        buf = b""
+        while b"\n" not in buf:
+            try:
+                chunk = self.s.recv(65536)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            buf += chunk
+        return buf.decode(errors="replace").strip()
+
+    def cmd(self, name, **args):
+        body = {"execute": name}
+        if args:
+            body["arguments"] = args
+        self.s.sendall((json.dumps(body) + "\n").encode())
+        time.sleep(0.1)
+        out = self.reply()
+        if '"error"' in out:
+            raise SystemExit("QEMU refused %s: %s" % (name, out[:200]))
+        return out
+
+    def chord(self, spec):
+        """`ctrl-e` -> [ctrl, e]: the modifier is held for the key, both released."""
+        keys = [{"type": "qcode", "data": part} for part in spec.split("-")]
+        self.cmd("send-key", keys=keys)
+
+    def close(self):
+        try:
+            self.s.close()
+        except OSError:
+            pass
+
+
 class Monitor:
     def __init__(self, path):
         self.s = socket.socket(socket.AF_UNIX)
@@ -188,6 +311,7 @@ class Monitor:
         self.s.connect(path)
         time.sleep(0.2)
         self.s.recv(4096)
+        self.qmp = None            # set by main(); chords need it, see key()
 
     def cmd(self, text):
         self.s.sendall(text.encode() + b"\n")
@@ -226,6 +350,20 @@ class Monitor:
         time.sleep(0.25)
 
     def key(self, name):
+        """One keystroke on the emulated 8042.
+
+        A name with a dash is a chord (`ctrl-s`), and the human monitor cannot
+        send one: it accepts the command and the guest sees no scancode at all.
+        Those go through QMP instead, which answers, so a key QEMU will not send
+        fails the run rather than hanging it. The names in HMP_OK stay on the
+        socket every scenario has always driven, because that is the path they
+        proved; an unproven name goes to QMP for the same reason a chord does."""
+        if "-" in name or name not in HMP_OK:
+            if self.qmp is None:
+                raise SystemExit("key %r needs the QMP channel" % name)
+            self.qmp.chord(name)
+            time.sleep(0.1)
+            return
         self.cmd("sendkey %s" % name)
 
     def type_text(self, text):
@@ -796,6 +934,172 @@ def scenario_actions(sc, mon, W, H):
         wait_serial(r"shell: keys exited with 0")
         mon.type_text("echo done\n")
         wait_serial(r"shell: running 'echo' from the prompt")
+    elif sc == "editing":
+        # v0.1.21: a text editor, which is three releases of plumbing finally
+        # pointed at one window. The scenario writes a known file with one
+        # process, opens it with the editor, edits it with real PS/2 events and
+        # saves, then reads it back with a *third* process and compares the
+        # bytes. Every number below is computed from the keys sent, so a byte
+        # that arrived twice, out of order, or not at all changes a count rather
+        # than passing quietly.
+        base = "hello world"                      # what /bin/save puts in the file
+        tail = " and zeta"                        # typed at the caret
+        second = "second line"                    # after Enter broke the line
+        # The file the edits are meant to produce. Enter lands *before* the
+        # newline the file already ended with, so it breaks the line instead of
+        # adding a blank one - which is what an editor is supposed to do.
+        want = base + tail + "\n" + second + "\n"
+
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+        mon.type_text("save write demo " + base + "\n")
+        m = wait_serial(r"save: wrote (\d+) bytes /tmp/demo\.txt pid (\d+)")
+        if int(m.group(1)) != len(base) + 1:
+            raise SystemExit("the file the editor is about to open is %s bytes, "
+                             "want %d" % (m.group(1), len(base) + 1))
+        wpid = int(m.group(2))
+
+        mon.type_text("note demo\n")
+        m = wait_serial(r"wm: program window opened 'note' pid (\d+)")
+        epid = int(m.group(1))
+        m = wait_serial(r"note: loaded (\d+) bytes from /tmp/demo\.txt pid (\d+)")
+        if int(m.group(2)) != epid:
+            raise SystemExit("the editor that loaded the file is pid %s, and the "
+                             "window is pid %d: the keys would go elsewhere"
+                             % (m.group(2), epid))
+        if int(m.group(1)) != len(base) + 1:
+            raise SystemExit("the editor read %s bytes out of the store, which "
+                             "holds %d" % (m.group(1), len(base) + 1))
+        if epid == wpid:
+            raise SystemExit("the editor is the writer's own process (pid %d)"
+                             % epid)
+        # The window is a screen and not a scrollback: that is what the form feed
+        # in the first frame is for, and the compositor says it saw one.
+        wait_serial(r"wm: screen cleared pid %d" % epid)
+        # The caret at offset 0 drawn in front of the file's own first line — the
+        # text on screen came out of the store, and the '|' is the editor's.
+        wait_serial(r"\|hello world")
+        wait_serial(r"note: editing /tmp/demo\.txt pid %d" % epid)
+
+        # Ctrl+E: to the end of the line. The frame has to say where the caret
+        # landed, in the frame written *after* the key (see wait_serial_after).
+        mark = len(read_log())
+        mon.key("ctrl-e")
+        mark, _ = wait_serial_after(mark, r"hello world\|")
+        mark, _ = wait_serial_after(mark, r"LN 1 COL %d  %d OCTETS"
+                                    % (len(base) + 1, len(base) + 1))
+
+        # Type, erase one character, type back: insert and delete, both visible
+        # in the size the ruler row reports. The unsaved flag is not part of that
+        # row - the editor puts (MODIFIE) / (SAUVE) in the title, the same row the
+        # save below has to see come back to (SAUVE) - so it is counted where the
+        # program actually writes it instead of being crammed into this pattern.
+        mark = len(read_log())
+        mon.type_text(tail)
+        mark, _ = wait_serial_after(
+            mark, r"LN 1 COL %d  %d OCTETS"
+            % (len(base) + len(tail) + 1, len(base) + len(tail) + 1))
+        if count_serial(r"NOTEPAD - /tmp/demo\.txt  \(MODIFIE\)") < 1:
+            raise SystemExit("the document grew by %d bytes and no frame said it "
+                             "was unsaved" % len(tail))
+        mon.key("backspace")
+        mark, _ = wait_serial_after(
+            mark, r"LN 1 COL %d  %d OCTETS"
+            % (len(base) + len(tail), len(base) + len(tail)))
+        mon.type_text(tail[-1])
+        mark, _ = wait_serial_after(
+            mark, r"LN 1 COL %d  %d OCTETS"
+            % (len(base) + len(tail) + 1, len(base) + len(tail) + 1))
+
+        # Enter breaks the line and the caret starts the next one.
+        mon.key("ret")
+        mark, _ = wait_serial_after(mark, r"LN 2 COL 1  \d+ OCTETS")
+
+        mon.type_text(second)
+        mark, _ = wait_serial_after(
+            mark, r"LN 2 COL %d  %d OCTETS"
+            % (len(second) + 1, len(want)))
+
+        # Ctrl+S: the document goes into the store, and the count the kernel
+        # hands back is the one the editor reports.
+        mon.key("ctrl-s")
+        m = wait_serial_after(mark, r"note: saved (\d+) bytes to /tmp/demo\.txt "
+                                    r"pid (\d+)")
+        mark = m[0]
+        saved, spid = int(m[1].group(1)), int(m[1].group(2))
+        if saved != len(want):
+            raise SystemExit("the store kept %d bytes, the editor was asked to "
+                             "save %d" % (saved, len(want)))
+        if spid != epid:
+            raise SystemExit("pid %s saved the file, not the editor (%d)"
+                             % (spid, epid))
+        mark, _ = wait_serial_after(mark, r"NOTEPAD - /tmp/demo\.txt  \(SAUVE\)")
+
+        # Ctrl+Q: it ends clean, because everything on screen is in the file.
+        mon.key("ctrl-q")
+        wait_serial(r"note: quit pid %d" % epid)
+        wait_serial(r"proc: pid %d died holding the keyboard" % epid)
+        wait_serial(r"shell: note exited with 0")
+
+        # None of that typing may have reached the prompt. A leak shows up as the
+        # shell trying to run one of the words.
+        for word in ("and", "zeta", "second", "line"):
+            for leak in (r"shell: running '%s'" % word,
+                         r"shell: no program /bin/%s" % word):
+                if count_serial(leak) != 0:
+                    raise SystemExit("the editor's typing reached the command "
+                                     "line as well: %s" % leak)
+
+        # A third process, with no memory of the editor, reads the file back.
+        # Between its two lines are the store's bytes and nothing else.
+        mon.type_text("save read demo\n")
+        m = wait_serial(r"save: opening /tmp/demo\.txt pid (\d+)")
+        rpid = int(m.group(1))
+        if rpid == epid:
+            raise SystemExit("the reader is the editor's own process (pid %d): "
+                             "nothing crossed a process boundary" % rpid)
+        m = wait_serial(r"save: read back (\d+) bytes /tmp/demo\.txt pid (\d+)")
+        back, bpid = int(m.group(1)), int(m.group(2))
+        if back != len(want) or back != saved:
+            raise SystemExit("a third process read %d bytes; the editor saved "
+                             "%d and the document holds %d"
+                             % (back, saved, len(want)))
+        if bpid != rpid:
+            raise SystemExit("the reader's two lines name different processes "
+                             "(%s then %s)" % (rpid, bpid))
+        # What the reader dumped is the document, line by line, and it is read
+        # from the untranslated log: the serial driver puts a carriage return
+        # after every line feed it writes, which text mode hands back as a second
+        # newline (see read_log_raw). The reader's own two lines frame the region
+        # and the kernel's routing announcement inside it is dropped - what is
+        # left is compared for equality, so a byte that doubled or vanished shows
+        # up even though the count above already agreed.
+        raw = read_log_raw()
+        opening = "save: opening /tmp/demo.txt pid %d" % rpid
+        routed = "wm: routed output pid %d" % rpid
+        seen, dumped = False, ""
+        for ln in raw.split("\n"):
+            ln = ln.replace("\r", "")
+            if not seen:
+                seen = ln == opening
+                continue
+            if ln.startswith("save: read back"):
+                break
+            if ln == routed:
+                continue
+            dumped += ln + "\n"
+        if dumped != want:
+            raise SystemExit("the bytes read back are not the bytes the editor "
+                             "saved: %r" % dumped)
+
+        # And the frames: a window that repaints is a window whose screen
+        # changes, so the title row has to be in the log once per repaint
+        # rather than once in total.
+        if count_serial(r"NOTEPAD - /tmp/demo\.txt") < 6:
+            raise SystemExit("the editor drew %d frames, and an editor that "
+                             "paints once does not show an edit"
+                             % count_serial(r"NOTEPAD - /tmp/demo\.txt"))
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -869,6 +1173,16 @@ MARKERS = {
                   "died holding the keyboard; the console has it back",
                   "shell: keys exited with 0",
                   "shell: running 'echo' from the prompt"],
+    # the caret positions, the byte counts, the repaint-after-key frames and the
+    # exact bytes read back by a third process are all asserted in the scenario;
+    # these are the lines the claim turns on - a file opened out of the store, a
+    # window painted as a screen, a save the kernel agreed to, and an editor that
+    # ended with everything on its screen inside its file
+    "editing":   ["shell: running 'note' from the prompt",
+                  "note: loaded", "wm: screen cleared pid",
+                  "note: editing /tmp/demo.txt", "note: saved",
+                  "note: quit", "shell: note exited with 0",
+                  "save: read back"],
 }
 
 
@@ -876,14 +1190,15 @@ def main():
     iso, sc = sys.argv[1], sys.argv[2]
     shot = sys.argv[3] if len(sys.argv) > 3 else None
 
-    for f in (LOG, MON):
+    for f in (LOG, MON, QMP):
         if os.path.exists(f):
             os.remove(f)
 
     proc = subprocess.Popen(
         ["qemu-system-x86_64", "-cdrom", iso, "-m", "512", "-display", "none",
          "-no-reboot", "-serial", "file:%s" % LOG,
-         "-monitor", "unix:%s,server,nowait" % MON],
+         "-monitor", "unix:%s,server,nowait" % MON,
+         "-qmp", "unix:%s,server,nowait" % QMP],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     mon = None
 
@@ -904,6 +1219,10 @@ def main():
         W, H = int(m.group(1)), int(m.group(2))
 
         mon = Monitor(MON)
+        # Connected up front, not on first use: a guest that came up is a guest
+        # whose QMP socket exists, and finding that out in the middle of an edit
+        # sequence would look like an editor bug.
+        mon.qmp = Qmp(QMP)
         if sc == "shot":
             tw = min(TERM_W, W - 40)
             tx = W - tw - 48
@@ -923,6 +1242,8 @@ def main():
         # with it the guest clock, which silently breaks timing assertions.
         if mon is not None:
             mon.close()
+            if mon.qmp is not None:
+                mon.qmp.close()
         proc.terminate()
         try:
             proc.wait(timeout=5)

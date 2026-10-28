@@ -711,22 +711,89 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         editing, so backspace is the program's problem; a full ring hands the key to
         the prompt rather than dropping it; and typing still does not reach a
         program that was never launched, because focus is a claim, not a click.
+- [x] A text editor as a program window (v0.1.21): `/bin/note` opens `/tmp/demo.txt`
+      by name, lets you type into it, and writes it back. It is the first feature
+      that consumes everything the last three releases were about — a store that
+      can write (v0.1.18), a program that can drive the shell (v0.1.19), and a
+      program that can be handed the keyboard and sleep until a key lands
+      (v0.1.20) — and it needed exactly three new things, none of them a syscall.
+      - **Ctrl is a modifier, and a control byte is what a program gets.**
+        `keyboard.c` had always decoded the ASCII table and thrown Shift's own
+        scancodes away; Ctrl went into the same discard pile. It now has state
+        (make 0x1D, break 0x9D), and Ctrl+letter delivers the byte the ASCII table
+        already reserves for it: 0x13 for Ctrl+S, 0x02/0x06 for left/right,
+        0x01/0x05 for line start/end, 0x0E/0x10 for down/up, 0x04 to delete, 0x11
+        to save-and-quit. Every *other* Ctrl combination is swallowed rather than
+        arriving as its bare letter, because a program that sees `s` when the user
+        held Ctrl has been told a lie about what was typed. `shell_key` already
+        ignores bytes below 32 except Enter and Backspace, so the prompt is
+        untouched by the new traffic.
+      - **A `\f` in a program's output is a screen, not a glyph.** An editor that
+        appends a frame per keystroke to a 17-row log scrolls its own document out
+        of the window on the seventh edit. The surface router now treats form feed
+        as "this program is repainting, not reporting": it clears that slot's rows
+        and logs `wm: screen cleared pid N` once, and `note` draws its whole frame —
+        title bar, ruler, 12 body rows, status line — in a single 17-row `write()`.
+        The serial console still receives every byte, so the tests can read the
+        same window the user does.
+      - **A 13 KiB image found a bug that had been sleeping since Phase 5.** The
+        loader computes `from = i * PAGE_SIZE` — an offset *within the segment* —
+        and used it as an offset *within the page* when it copied file bytes
+        (`kv + from`). For the second page of a segment longer than 4 KiB that is a
+        4 KiB-straddling write into the next frame the allocator handed out, which
+        for `/bin/note` was the process's own L1 page table: the copy put ELF text
+        into page-table slots, and the next translation returned a leaf of
+        `0x3990b60f0040349f`. Every program in this OS had kept each PT_LOAD inside
+        one page, so `from` was always 0 and nothing ever noticed. Fixed by copying
+        into the page start and by counting only the bytes that belong to this page
+        — the same in-page arithmetic the `.bss` clearing below it already did.
+      - **What it is not, stated plainly.** No arrow keys on the wire yet (E0-prefixed
+        scancodes are still swallowed; Ctrl+B/F/P/N/A/E are the stand-ins Windows
+        users met in EDIT), no selection, no clipboard, no open/save-as *dialog* —
+        the file name comes from the command line or a batch file, which is also how
+        a `.bat` reaches it. The document is 512 bytes and 12 rows are visible, and
+        there is no horizontal scroll: lines wrap in the buffer, not on screen. The
+        rows are uppercased because the 5x7 font has no lowercase glyphs.
+      - **The proof is the file, not the picture.** `tools/qemu-desktop.py editing`
+        types `note demo` at the prompt over real PS/2, requires the window to open
+        and the screen to clear, types text, moves the caret and checks the ruler
+        row (`LN 1 COL 12` → `COL 21` → back to `COL 20`), edits a second line,
+        shows `(MODIFIE)` become `(SAUVE)` under Ctrl+S, quits, requires the process
+        to give the keyboard back and the shell to report exit 0, and requires that
+        no keystroke leaked to the prompt (four specific words counted at zero). Then
+        it asks the save tool to read `/tmp/demo.txt` back and compares the bytes and
+        the length, so the claim is persistence through the VFS and not a screenshot.
+      - **The harness needed a second monitor socket, and that is worth writing down
+        because it is a testing fact every later scenario inherits.** QEMU's human
+        monitor *accepts* `sendkey ctrl-e`, answers nothing, and injects no scancode:
+        a scenario that typed Ctrl+S and then waited for the save was waiting for a
+        keystroke that never left the emulator. QMP's `send-key` goes through the same
+        8042 — hold the modifier, press the key, release both — and replies with JSON,
+        so a key QEMU will not send fails the run at the key instead of 25 seconds
+        later at an assertion. `Backspace` is spelled that way and `bspace` is not a
+        qcode, which is how a lost delete key looked exactly like a guest bug. The
+        channel lives next to the monitor socket, and the scenario reads the *raw*
+        serial log for the byte comparison, because the driver puts a carriage return
+        after every line feed and Python would hand that back as a second newline.
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
-- [ ] A text editor and a code editor as program windows. Every blocker named in
-      the last four releases is now gone: the store can write (v0.1.18), a
-      program's bytes can drive the shell (v0.1.19), and a program can be *handed*
-      the keyboard and sleep until a key lands (v0.1.20). What is left is the
-      editor itself, and it has three problems the kernel does not solve for it: a
-      text buffer that survives a repaint (a program window shows text through the
-      console surface, so a buffer that scrolls is a design decision, not a
-      syscall), the keys that are not printable characters — arrows, Home/End and
-      a shift state that `keyboard.c` decodes for the console and does not yet put
-      on the wire to a program — and an open/save-as *dialog*, which means either a
-      second window per program or a small modal drawn inside the first. Start with
-      a single-window editor that opens a `/tmp` file by name from a batch file or
-      the command line, edits it with the keys it can already read, and saves with
-      the write path it can already call.
+- [ ] A **code** editor as a program window. The text editor shipped in v0.1.21 and
+      settled the three problems that were standing in front of it: a buffer that
+      survives a repaint is one 17-row `write()` behind a `\f`, Ctrl+letter is a
+      real wire protocol, and saving is the write path a program can already call.
+      What a code editor still needs is its own work. First, the keys that are not
+      characters: arrows and Home/End arrive as E0-prefixed scancodes that
+      `keyboard.c` currently swallows, and putting them on the wire means either an
+      escape sequence per program or a small key-code channel beside the byte
+      stream — a decision `note` deliberately did not make for it. Second, syntax
+      highlighting: the compositor draws a 5x7 glyph per cell with no per-cell
+      colour, so coloured keywords is either a palette on the surface router's rows
+      or a program that draws its own window body, and that choice is a
+      presentation decision that wants a test of its own. Third, an open/save-as
+      *dialog*, which means either a second window per program slot or a modal
+      drawn inside the first. Fourth, a document bigger than one buffer: 512 bytes
+      and 12 visible rows is a notepad, not an IDE, and paging a file through the
+      VFS is the honest next cost.
 - [ ] A block device driver (ATA or NVMe), so `tmpfs` can stop being the only
       place a byte a program wrote can go
 

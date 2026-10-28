@@ -103,6 +103,12 @@ static const char map_shift[MAP_SIZE] = {
 };
 
 static int shift_down, caps_lock;
+/* Left Ctrl (make 0x1D, break 0x9D in the translated stream). Tracked for the
+ * same reason shift is: a shortcut key is a *combination*, and a decoder that
+ * forgets which keys were held cannot tell Ctrl+S from the letter s. Right Ctrl
+ * arrives as E0 1D and the E0 handler below eats the second byte, so it stays
+ * untracked — one working Ctrl is the honest scope here. */
+static int ctrl_down;
 static int presses, releases;
 static int first_key_reported;
 
@@ -229,10 +235,14 @@ static void keyboard_decode(uint8_t sc)
         releases++;
         if (base == 0x2A || base == 0x36)
             shift_down = 0;
+        if (base == 0x1D)
+            ctrl_down = 0;
     } else {
         presses++;
         if (base == 0x2A || base == 0x36)
             shift_down = 1;
+        if (base == 0x1D)
+            ctrl_down = 1;
         if (base == 0x3A)
             caps_lock = !caps_lock;
     }
@@ -244,12 +254,32 @@ static void keyboard_decode(uint8_t sc)
         return;
 
     char c = shift_down ? map_shift[base] : map_plain[base];
-    if (caps_lock && c >= 'a' && c <= 'z')
+    if (c == 0)
+        return;                    /* a modifier or an unknown: counted, not typed */
+
+    if (ctrl_down) {
+        /* Ctrl makes a letter name the control byte it stands for: Ctrl+A is 1
+         * ... Ctrl+Z is 26, the same convention every PC keyboard has used since
+         * the IBM XT, and the reason a program can be given a shortcut without
+         * inventing a key code of its own. Any other key held with Ctrl is
+         * swallowed rather than typed — a shortcut that also dropped a character
+         * into the document would be worse than no shortcut at all. */
+        char lower = (char)(c | 0x20);
+        if (lower < 'a' || lower > 'z')
+            return;
+        c = (char)(lower - 'a' + 1);
+    } else if (caps_lock && c >= 'a' && c <= 'z') {
         c = (char)(c - 'a' + 'A');
-    /* Enter and Backspace are control characters but they are exactly what
-     * a line editor needs, so they pass the printable-only filter. */
-    if (c == 0 || (c < 32 && c != ' ' && c != '\n' && c != '\b'))
-        return; /* modifiers and unknowns: counted, not printed */
+    }
+
+    /* Enter, Backspace and Tab are control characters, and they are exactly what
+     * a line editor needs, so they pass the printable-only filter — along with
+     * the Ctrl letters above, which are how a program gets a command at all.
+     * Holding Ctrl is the proof that the byte below 32 was *asked for*: nothing
+     * else in these tables can produce one, so a stray control code from an
+     * unknown scancode still stops here instead of reaching a document. */
+    if (c < 32 && c != '\n' && c != '\b' && c != '\t' && !ctrl_down)
+        return;
 
     kb_enqueue(c);
 
@@ -257,7 +287,10 @@ static void keyboard_decode(uint8_t sc)
         first_key_reported = 1;
         serial_write("keyboard: key decoded end-to-end\n");
     }
-    log_message("key: '%c' down (sc 0x%02x)", c, base);
+    if (c >= 32 && c < 127)
+        log_message("key: '%c' down (sc 0x%02x)", c, base);
+    else
+        log_message("key: code %d down (sc 0x%02x)", (int)c, base);
 }
 
 /* --- IRQ1 -------------------------------------------------------------

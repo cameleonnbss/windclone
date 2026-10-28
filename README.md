@@ -240,6 +240,31 @@ On boot the kernel:
    larger blit. The `progdamage` scenario proves it the honest way: it requires a
    sub-screen flip to land *strictly between two of hold's own rounds*, which is
    exactly the frame its output caused and which used to be full-screen.
+24. runs **a text editor** — `/bin/note`. Type `note demo` at the prompt (or put
+   it in a batch file) and a program window opens titled `NOTEPAD - /tmp/demo.txt`:
+   it reads the file if the store has it, edits it in memory if it does not, and
+   writes it back with Ctrl+S. That sentence needed three things the OS did not
+   have. A program had to be able to *move* the caret, so `keyboard.c` now tracks
+   Ctrl as a real modifier and turns Ctrl+letter into the control byte the ASCII
+   table already reserves for it (Ctrl+S → 0x13, Ctrl+A/E for line start/end,
+   Ctrl+B/F for left/right, Ctrl+D to delete, Ctrl+K to save-and-quit); the other
+   Ctrl combinations are swallowed instead of being delivered as their letters. A
+   program's window had to be able to show *its own* screen rather than a running
+   log, so a `\f` in a program's output clears that window's surface — one screen
+   per draw, 17 rows in a single write, so an editor repaints instead of scrolling
+   away from itself. And the whole thing had to be one program using only syscalls
+   that already exist: `open`/`read`/`write`/`close`/`getpid`, no new ABI, no
+   runtime. Getting a 13 KB image to load also dug up a real kernel bug: the ELF
+   loader treated a *segment*-relative offset as an *in-page* offset, so the
+   second page of any segment longer than 4 KiB was copied 4 KiB past the end of
+   its own frame — into the next frame the allocator had just handed out, which
+   was the process's own page table. Every image before this editor kept each
+   segment inside one page, so it had never fired. What the editor does *not*
+   have yet: arrow keys (Ctrl+B/F/P/N/A/E stand in), a selection, an open/save-as
+   *dialog*, and any document longer than 512 bytes. The `editing` scenario drives
+   the real PS/2 path — type the command, type text, press Ctrl+S, quit — and then
+   reads `/tmp/demo.txt` back through the save tool, so the proof is that the
+   bytes are still there, not that a window looked right.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
@@ -289,7 +314,7 @@ src/kernel/        C kernel: entry (kmain), console + memory managers,
                    (proc), interrupt stubs (NASM), string + port-I/O helpers
 src/user/          the programs that run in ring 3 — hello, motd, ls, cat,
                    echo, tick, spin, exit, waiter, bell, reaper, vanish,
-                   whoami, orphan, nest, hold, save, keys — with no libc of their own: a header of inline
+                   whoami, orphan, nest, hold, save, keys, note — with no libc of their own: a header of inline
                    `int 0x80` wrappers and eight static inline string helpers
 src/boot/          hand-written NASM boot code (two-stage educational MBR)
 rootfs/            what goes into the initrd: packed to a ustar tar, loaded

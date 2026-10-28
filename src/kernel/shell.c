@@ -185,6 +185,7 @@ static void cmd_help(void)
     put_line("  WHOAMI         MON PID - ON NE TUE PAS PID 1");
     put_line("  REAPER         ENFANT, KILL, WAIT - DANS CET ORDRE");
     put_line("  SAVE           ECRIT OU LIT UN FICHIER DANS /TMP");
+    put_line("  NOTE <NOM>     EDITE /TMP/<NOM>.TXT");
     put_line("CE QUE TU LANCES ICI EST UN PROCESSUS: PID REEL,");
     /* The shell's pid is printed as the number the table holds, not as a "1"
      * written into this file: the claim on the screen is then whatever the
@@ -216,6 +217,10 @@ struct program {
     int      exit_code;
     uint64_t bytes;          /* output routed to this window (the claim) */
     int      routed_logged;  /* emit "wm: routed output" only once       */
+    int      screen_logged;  /* emit "wm: screen cleared" only once. A program
+                              * that repaints says it every keystroke, and a log
+                              * line per frame would bury the one fact worth
+                              * knowing: that \f reaches a window at all.        */
     char     name[PROC_NAME_MAX];
     struct surface s;
 };
@@ -241,6 +246,17 @@ static void surf_write(struct surface *s, const char *data, uint64_t len)
         char c = data[i];
         if (c == '\r')
             continue;
+        if (c == '\f') {
+            /* Form feed means "this is a screen, not another line". A program
+             * that draws a whole frame — an editor, a viewer, a status panel —
+             * would otherwise have to watch its own output scroll off a
+             * scrollback it never asked for, one repaint at a time. Clearing on
+             * \f is the smallest thing that turns an append-only surface into a
+             * canvas, and it needs no syscall because the byte is already on
+             * the wire the program is writing to. */
+            surf_clear(s);
+            continue;
+        }
         if (c == '\n' || s->pending_len >= SHELL_COLS) {
             if (s->pending_len > 0) {
                 s->pending[s->pending_len] = '\0';
@@ -273,6 +289,17 @@ static void console_router(const char *data, uint64_t len)
             serial_write("\n");
         }
         pr->bytes += len;
+        if (!pr->screen_logged) {
+            for (uint64_t i = 0; i < len; i++) {
+                if (data[i] != '\f')
+                    continue;
+                pr->screen_logged = 1;
+                serial_write("wm: screen cleared pid ");
+                serial_write_dec((uint64_t)pr->pid);
+                serial_write("\n");
+                break;
+            }
+        }
         surf_write(&pr->s, data, len);
         return;
     }
@@ -296,6 +323,7 @@ int shell_program_open(const char *name, int pid)
         pr->exit_code = 0;
         pr->bytes = 0;
         pr->routed_logged = 0;
+        pr->screen_logged = 0;
         int n = 0;
         for (; name[n] != '\0' && n + 1 < PROC_NAME_MAX; n++)
             pr->name[n] = name[n];

@@ -713,6 +713,17 @@ echo '==> the keyboard reaches a program (read(0) sleeps until a key lands)'
 python3 tools/qemu-desktop.py windclone.iso typing \
     || fail 'a program could not read the keyboard, or the prompt could not take it back'
 
+# v0.1.21: those keys make an editor. The scenario writes a known file, opens it
+# in /bin/note, and then edits it through real PS/2 events - Ctrl+E to the end of
+# the line, a word, a Backspace that takes it away, Enter that breaks the line, a
+# second line, Ctrl+S. It asserts the caret position and byte count the editor's
+# own frame reports after every one of those keys, and finishes by having a third
+# process read the file back and compare it, byte for byte, with the text that
+# only ever entered through the keyboard.
+echo '==> a text editor (open, edit, save a file in its own window)'
+python3 tools/qemu-desktop.py windclone.iso editing \
+    || fail 'the editor could not open, edit or save a file, or the save did not persist'
+
 # v0.1.12: the double buffer + damage claim, measured. The scenario reads the
 # kernel's own "gfx: flip <n> rects, <area> px" lines and requires three things:
 # the boot frame flipped the whole screen, a pure mouse move flipped only a

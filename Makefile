@@ -32,7 +32,7 @@ INITRD       := build/initrd.tar
 # linkers/user.ld and mapped segment by segment by src/kernel/elf.c.
 # The rule below is a pattern, so adding a command is two edits, not four:
 # a src/user/<name>.c and its name here.
-USER_BINS := build/hello build/motd build/ls build/cat build/echo build/tick build/spin build/exit build/waiter build/bell build/reaper build/vanish build/whoami build/orphan build/nest build/hold build/save build/keys
+USER_BINS := build/hello build/motd build/ls build/cat build/echo build/tick build/spin build/exit build/waiter build/bell build/reaper build/vanish build/whoami build/orphan build/nest build/hold build/save build/keys build/note
 USER_HDRS := $(wildcard src/user/*.h) src/kernel/wcabi.h
 
 # -mno-sse... : keep gcc from emitting SSE/AVX. At boot time CR4/XMM state

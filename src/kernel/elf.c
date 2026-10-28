@@ -239,12 +239,22 @@ static int fill_segment(int fd, const struct elf64_phdr *ph,
             return -1;
         }
 
-        /* File bytes inside this page: [from, min(data_end, page end)). */
+        /* File bytes inside this page: [from, min(data_end, page end)).
+         *
+         * `from` is a *segment*-relative offset, and `kv` is already the page
+         * this iteration belongs to, so the destination is the start of the
+         * frame: `kv + from` would run off the end of a 4 KiB page by exactly
+         * `from` bytes and overwrite whatever frame the allocator handed out
+         * next — which was this process's own L1 page table. Every image built
+         * before the text editor kept each of its segments inside one page, so
+         * `from` was always 0 and the bug slept. The length is the same
+         * arithmetic in the other direction: the bytes of this page that are
+         * file data, not everything the segment still has to give. */
         if (from < data_end) {
-            uint64_t n = data_end - from;
-            if (n > PAGE_SIZE)
-                n = PAGE_SIZE;
-            if (vfs_pread(fd, kv + from, n, file_page + from) != (int64_t)n) {
+            uint64_t page_end = from + PAGE_SIZE;
+            uint64_t n = data_end < page_end ? data_end : page_end;
+            n -= from;
+            if (vfs_pread(fd, kv, n, file_page + from) != (int64_t)n) {
                 reject("short read on segment data", va);
                 return -1;
             }
