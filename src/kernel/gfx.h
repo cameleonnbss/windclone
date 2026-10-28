@@ -38,6 +38,27 @@ void gfx_gradient_v(int x, int y, int w, int h, uint32_t top, uint32_t bottom);
 /* 1-pixel frame, cheap window borders. */
 void gfx_frame(int x, int y, int w, int h, uint32_t rgb);
 
+/* Alpha blend: mix `rgb` (0xRRGGBB) over whatever is already in the composition
+ * at `alpha` (0..255). That single line of maths is all an acrylic panel is: the
+ * taskbar and the start menu keep the wallpaper underneath them and let part of
+ * it through, instead of hiding it behind a flat colour. */
+void gfx_blend_rect(int x, int y, int w, int h, uint32_t rgb, int alpha);
+
+/* Filled rectangle with corners that give up `r` pixels of their own box. The
+ * compositor paints back to front into the back buffer, so the pixels a rounded
+ * rect declines to write still hold whatever was drawn there before: a rounded
+ * window corner needs no mask and no knowledge of what is behind it.
+ * gfx_round_top() rounds the two corners a title bar shows and leaves the
+ * bottom square, because that bottom edge joins the body it sits on. */
+void gfx_round_rect(int x, int y, int w, int h, int r, uint32_t rgb);
+void gfx_round_top(int x, int y, int w, int h, int r, uint32_t rgb);
+
+/* Copy a RAM surface (same 0xRRGGBB layout, `stride` pixels per row) into the
+ * composition at (x,y), honouring the clip. This is how the wallpaper costs one
+ * blit per frame instead of a gradient and a few hundred shape tests: it is
+ * painted once into a cached surface and copied from there ever after. */
+void gfx_blit_surface(const uint32_t *src, int x, int y, int w, int h, int stride);
+
 /* 5x7 font, `scale` multiplies the glyph (2 = 10x14). Uppercase only:
  * the font is ASCII A-Z, 0-9 and the punctuation the UI actually uses. */
 void gfx_text(int x, int y, const char *s, uint32_t rgb, int scale);
@@ -56,6 +77,19 @@ int  gfx_text_width(const char *s, int scale);
  * 0 = back buffer in use, -1 = none (callers fall back to direct drawing). */
 int  gfx_alloc_backbuffer(void);
 int  gfx_has_backbuffer(void);
+
+/* A standalone RAM surface of w*h pixels, laid out exactly like the back buffer
+ * (row-major 0xRRGGBB, tightly packed), or NULL when the heap says no. Callers
+ * paint into it once and blit from it often — that is the whole reason the
+ * wallpaper can be elaborate and the desktop still be cheap to recompose. */
+uint32_t *gfx_alloc_surface(int w, int h);
+
+/* Point the primitives at a surface instead of the screen, and back at the
+ * screen with NULL. The clip follows the target — drawing on a surface can never
+ * write outside that surface — so painting a wallpaper into its own buffer and
+ * blitting it per frame needs no new drawing code at all. Flip is unaffected:
+ * it always pushes the back buffer, whatever the pen was last doing. */
+void gfx_set_target(uint32_t *surf, int w, int h);
 
 void gfx_set_clip(int x, int y, int w, int h);
 void gfx_reset_clip(void);

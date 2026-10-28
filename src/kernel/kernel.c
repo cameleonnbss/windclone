@@ -19,6 +19,7 @@
 #include "gdt.h"
 #include "idt.h"
 #include "timer.h"
+#include "rtc.h"
 #include "pmm.h"
 #include "paging.h"
 #include "kmalloc.h"
@@ -523,8 +524,14 @@ void kmain(void)
     serial_write("boot complete - CPU is in long mode, paging active\n");
     kprint("\nboot complete: interrupts + timer + heap + pci + kbd online.\n");
 
-    /* Phase 8 - the screen. Painted once, right before we idle: the desktop
-     * is a static frame until there is a mouse to move something. */
+    /* The clock before the screen: the taskbar tray asks for the time on the
+     * very first frame, and a desktop that paints "12:00" because the driver
+     * has not been asked yet is a desktop showing a decoration. */
+    rtc_init();
+
+    /* Phase 8 - the screen. Composed here, then again from the idle loop for
+     * every mouse packet, every key and every line a live program writes: the
+     * desktop is not a frame, it is a loop that paints when something changed. */
     if (gfx_up) {
         /* The pointer starts centred, so the first frame already has a
          * cursor in it even before a single packet arrives. */

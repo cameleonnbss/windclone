@@ -40,22 +40,46 @@
 #include "log.h"
 #include "mouse.h"
 #include "proc.h"
+#include "rtc.h"
 #include "serial.h"
 #include "shell.h"
 #include "vfs.h"
 #include "version.h"
 
-#define C_WALL_TOP    gfx_rgb(0x0B, 0x2A, 0x63)
-#define C_WALL_BOTTOM gfx_rgb(0x1F, 0x6B, 0xD8)
+/* --- palette -----------------------------------------------------------
+ * The colours are not decoration: they are the difference between a desktop
+ * that reads as "a windowing system" and one that reads as Windows. The accent
+ * is the blue the operating system people use actually ships with, the close
+ * button is the red it shows on hover, and the glass is the wallpaper showing
+ * through a panel rather than a flat grey hiding it.
+ *
+ * One rule this palette keeps: nothing here is a colour copied out of somebody
+ * else's screenshot. Every pixel on this desktop is computed by these lines
+ * from these numbers, which is the only way the result can be shipped in a
+ * release and called yours. */
+#define C_WALL_TOP    gfx_rgb(0x05, 0x13, 0x2E)
+#define C_WALL_BOTTOM gfx_rgb(0x13, 0x3E, 0x7E)
 #define C_TASKBAR     gfx_rgb(0x0D, 0x11, 0x17)
-#define C_ACCENT      gfx_rgb(0xEF, 0x44, 0x44)
+#define C_ACCENT      gfx_rgb(0x4C, 0xC2, 0xFF)   /* the indicator blue       */
+#define C_ACCENT_DEEP gfx_rgb(0x00, 0x78, 0xD4)   /* a link, a lit edge       */
+#define C_CLOSE       gfx_rgb(0xC4, 0x2B, 0x1C)   /* close on hover, as it is */
 #define C_TITLE       gfx_rgb(0x10, 0x18, 0x27)
 #define C_TITLE_HOT   gfx_rgb(0x1E, 0x29, 0x3B)
+#define C_CAP_GLYPH   gfx_rgb(0xD8, 0xDE, 0xE6)   /* caption marks, unlit     */
 #define C_BODY        gfx_rgb(0xF8, 0xFA, 0xFC)
 #define C_CONSOLE     gfx_rgb(0x0B, 0x12, 0x1B)
 #define C_INK         gfx_rgb(0x0F, 0x17, 0x2A)
 #define C_MUTED       gfx_rgb(0x64, 0x74, 0x8B)
 #define C_WHITE       gfx_rgb(0xFF, 0xFF, 0xFF)
+#define C_BLACK       gfx_rgb(0x00, 0x00, 0x00)
+
+/* How translucent each glass panel is: 0 is a window into the wallpaper, 255 is
+ * a flat colour. These are the two numbers that decide whether the desktop looks
+ * like it has acrylic in it, so they are named rather than buried in a call. */
+#define A_TASKBAR     218
+#define A_PANEL       232
+#define A_SHADOW      96      /* the soft drop under a window, blended in     */
+#define WIN_RADIUS    8       /* corner radius of a window and of every panel */
 
 #define TASKBAR_H   44
 #define TITLE_H     34
@@ -419,8 +443,9 @@ static int cursor_shape_id(int mask)
     }
 }
 
-/* One title-bar button, painted from its index. BTN_CLOSE is red (and
- * lighter on hover); the other two are neutral chrome. */
+/* One title-bar button, painted from its index. BTN_CLOSE lights the same red
+ * the operating system people run shows on hover; the other two are neutral
+ * chrome that only lifts a shade when the pointer is over them. */
 static void draw_title_button(const struct window *w, int btn, int hover)
 {
     int bx = w->x + w->w - 4 - BTN_W * (btn + 1);
@@ -428,7 +453,7 @@ static void draw_title_button(const struct window *w, int btn, int hover)
     uint32_t bg;
 
     if (btn == BTN_CLOSE)
-        bg = hover ? gfx_rgb(0xF8, 0x71, 0x71) : C_ACCENT;
+        bg = hover ? C_CLOSE : C_TITLE_HOT;
     else
         bg = hover ? gfx_rgb(0x33, 0x41, 0x55) : C_TITLE_HOT;
 
@@ -507,6 +532,176 @@ static int hover_resize_edge(int mx, int my)
         return resize_edge_at(w, mx, my);
     }
     return RS_NONE;
+}
+
+/* --- the wallpaper -----------------------------------------------------
+ * Painted once into a RAM surface and copied from there on every frame.
+ *
+ * Both halves matter. The surface is what lets the wallpaper be a *picture*
+ * rather than one flat gradient: a few million blended pixels at boot costs
+ * nothing per frame afterwards, because a frame blits the damage box out of the
+ * cache. And the fallback is what makes it safe: a machine whose heap cannot
+ * give up width*height*4 bytes paints the gradient again, exactly as it did
+ * before this existed, and the desktop does not care which one it got.
+ *
+ * The design is a bloom: a light source, petals laid across it as translucent
+ * ellipses at two angles, and edges that fall away into dark water. It is drawn
+ * from these numbers by these loops. It is not anybody's screenshot, which is
+ * the only reason it can be in a release. */
+
+static uint32_t *wall;
+static int wall_w, wall_h;
+
+/* Digit-by-digit square root in base 2. There is no libm in a freestanding
+ * kernel and no FPU state saved for ring 0, and every curve in a wallpaper needs
+ * a square root per row — thirty-two shifts, integers only, and exact enough for
+ * a pixel. */
+static unsigned long long isqrt64(unsigned long long v)
+{
+    unsigned long long bit = 1ULL << 62;
+    unsigned long long r = 0;
+
+    if (v == 0)
+        return 0;
+    while (bit > v)
+        bit >>= 2;
+    while (bit) {
+        if (v >= r + bit) { v -= r + bit; r = (r >> 1) + bit; }
+        else              { r >>= 1; }
+        bit >>= 2;
+    }
+    return r;
+}
+
+/* Division that rounds outward instead of toward zero. C's `/` truncates, which
+ * is the wrong direction for the two ends of a span: the left root has to go down
+ * and the right one up, or a shape loses the pixel whose centre the curve passed
+ * through and the edge of every petal comes out one row ragged. */
+static long long fdiv(long long num, long long den)
+{
+    long long q = num / den;                 /* C truncates toward zero */
+    if ((num % den) != 0 && ((num < 0) != (den < 0)))
+        q--;
+    return q;
+}
+
+static long long cdiv(long long num, long long den)
+{
+    return -fdiv(-num, den);
+}
+
+static void petal(int cx, int cy, int a, int b, int rot45, uint32_t color, int alpha)
+{
+    if (a <= 0 || b <= 0)
+        return;
+
+    long long aa = (long long)a * a;
+    long long bb = (long long)b * b;
+
+    int reach = rot45 ? a + b : b;
+
+    for (int dy = -reach; dy <= reach; dy++) {
+        long long x0, x1;
+
+        if (!rot45) {
+            long long inner = bb - (long long)dy * dy;
+            if (inner < 0)
+                continue;
+            long long hw = (long long)isqrt64((unsigned long long)((aa * inner) / bb));
+            x0 = -hw; x1 = hw;
+        } else {
+            long long A = aa + bb;
+            long long B = 2 * (long long)dy * (bb - aa);
+            long long C = (long long)dy * dy * A - 2 * aa * bb;
+            long long D = B * B - 4 * A * C;
+            if (D < 0)
+                continue;
+            long long s = (long long)isqrt64((unsigned long long)D);
+            /* Outward on both sides: the left root is floored and the right one
+             * ceiled, so a row never loses the pixel the real curve passed
+             * through the middle of. */
+            x0 = fdiv(-B - s, 2 * A);
+            x1 = cdiv(-B + s, 2 * A);
+        }
+
+        if (x1 < -reach - 1 || x0 > reach + 1)
+            continue;
+        gfx_blend_rect(cx + (int)x0, cy + dy, (int)(x1 - x0) + 1, 1, color, alpha);
+    }
+}
+
+/* A glow: the same ellipse again and again, each one a little smaller and a
+ * little brighter. Layering low alphas is how a soft light is made out of a
+ * primitive that only knows flat rectangles, and at a step of six it reads as a
+ * gradient while costing a fraction of a per-pixel distance field. */
+static void glow(int cx, int cy, int rx, int ry, uint32_t color, int alpha)
+{
+    for (int r = rx; r > 0; r -= 6) {
+        int rr = (int)((long long)r * ry / rx);
+        petal(cx, cy, r, rr > 0 ? rr : 1, 0, color, alpha);
+    }
+}
+
+static void wall_paint(int W, int H)
+{
+    wall = gfx_alloc_surface(W, H);
+    if (wall == NULL) {
+        klog("wm: wallpaper uncached (no surface), gradient only");
+        return;
+    }
+    wall_w = W;
+    wall_h = H;
+
+    gfx_set_target(wall, W, H);
+
+    gfx_gradient_v(0, 0, W, H, C_WALL_TOP, C_WALL_BOTTOM);
+
+    /* The light comes up behind the bloom, off-centre and low, the way a lamp
+     * behind glass never sits in the middle of the frame. */
+    int cx = W * 61 / 100;
+    int cy = H * 46 / 100;
+    glow(cx, cy, W * 42 / 100, H * 42 / 100, gfx_rgb(0x2E, 0x8E, 0xE6), 5);
+    glow(cx, cy, W * 18 / 100, H * 18 / 100, gfx_rgb(0x9F, 0xD8, 0xFF), 6);
+
+    /* Six petals: two crossings at 45 degrees and one upright pair, each with a
+     * lighter core drawn over its own body so the ribbons read as translucent
+     * where they overlap instead of as a pile of flat shapes. */
+    petal(cx, cy, W * 34 / 100, H * 11 / 100, 1, gfx_rgb(0x3C, 0xA8, 0xF0), 70);
+    petal(cx, cy, W * 30 / 100, H * 9 / 100, 1, gfx_rgb(0x8E, 0xD4, 0xFF), 46);
+    petal(cx, cy, W * 34 / 100, H * 11 / 100, 0, gfx_rgb(0x1F, 0x6F, 0xD0), 78);
+    petal(cx, cy, W * 12 / 100, H * 30 / 100, 0, gfx_rgb(0x2B, 0x86, 0xDD), 66);
+    petal(cx, cy, W * 9 / 100, H * 26 / 100, 0, gfx_rgb(0x7A, 0xCC, 0xFF), 40);
+    petal(cx, cy, W * 6 / 100, H * 6 / 100, 1, gfx_rgb(0xD6, 0xF1, 0xFF), 58);
+
+    /* The corners go dark. Two passes of a linear alpha, one from each side of
+     * every edge, and the eye is left where the light is. */
+    for (int x = 0; x < W; x++) {
+        int d = x < W - x ? x : W - x;
+        int a = 70 - d * 70 / (W / 2);
+        if (a > 0) {
+            gfx_blend_rect(x, 0, 1, H, C_BLACK, a);
+        }
+    }
+    for (int y = 0; y < H; y++) {
+        int d = y < H - y ? y : H - y;
+        int a = 60 - d * 60 / (H / 2);
+        if (a > 0) {
+            gfx_blend_rect(0, y, W, 1, C_BLACK, a);
+        }
+    }
+
+    gfx_set_target(NULL, 0, 0);
+    klog("wm: wallpaper cached %dx%d", W, H);
+}
+
+/* What a frame costs for the wallpaper: one blit of the damage box out of the
+ * cache, or the old gradient when there is no cache. */
+static void draw_wallpaper(int W, int H)
+{
+    if (wall != NULL)
+        gfx_blit_surface(wall, 0, 0, wall_w, wall_h, wall_w);
+    else
+        gfx_gradient_v(0, 0, W, H, C_WALL_TOP, C_WALL_BOTTOM);
 }
 
 static void draw_logo(int x, int y, int pane, int gap)
@@ -611,13 +806,25 @@ static void draw_window(const struct window *w, int focus)
                               : gfx_rgb(0xCE, 0xD5, 0xE0);
 
     /* Shadow only when there is room behind the window: a maximised one
-     * has no behind, and the extra 6 px would poke into the taskbar. */
+     * has no behind, and the extra pixels would poke into the taskbar. It is a
+     * blend, not a navy slab, so it reads as a soft drop over the wallpaper the
+     * way an overlapping window does on the desktop people actually use. */
     if (!w->max)
-        gfx_fill(w->x + 6, w->y + 6, w->w, w->h, gfx_rgb(0x0A, 0x1E, 0x45));
+        gfx_blend_rect(w->x + 5, w->y + 6, w->w, w->h, C_BLACK, A_SHADOW);
 
-    gfx_fill(w->x, w->y, w->w, w->h, console ? C_CONSOLE : C_BODY);
-    gfx_fill(w->x, w->y, w->w, TITLE_H, front ? C_TITLE_HOT : C_TITLE);
-    gfx_fill(w->x, w->y, 4, TITLE_H, front ? C_ACCENT : gfx_rgb(0x47, 0x55, 0x69));
+    /* Windows 11 corners: a rounded body with a one-pixel edge that follows the
+     * round, and a title strip whose top corners match. A maximised window gets
+     * r = 0, which every one of these primitives already treats as a plain fill,
+     * so a full-screen window keeps its square edges without a single special
+     * case in the drawing code. */
+    int r = w->max ? 0 : WIN_RADIUS;
+    gfx_round_rect(w->x, w->y, w->w, w->h, r, border);
+    gfx_round_rect(w->x + 1, w->y + 1, w->w - 2, w->h - 2, r ? r - 1 : 0,
+                   console ? C_CONSOLE : C_BODY);
+    gfx_round_top(w->x + 1, w->y + 1, w->w - 2, TITLE_H - 1, r ? r - 1 : 0,
+                  front ? C_TITLE_HOT : C_TITLE);
+    gfx_fill(w->x + 1, w->y + r + 1, 3, TITLE_H - r - 2,
+             front ? C_ACCENT : gfx_rgb(0x47, 0x55, 0x69));
 
     gfx_text(w->x + 16, w->y + 10, w->title, C_WHITE, 2);
     for (int btn = BTN_MIN; btn <= BTN_CLOSE; btn++)
@@ -632,8 +839,6 @@ static void draw_window(const struct window *w, int focus)
         shell_program_draw(w->slot, w->x + 14, w->y + TITLE_H + 12, w->w - 28);
     else
         shell_draw(w->x + 14, w->y + TITLE_H + 12, w->w - 28);
-
-    gfx_frame(w->x, w->y, w->w, w->h, border);
 }
 
 /* --- start menu -------------------------------------------------------- */
@@ -830,7 +1035,11 @@ static void draw_taskbar(int W, int H)
     int mx = mouse_x();
     int my = mouse_y();
 
-    gfx_fill(0, y, W, TASKBAR_H, C_TASKBAR);
+    /* Acrylic, not a slab: the bar lets the cached wallpaper through at a low
+     * alpha instead of hiding it behind flat charcoal, which is the single thing
+     * that separates a taskbar that reads as this desktop's from one that reads
+     * as a grey strip laid over it. */
+    gfx_blend_rect(0, y, W, TASKBAR_H, C_TASKBAR, A_TASKBAR);
     gfx_fill(0, y, W, 2, C_ACCENT);
 
     /* Open means lit: a taskbar button whose menu is on screen has to look
@@ -858,7 +1067,23 @@ static void draw_taskbar(int W, int H)
     /* Same macro as the status window: one number, three places that show
      * it, and no way for one of them to fall behind a release. */
     gfx_text(W - 178, y + 17, "WINDCLONE " WC_VERSION, C_MUTED, 1);
-    gfx_text(W - 56, y + 17, "12:00", C_WHITE, 1);
+
+    /* The tray clock is the CMOS time, read fresh, not a string that was true
+     * the day the desktop was written. When the chip does not answer the tray
+     * shows dashes - a clock with nothing behind it is not allowed to invent
+     * 12:00 and wear it as if it were the hour. */
+    int hh, mm;
+    rtc_now(&hh, &mm, 0);
+    char clk[6];
+    if (hh >= 0 && mm >= 0) {
+        clk[0] = (char)('0' + hh / 10); clk[1] = (char)('0' + hh % 10);
+        clk[2] = ':';
+        clk[3] = (char)('0' + mm / 10); clk[4] = (char)('0' + mm % 10);
+    } else {
+        clk[0] = clk[1] = clk[3] = clk[4] = '-'; clk[2] = ':';
+    }
+    clk[5] = '\0';
+    gfx_text(W - 56, y + 17, clk, C_WHITE, 1);
 }
 
 /* --- input ------------------------------------------------------------- */
@@ -1135,6 +1360,14 @@ static void layout(void)
         wins[i].snap = SNAP_NONE;
     }
 
+    /* Paint the wallpaper once into its own surface, now that the screen size
+     * is known. Every frame from here blits a rectangle out of that cache
+     * instead of redrawing a few million blended pixels, which is the only
+     * reason a desktop this decorated is also a desktop cheap enough to repaint
+     * on every mouse packet. layout() runs a single time, so this costs the boot
+     * one pass and the running system nothing extra per frame. */
+    wall_paint(W, H);
+
     laid_out = 1;
 }
 
@@ -1335,7 +1568,7 @@ void desktop_frame(void)
      * pixels inside the box above, so this is cheap for a cursor move and exact
      * for a full repaint, and it recomputes the scene *over* wherever the cursor
      * used to be, so no trail survives. */
-    gfx_gradient_v(0, 0, W, H, C_WALL_TOP, C_WALL_BOTTOM);
+    draw_wallpaper(W, H);
     for (int i = 0; i < (int)(sizeof icons / sizeof icons[0]); i++)
         draw_icon(icons[i].label, icons[i].y);
 

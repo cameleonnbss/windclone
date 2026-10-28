@@ -82,8 +82,9 @@ On boot the kernel:
    `exit` unwinds back to the kernel — the first privilege boundary in the
    system,
 11. maps the linear framebuffer the bootloader set up (device memory, so
-   uncached and outside the HHDM) and composites the **desktop**: gradient
-   wallpaper, desktop icons, a taskbar with a start button, and three
+   uncached and outside the HHDM) and composites the **desktop**: a cached
+   wallpaper (item 27; a gradient only if the surface cannot be allocated), desktop
+   icons, a taskbar with a start button, and three
    overlapping windows — all drawn by the kernel with a 5x7 font it carries
    itself (no font files, no libc),
 12. drives a **PS/2 mouse** on the 8042's aux channel (IRQ12, three-byte
@@ -326,6 +327,26 @@ On boot the kernel:
    makes the document dirty with one Ctrl+D, requires the save to be refused, and
    then proves the file still digests to exactly what it was before the editor saw
    it.
+
+27. wears a **Windows-style skin** that is honest about what is paint and what is
+   proof. The desktop is no longer a flat vertical gradient: the wallpaper is
+   painted *once* into an off-screen RAM surface of exactly the composited size and
+   blitted per frame inside the damage clip (`wm: wallpaper cached WxH` — the
+   scenario checks that WxH against the boot banner, so the kernel is measured
+   against itself), window corners are rounded and the taskbar is a translucent
+   acrylic bar. Those are pixels, and pixels are not asserted. What *is* asserted
+   is the tray clock, which stopped being the hard-coded `12:00` it had been for
+   six releases and now decodes the real MC146818 CMOS chip on ports 0x70/0x71
+   (`rtc: hardware clock HH:MM:SS`, `rtc: date day D month M year Y`). The driver
+   earns its keep on two facts a naive one gets wrong: the clock fields are not
+   registers 0,1,2 — the chip interleaves the alarm bytes, so seconds, minutes,
+   hours sit at 0,2,4 and the date at 7,8,9 — and the datasheet's binary/BCD flag
+   is *inverted* by the emulator every one of these tests runs under, so the driver
+   trusts the bytes over the label (it re-decodes the other way when the flagged
+   mode cannot be a real date) while still refusing a dead chip that answers 0xFF
+   to everything. The scenario seeds the CMOS with a known instant and requires the
+   hour and the date the kernel prints to *be* that instant, not merely to look
+   plausible.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

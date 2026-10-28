@@ -115,6 +115,17 @@ Scenarios (each one asserts the serial markers the kernel prints):
                file back over a whole one, Ctrl+Q has to end with unsaved bytes
                and exit 7, and a third process copying the file afterwards has to
                report the digest it had before the editor ever opened it.
+    chrome     prove the desktop's skin, from the boot log rather than the
+               pixels: the wallpaper is painted once into a surface of exactly
+               the composited size and cached (`wm: wallpaper cached WxH`, the
+               size checked against the banner the caller parsed), and the
+               taskbar clock is the CMOS chip's own decoded time (`rtc: hardware
+               clock HH:MM:SS` with a real, in-range hour/minute/second, plus a
+               plausible date) and not the "12:00" string that shipped for the
+               six releases before it. A chip that answers 0xFF to every port is
+               refused by the driver, so the very presence of a decoded time is
+               the proof a live clock was read. No clicks: both are painted
+               before the first mouse packet, which is the whole claim.
 
 Exit status 0 = every step did what the serial log says it did.
 SPDX-License-Identifier: MIT
@@ -573,7 +584,48 @@ def scenario_actions(sc, mon, W, H):
     sx, sy = 116, 88                              # status window
     status = (sx, sy, STATUS_W, STATUS_H)
 
-    if sc == "focus":
+    if sc == "chrome":
+        # v0.1.24: the desktop's skin, proved from the boot log because these two
+        # things are painted before any click and a screenshot is not how this
+        # suite proves anything. The wallpaper must have been cached into a
+        # surface of exactly the composited size; the tray must be showing the
+        # CMOS chip's own decoded time. W and H are the banner the caller parsed,
+        # so the size check compares the kernel to itself, not to a number the
+        # test wrote down.
+        text = read_log()
+        m = re.search(r"wm: wallpaper cached (\d+)x(\d+)", text)
+        if not m:
+            raise SystemExit("the wallpaper was never cached into a surface")
+        if (int(m.group(1)), int(m.group(2))) != (W, H):
+            raise SystemExit("wallpaper cached %sx%s, not the desktop's %dx%d"
+                             % (m.group(1), m.group(2), W, H))
+        # A decoded time out of 0x70/0x71. An absent chip answers 0xFF to every
+        # register, which the driver turns down (no "hardware clock" line); so a
+        # real HH:MM:SS here can only have come from a chip that settled on one
+        # value across two reads. This run seeds the CMOS with a known instant
+        # (vm clock, base 2026-08-21T05:37:13), so the claim is exact, not merely
+        # plausible: the hour the driver decoded must be the hour it was given,
+        # and the date must be the date it was given. Only the seconds tick, so
+        # the minute may roll once if boot is slow - hence minute is range-checked
+        # but the hour and the date are pinned to the seed.
+        cm = re.search(r"rtc: hardware clock (\d\d):(\d\d):(\d\d)", text)
+        if not cm:
+            raise SystemExit("the hardware clock never reported a decoded time")
+        hh, mm, ss = (int(cm.group(i)) for i in (1, 2, 3))
+        if hh > 23 or mm > 59 or ss > 59:
+            raise SystemExit("rtc reported an impossible %02d:%02d:%02d"
+                             % (hh, mm, ss))
+        if hh != 5:
+            raise SystemExit("rtc read hour %d, but the CMOS was seeded with hour 05"
+                             % hh)
+        dm = re.search(r"rtc: date day (\d+) month (\d+) year (\d+)", text)
+        if not dm:
+            raise SystemExit("rtc never reported a date")
+        if (int(dm.group(1)), int(dm.group(2)), int(dm.group(3))) != (21, 8, 26):
+            raise SystemExit("rtc read date %s, not the seeded 21/08/26"
+                             % dm.group(0))
+
+    elif sc == "focus":
         # clicking a window body raises it, then the title bar drags it
         mon.click(tx + 60, ty + TITLE_H + 60)
         mon.drag(tx + tw // 2, ty + TITLE_H // 2, 120, 90)
@@ -1753,6 +1805,11 @@ MARKERS = {
                   "note: refused to save a truncated document",
                   "note: quit with 2046 unsaved bytes",
                   "shell: note exited with 7"],
+    # the size match and the clock ranges are asserted in the scenario; these are
+    # the lines the claim turns on - a wallpaper painted once into a cached
+    # surface, and a taskbar showing the CMOS chip's own decoded time and date
+    "chrome":    ["wm: wallpaper cached", "rtc: hardware clock",
+                  "rtc: date"],
 }
 
 
@@ -1766,6 +1823,7 @@ def main():
 
     proc = subprocess.Popen(
         ["qemu-system-x86_64", "-cdrom", iso, "-m", "512", "-display", "none",
+         "-rtc", "base=2026-08-21T05:37:13,clock=vm",
          "-no-reboot", "-serial", "file:%s" % LOG,
          "-monitor", "unix:%s,server,nowait" % MON,
          "-qmp", "unix:%s,server,nowait" % QMP],

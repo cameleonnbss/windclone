@@ -614,7 +614,8 @@ else
                 "\\[orphan\\] leaving now, I will not wait" \
                 "\\[nest\\] exiting pid" \
                 "step: adoption ok (an orphan is re-parented and its exit code comes back)" \
-                "gfx: framebuffer" "gfx: desktop composited"; do
+                "gfx: framebuffer" "gfx: desktop composited" \
+                "wm: wallpaper cached" "rtc: hardware clock"; do
         grep -aq "$want" /tmp/wc-uefi.log || fail "UEFI log missing: $want"
     done
     UKID=$(grep -aF '[reaper] spawned pid' /tmp/wc-uefi.log | sed 's/.*pid \(-\?[0-9]*\).*/\1/')
@@ -767,6 +768,19 @@ python3 tools/qemu-desktop.py windclone.iso editcode \
 echo '==> an editor that refuses to save half a file (truncation guard)'
 python3 tools/qemu-desktop.py windclone.iso edittrunc \
     || fail 'the editor saved a truncated document, or would not admit it was one'
+
+# v0.1.24: the desktop's skin, and a clock that tells the truth. The wallpaper is
+# painted once into a RAM surface of exactly the composited size and cached (the
+# scenario checks that size against the boot banner, so the number is the
+# kernel's, not the test's), and the taskbar tray shows the CMOS chip's decoded
+# time - not the "12:00" the chrome has carried since it was drawn. Both happen
+# before the first mouse packet, so this scenario clicks nothing: the boot log is
+# the whole proof. The rounded corners and acrylic bar it ships with are paint,
+# and paint is not asserted here - only the two code paths that make them cheap
+# and honest are.
+echo '==> the desktop skin (cached wallpaper + hardware clock)'
+python3 tools/qemu-desktop.py windclone.iso chrome \
+    || fail 'the wallpaper was not cached at the desktop size, or the clock was not read from the chip'
 
 # v0.1.12: the double buffer + damage claim, measured. The scenario reads the
 # kernel's own "gfx: flip <n> rects, <area> px" lines and requires three things:

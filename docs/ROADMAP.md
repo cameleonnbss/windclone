@@ -907,6 +907,33 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       per program slot or a modal drawn inside the first — and a document is still
       one buffer, so 2048 bytes is the ceiling and paging a file through the VFS is
       the honest next cost.
+- [x] The desktop **skin and a clock that tells the truth** (v0.1.24). Two code
+      paths the chrome depends on, both proven without a screenshot; the rounded
+      corners and the acrylic bar are paint, and paint is not a claim.
+      - **A wallpaper painted once, not every frame.** The compositor had been
+        grinding a vertical gradient into the back buffer on every damage rect.
+        `gfx` grew an off-screen target model (`gfx_alloc_surface`,
+        `gfx_set_target`, `gfx_blit_surface`) so the "bloom" is rendered a single
+        time into a RAM surface of the composited size (`wm: wallpaper cached
+        WxH`) and blitted per frame inside the clip. The scenario checks that size
+        against the boot banner, so the kernel is measured against itself, and the
+        damage maths are untouched — rects come from window geometry, not pixel
+        diffs, which is why `damage` and `progdamage` still pass byte for byte.
+      - **A real CMOS clock, earned the hard way.** The tray had shown a literal
+        `12:00` since it was first drawn. It now decodes the MC146818 on 0x70/0x71
+        and the boot log says so (`rtc: hardware clock HH:MM:SS`, `rtc: date day D
+        month M year Y`). Two traps, both live: the time fields are *not* registers
+        0,1,2 — the chip interleaves the alarm bytes, so seconds/minutes/hours sit
+        at 0/2/4 and day/month/year at 7/8/9 — and the datasheet's binary/BCD bit
+        (flag B, bit 1) is inverted by the very emulator the whole suite runs under,
+        so the driver trusts the bytes over the label and re-decodes the other way
+        when the flagged mode cannot be a date, while a dead chip answering 0xFF
+        still fails both modes and is refused. The `chrome` scenario seeds the CMOS
+        with a known instant and requires the printed hour and date to be that
+        instant.
+      What comes next is the phase's real edge: no network. An e1000 driver, a
+      IPv4/UDP/TCP stack and a DHCP handshake, proven headless by an HTTP GET that
+      lands in a window, is v0.1.25; a package manager over that stack is v0.1.26.
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
 - [ ] A block device driver (ATA or NVMe), so `tmpfs` can stop being the only
