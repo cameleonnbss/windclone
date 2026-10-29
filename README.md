@@ -475,6 +475,28 @@ On boot the kernel:
    trees), one archive per run — the primitive, wired end to end and proven by a
    digest rather than a length.
 
+37. **paints a real bitmap into a window (v0.1.34)**.
+   Every window so far was made of glyphs, which is a terminal and the right thing
+   for `ls` — but a picture is not a sequence of glyphs. The surface gained a second,
+   in-band channel: a program writes RS (`0x1E`, the byte ASCII reserved for exactly
+   this), then `R`, then four hex digits for width and height, then `W*H` RGB24
+   pixels. No new syscall and no new ABI number to freeze, and the pixel buffer is
+   the *kernel's* (a `kmalloc`'d array per window, freed when the window clears or
+   closes) rather than a fifth of the program's own 256 KiB image. Once a record is
+   open its bytes are colours and nothing else — a `0x0A` inside a pixel is a green
+   value, not a newline — so that branch runs before every other rule in the byte
+   parser. `/bin/imgview /src/logo.bmp` is the first producer: it decodes a 24-bit
+   uncompressed BMP for real, including the four-byte row padding, the bottom-up row
+   order (the first row in the file is the *bottom* of the picture) and the BGR that
+   must become the framebuffer's RGB — the three bugs a bitmap decoder actually has.
+   The test decodes the same committed file in Python itself and requires the
+   guest's FNV-1a digest over the bytes it handed the kernel to match, so a wrong
+   stride, a flipped order or a forgotten channel swap fails instead of displaying
+   something plausible. Any other layout is *refused with its real numbers* rather
+   than painted as garbage. The honest scope: 24-bit BI_RGB only, capped at
+   128x80 pixels per picture, one image per run — pixels on screen, requested and
+   verified byte for byte, not a scaled/alpha/blt-capable compositor.
+
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
 triple-faulting.

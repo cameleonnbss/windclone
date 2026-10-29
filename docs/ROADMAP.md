@@ -1046,6 +1046,23 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       this was the free 24th slot in the start menu (room is 24 on a 1024×768 panel, 23
       programs shipped before it), so `hidden 0` still holds. Honest scope: stored only,
       flat members, one archive per run — the primitive, wired end to end.
+- [x] **A bitmap is decoded and blitted, not typed** (v0.1.34). A surface used to be
+      glyphs only; a program now opens a second, in-band channel by writing RS
+      (`0x1E`) + `R` + four hex digits for the size + `W*H` RGB24 pixels, so no ABI
+      number moves and the pixel buffer stays the kernel's (one `kmalloc`'d array per
+      window, freed on clear and on close). While a record is open its bytes *are*
+      colours: `0x0A` mid-pixel is a green value and not a newline, which is why that
+      branch is checked before every other rule in the parser. `/bin/imgview` is the
+      first producer and decodes a 24-bit BI_RGB BMP honestly — four-byte row padding,
+      bottom-up rows, BGR→RGB — the three mistakes a bitmap decoder actually makes; the
+      scenario decodes the same committed specimen in Python and requires the guest's
+      FNV-1a over the bytes it handed the kernel to match, so a shifted row, a flipped
+      order or a swapped channel fails loudly instead of showing something plausible.
+      Anything it cannot show (other depth, other compression, oversized, truncated
+      pixel span) is refused with its real numbers. `MENU_MAX` went 24 → 28 for the 25th
+      program, still under the panel's 29-row room, so `hidden 0` keeps holding. Honest
+      scope: 24-bit BI_RGB, 128×80 per picture, a file on the machine — a bitmap that
+      arrives as pixels and lands as pixels, not the compositor above it.
 - [ ] Images in the browser window: decode and blit a bitmap the fetched page refers to
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar

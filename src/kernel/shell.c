@@ -21,6 +21,7 @@
 
 #include "shell.h"
 #include "gfx.h"
+#include "kmalloc.h"
 #include "usermode.h"
 #include "proc.h"
 #include "vfs.h"
@@ -53,6 +54,20 @@
 #define COLOR_ESC    0x1C
 #define COLOR_PALETTE 8
 
+/* The pixel escape, and the same reasoning as FS above: a program that has
+ * pictures to show — a decoded image, a chart — has no way to say so through a
+ * text grid, and a syscall for it would be a new ABI to freeze forever. So the
+ * request travels on the wire it already owns. A program writes RS (0x1E, "record
+ * separator"), then 'R', then four hex digits — `WW HH` in pixels — and every
+ * byte after that is one RGB24 pixel, left to right, top to bottom, until W*H
+ * have arrived. The buffer belongs to the kernel and not to the program, so
+ * a picture costs a window 40 KiB of RAM and not a fifth of the program's own
+ * 256 KiB image, and the pixel bytes are read straight off the write the way the
+ * text path already reads its glyphs — same context, same user pages. */
+#define RASTER_ESC    0x1E
+#define RASTER_MAX_W  128
+#define RASTER_MAX_H  80
+
 /* One row of the grid, and the colour each of its cells was painted in. The
  * attribute is a palette index and not an RGB: 17x62 cells per window, six
  * windows and one terminal, and a uint32 per cell would cost more RAM than the
@@ -75,6 +90,26 @@ struct surface {
                                           * first byte would claim a pen move
                                           * that has not happened. */
     int     dirty;                       /* this surface changed since paint */
+
+    /* --- a decoded picture, owned by the kernel ----------------------
+     * See RASTER_ESC above. These are NULL/zero for every surface that never
+     * receives a pixel record — the terminal, and every text program — so the
+     * whole feature costs a pointer and four ints until a program asks for it.
+     * `raster` points at a kmalloc'd w*h array of 0xRRGGBB pixels. */
+    uint32_t *raster;
+    int      rw, rh;                     /* picture dimensions, in pixels      */
+    int      rcnt;                       /* pixels stored so far               */
+    int      rwant;                      /* w*h: the record is done at rcnt     */
+    int      rstage;                     /* 0 none, 1 saw RS (next is 'R'),
+                                          * 3 reading the 4 hex digits,
+                                          * 4 collecting pixel bytes            */
+    char     rhex[8];                    /* the WW HH header, half-parsed       */
+    int      rhn;                        /* hex digits collected so far         */
+    uint8_t  rpix[3];                    /* an RGB24 pixel being assembled      */
+    int      rpixn;                      /* bytes of rpix filled so far         */
+    int      saw_image;                  /* 1 = a whole picture just landed; the
+                                          * console router logs it once, the same
+                                          * way it does a completed colour escape*/
 };
 
 static struct surface term;           /* the shell's own window */
@@ -105,6 +140,18 @@ static int  input_len;
 
 static void surf_clear(struct surface *s)
 {
+    /* A fresh screen drops any picture with it: a form feed means "this is the
+     * whole frame now", and a leftover raster would keep painting under a
+     * program that has moved on to words. The buffer is the kernel's, so this is
+     * the one place it comes back. */
+    if (s->raster != NULL) {
+        kfree(s->raster);
+        s->raster = NULL;
+    }
+    s->rw = s->rh = s->rcnt = s->rwant = 0;
+    s->rstage = s->rhn = s->rpixn = 0;
+    s->saw_image = 0;
+
     for (int r = 0; r < SHELL_ROWS; r++) {
         memset(s->rows[r], 0, sizeof s->rows[r]);
         memset(s->attr[r], 0, sizeof s->attr[r]);
@@ -223,6 +270,16 @@ static void surf_put_exit(struct surface *s, int code)
  * the same reason a terminal can put the caret at a character. */
 static void surf_draw(const struct surface *s, int x, int y)
 {
+    /* A completed picture goes up first, as a plain copy of the kernel's RGB
+     * buffer into the window body; any text the program wrote lands under it.
+     * Only a *whole* record blits — a half-received one is left as text so a
+     * torn frame never shows a band of garbage. */
+    int yoff = 0;
+    if (s->raster != NULL && s->rw > 0 && s->rh > 0 && s->rcnt >= s->rwant) {
+        gfx_blit_surface(s->raster, x, y, s->rw, s->rh, s->rw);
+        yoff = s->rh + 4;
+    }
+
     for (int r = 0; r < SHELL_ROWS; r++) {
         if (s->rows[r][0] == '\0')
             continue;
@@ -244,7 +301,7 @@ static void surf_draw(const struct surface *s, int x, int y)
                 run[i] = s->rows[r][start + i];
             run[len] = '\0';
 
-            gfx_text(x + start * GLYPH_W, y + r * LINE_H, run, color_ink[a], 1);
+            gfx_text(x + start * GLYPH_W, y + yoff + r * LINE_H, run, color_ink[a], 1);
         }
     }
 }
@@ -289,6 +346,8 @@ static void cmd_help(void)
     put_line("  VIEW <FICHIER> AFFICHE UN FICHIER EN COULEUR");
     put_line("  PKG            MONTRE LA PAGE RECUPEREE /NET/FETCHED");
     put_line("  BROWSER        BARRE D'ADRESSE + LA PAGE RECUPEREE");
+    put_line("  UNZIP <A> <D>  DECOMPRESSE UNE ARCHIVE STOCKEE DANS <D>");
+    put_line("  IMGVIEW <F>    AFFICHE UN BITMAP 24 BITS DANS LA FENETRE");
     put_line("CE QUE TU LANCES ICI EST UN PROCESSUS: PID REEL,");
     /* The shell's pid is printed as the number the table holds, not as a "1"
      * written into this file: the claim on the screen is then whatever the
@@ -329,6 +388,11 @@ struct program {
                               * *parsed* by the kernel, not that a program wrote
                               * a byte — the serial port already knows about the
                               * byte, and CI would grep that just as easily.     */
+    int      image_logged;   /* emit "wm: image ... pid" only once, same rule:
+                              * a program that repaints a picture every frame
+                              * would otherwise bury the log in one line per
+                              * frame, and the fact worth testing is that a whole
+                              * RGB24 record was received and can be blitted.    */
     char     name[PROC_NAME_MAX];
     struct surface s;
 };
@@ -345,6 +409,85 @@ static struct program *program_for_pid(int pid)
     return NULL;
 }
 
+/* A hex digit as its value, or -1. The WW HH header is four of them. */
+static int hexval(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
+/* Feed one byte to the picture engine (see RASTER_ESC). Returns 1 when the byte
+ * belonged to a record and the caller must not treat it as text, 0 to fall
+ * through to the row parser. The whole point is that once a record is open its
+ * bytes are RGB24 and nothing else: a 0x0A in the middle of a pixel is a green
+ * value, not a newline, so this branch runs before every other rule in
+ * surf_write. */
+static int raster_feed(struct surface *s, char c)
+{
+    if (s->rstage == 4) {
+        /* Three bytes make one pixel; a partial pixel waits for the next write,
+         * which is why rpix is on the surface and not on the stack. */
+        s->rpix[s->rpixn++] = (uint8_t)c;
+        if (s->rpixn == 3) {
+            s->rpixn = 0;
+            if (s->raster != NULL && s->rcnt < s->rwant)
+                s->raster[s->rcnt++] =
+                    gfx_rgb(s->rpix[0], s->rpix[1], s->rpix[2]);
+            if (s->rcnt >= s->rwant) {
+                s->rstage = 0;
+                s->saw_image = 1;
+                s->dirty = 1;
+            }
+        }
+        return 1;
+    }
+    if (s->rstage == 3) {
+        int v = hexval(c);
+        if (v < 0) {                       /* a broken header: drop the record */
+            s->rstage = 0;
+            s->rhn = 0;
+            return 1;
+        }
+        s->rhex[s->rhn++] = (char)v;
+        if (s->rhn == 4) {
+            int w = (unsigned char)s->rhex[0] * 16 + (unsigned char)s->rhex[1];
+            int h = (unsigned char)s->rhex[2] * 16 + (unsigned char)s->rhex[3];
+            s->rhn = 0;
+            if (w < 1 || h < 1 || w > RASTER_MAX_W || h > RASTER_MAX_H) {
+                s->rstage = 0;             /* empty or too big: refuse */
+                return 1;
+            }
+            uint32_t *buf = kmalloc((size_t)w * h * sizeof(uint32_t));
+            if (buf == NULL) {
+                s->rstage = 0;             /* no room: the picture just doesn't come */
+                return 1;
+            }
+            s->raster = buf;
+            s->rw = w;
+            s->rh = h;
+            s->rcnt = 0;
+            s->rwant = w * h;
+            s->rpixn = 0;
+            s->rstage = 4;
+        }
+        return 1;
+    }
+    if (s->rstage == 1) {
+        s->rstage = (c == 'R') ? 3 : 0;    /* only RS 'R' opens a record */
+        return 1;                          /* RS and its follower are no glyphs */
+    }
+    if (c == RASTER_ESC) {
+        s->rstage = 1;
+        return 1;
+    }
+    return 0;
+}
+
 /* Assemble a chunk of output into a surface's rows. Bytes arrive in whatever
  * sizes the program chose — half a line, a whole file, forty at a time — so a
  * pending row fills until a newline or a full line forces it out. */
@@ -352,6 +495,8 @@ static void surf_write(struct surface *s, const char *data, uint64_t len)
 {
     for (uint64_t i = 0; i < len; i++) {
         char c = data[i];
+        if (raster_feed(s, c))
+            continue;
         if (c == '\r')
             continue;
         if (s->awaiting_attr) {
@@ -439,6 +584,21 @@ static void console_router(const char *data, uint64_t len)
             serial_write_dec((uint64_t)pr->pid);
             serial_write("\n");
         }
+        /* The same once-per-window rule, for a picture that arrived whole: the
+         * kernel saying the RGB24 record closed and can be blitted, keyed to the
+         * dimensions it parsed rather than the ones the program claims, so the
+         * line is a fact about what landed in the buffer. */
+        if (pr->s.saw_image && !pr->image_logged) {
+            pr->s.saw_image = 0;
+            pr->image_logged = 1;
+            serial_write("wm: image ");
+            serial_write_dec((uint64_t)pr->s.rw);
+            serial_write("x");
+            serial_write_dec((uint64_t)pr->s.rh);
+            serial_write(" pid ");
+            serial_write_dec((uint64_t)pr->pid);
+            serial_write("\n");
+        }
         return;
     }
     surf_write(&term, data, len);
@@ -463,6 +623,7 @@ int shell_program_open(const char *name, int pid)
         pr->routed_logged = 0;
         pr->screen_logged = 0;
         pr->color_logged = 0;
+        pr->image_logged = 0;
         int n = 0;
         for (; name[n] != '\0' && n + 1 < PROC_NAME_MAX; n++)
             pr->name[n] = name[n];

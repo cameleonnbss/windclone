@@ -845,6 +845,16 @@ echo '==> a zip archive unpacked into the store (stored extracted, deflated refu
 python3 tools/qemu-desktop.py windclone.iso unzip \
     || fail 'the archive did not unpack into the store, or a deflated member was not refused'
 
+# v0.1.34: a real bitmap painted as pixels. /bin/imgview decodes the committed
+# 24-bit BMP (little-endian header, four-byte row stride, bottom-up rows, BGR to
+# RGB) and hands the exact top-down byte stream to the kernel's new raster channel;
+# the test decodes the same file itself and requires the viewer's digest to equal
+# fnv1a over those bytes, so "an image showed up" means every pixel landed in the
+# right order and not that a count appeared.
+echo '==> a bitmap decoded and blitted into a window (real pixels, verified bytes)'
+python3 tools/qemu-desktop.py windclone.iso img \
+    || fail 'the bitmap did not decode to the pixels the file holds, or the window never took them'
+
 # v0.1.12: the double buffer + damage claim, measured. The scenario reads the
 # kernel's own "gfx: flip <n> rects, <area> px" lines and requires three things:
 # the boot frame flipped the whole screen, a pure mouse move flipped only a

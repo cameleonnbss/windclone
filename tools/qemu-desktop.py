@@ -2019,6 +2019,73 @@ def scenario_actions(sc, mon, W, H):
         mon.type_text("del /tmp/%s\n" % first)
         mark, _ = wait_serial_after(
             mark, r"shell: deleted /tmp/%s -" % re.escape(first))
+
+    elif sc == "img":
+        # v0.1.34: /bin/imgview decodes a 24-bit bitmap and pushes its pixels
+        # through the kernel's raster channel (RS 'R' + WW HH + RGB24). The file
+        # on disk is the source of truth: the test decodes it the way the format
+        # says - little-endian header, four-byte row stride, bottom-up rows, BGR
+        # to RGB - builds the exact top-down byte stream the window should show,
+        # and requires the guest's printed digest to equal fnv1a over those bytes.
+        # That is the whole claim: not "a count appeared" but "these pixels, in
+        # this order, landed in the framebuffer", and it catches every classic
+        # decoder bug (wrong stride shifts rows, forgotten flip mirrors them, a
+        # skipped channel swap recolours the picture).
+        import struct as _st
+
+        raw = spec("rootfs/src/logo.bmp")
+        if raw[:2] != b"BM":
+            raise SystemExit("the specimen lost its BM signature")
+        dataoff = _st.unpack("<I", raw[10:14])[0]
+        w, h = _st.unpack("<ii", raw[18:26])
+        bpp = _st.unpack("<H", raw[28:30])[0]
+        comp = _st.unpack("<I", raw[30:34])[0]
+        topdown = h < 0
+        if topdown:
+            h = -h
+        if bpp != 24 or comp != 0 or not (1 <= w <= 128 and 1 <= h <= 80):
+            raise SystemExit("specimen shape changed unexpectedly: %dbpp "
+                             "comp=%d %dx%d" % (bpp, comp, w, h))
+        stride = (w * 3 + 3) & ~3
+        want = bytearray()
+        for y in range(h):                       # top-down, as the blit wants it
+            fr = y if topdown else (h - 1 - y)
+            base = dataoff + fr * stride
+            for x in range(w):
+                b, g, r = raw[base + x * 3: base + x * 3 + 3]
+                want += bytes((r, g, b))         # BGR on disk -> RGB to screen
+        want = bytes(want)
+
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+
+        mark = len(read_log())
+        mon.type_text("imgview /src/logo.bmp\n")
+        mark, m = wait_serial_after(mark, r"imgview: read (\d+) bytes pid")
+        if int(m.group(1)) != len(raw):
+            raise SystemExit("the bitmap is %d bytes on disk and the reader "
+                             "saw %s" % (len(raw), m.group(1)))
+
+        # The kernel says a whole record landed, keyed to the dimensions it
+        # parsed itself - they must equal the file's own header, and the file's
+        # header must equal what the test decoded.
+        mark, m = wait_serial_after(
+            mark, r"wm: image (\d+)x(\d+) pid")
+        if (int(m.group(1)), int(m.group(2))) != (w, h):
+            raise SystemExit("kernel raster %sx%s, file header %dx%d"
+                             % (m.group(1), m.group(2), w, h))
+
+        mark, m = wait_serial_after(
+            mark, r"imgview: image (\d+)x(\d+) digest 0x([0-9a-f]{8})")
+        if (int(m.group(1)), int(m.group(2))) != (w, h):
+            raise SystemExit("imgview reported %sx%s, the file is %dx%d"
+                             % (m.group(1), m.group(2), w, h))
+        if m.group(3) != fnv1a(want):
+            raise SystemExit("decoded pixels digest to %s, the file decodes to "
+                             "%s - a decode, order or channel bug"
+                             % (m.group(3), fnv1a(want)))
+        wait_serial(r"shell: imgview exited with 0")
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -2185,6 +2252,13 @@ MARKERS = {
                   "unzip: 2 files, 137 bytes into /tmp, refused 1",
                   "shell: unzip exited with 0",
                   "shell: deleted /tmp/notes.md"],
+    # v0.1.34: a bitmap decoded to real pixels. The strict digest match is in the
+    # scenario; these are the lines the claim turns on - the file read whole, the
+    # kernel accepting a whole RGB24 record into a window (its own dimensions, not
+    # the program's say-so), and the viewer's decoded-pixel digest line.
+    "img":       ["imgview: read", "wm: image 48x32 pid",
+                  "imgview: image 48x32 digest 0x",
+                  "shell: imgview exited with 0"],
 }
 
 

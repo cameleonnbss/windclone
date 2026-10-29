@@ -18,3 +18,7 @@ Makefile text eol=lf
 # initrd exactly as stored (tools/mkinitrd.sh tars rootfs/ as-is), so git must
 # not convert its newlines on any host.
 *.zip binary
+# The BMP specimen is a pixel bitmap that /bin/imgview reads byte-for-byte; a
+# newline conversion would repaint the image and break the digest the test
+# recomputes, so it is binary on every host, exactly like the archive above.
+*.bmp binary
