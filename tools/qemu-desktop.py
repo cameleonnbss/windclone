@@ -136,6 +136,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 MON = os.environ.get("WM_MON", "/tmp/wc-wmmon")
@@ -1724,6 +1725,18 @@ def scenario_actions(sc, mon, W, H):
         if lease == "0.0.0.0":
             raise SystemExit("dhcp offer carried yiaddr 0.0.0.0 - the server's "
                              "reply was mis-parsed, not a real lease")
+        # v0.1.29: the transport layer. The kernel ran a TCP three-way handshake
+        # with a real HTTP server (the harness runs one on the host loopback,
+        # reachable at 10.0.2.2), sent a GET, and read the status line back. An
+        # established marker plus a 200 with a non-zero byte count is the honest
+        # proof; a status outside the 100..599 band would mean a mis-parsed body.
+        wait_serial(r"tcp: syn-ack received - connection established")
+        h = wait_serial(r"http: status (\d+), (\d+) bytes read - first web fetch over tcp")
+        status, nbytes = int(h.group(1)), int(h.group(2))
+        if not (100 <= status <= 599):
+            raise SystemExit("bogus http status %d - the response was mis-parsed" % status)
+        if nbytes <= 0:
+            raise SystemExit("http fetch reported 0 bytes - nothing was really read back")
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -1843,15 +1856,17 @@ MARKERS = {
     "chrome":    ["wm: wallpaper cached", "rtc: hardware clock",
                   "rtc: date"],
     # the gateway MAC being neither zeros nor our own address, the icmp ttl being
-    # plausible, and the dhcp yiaddr being non-zero are asserted in the scenario;
-    # these are the lines the receive-then-ping-then-lease claim turns on - the
-    # client armed on top of the driver, a request broadcast, a reply parsed out of
-    # the DMA receive ring, an IPv4/ICMP echo SLIRP answered, and a DHCP offer its
-    # BOOTP server handed back over UDP
+    # plausible, the dhcp yiaddr being non-zero, and the http status/byte count
+    # being real are asserted in the scenario; these are the lines the
+    # receive-ping-lease-fetch claim turns on - the client armed on top of the
+    # driver, ARP resolved, an ICMP echo SLIRP answered, a DHCP lease offered over
+    # UDP, and a TCP three-way handshake plus an HTTP 200 read back from a server
     "net":       ["net: arp/icmp/dhcp client armed", "arp: who-has 10.0.2.2",
                   "arp: 10.0.2.2 is at", "gateway resolved",
                   "icmp: echo request to 10.0.2.2", "host reachable",
-                  "dhcp: discover broadcast", "lease understood"],
+                  "dhcp: discover broadcast", "lease understood",
+                  "tcp: syn-ack received - connection established",
+                  "first web fetch over tcp"],
 }
 
 
@@ -1862,6 +1877,23 @@ def main():
     for f in (LOG, MON, QMP):
         if os.path.exists(f):
             os.remove(f)
+
+    # v0.1.29: the net scenario now fetches a page over TCP. SLIRP exposes the
+    # host's loopback to the guest at 10.0.2.2, so a real HTTP server on the
+    # host becomes the peer the kernel handshakes with and GETs from. Serving a
+    # known page (a fixed word we can look for) keeps the claim honest: the test
+    # passes only if the kernel completes a TCP handshake and reads a 200 back.
+    web = None
+    webdir = None
+    if sc == "net":
+        webdir = tempfile.mkdtemp(prefix="wcweb-")
+        with open(os.path.join(webdir, "index.html"), "w") as fh:
+            fh.write("<html><body>windclone-first-fetch</body></html>\n")
+        web = subprocess.Popen(
+            [sys.executable, "-m", "http.server", "8080",
+             "--bind", "127.0.0.1", "--directory", webdir],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1.0)
 
     proc = subprocess.Popen(
         ["qemu-system-x86_64", "-cdrom", iso, "-m", "512", "-display", "none",
@@ -1921,6 +1953,18 @@ def main():
         except subprocess.TimeoutExpired:
             proc.kill()
         time.sleep(0.3)
+        if web is not None:
+            web.terminate()
+            try:
+                web.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                web.kill()
+        if webdir is not None:
+            try:
+                os.remove(os.path.join(webdir, "index.html"))
+                os.rmdir(webdir)
+            except OSError:
+                pass
 
     text = open(LOG, errors="replace").read()
     missing = [w for w in MARKERS[sc] if w not in text]

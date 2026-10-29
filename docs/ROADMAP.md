@@ -934,8 +934,9 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       What comes next is the phase's real edge: no network. It is being crossed one
       honest slice at a time — the driver and a proven transmit is v0.1.25, ARP and
       a proven receive is v0.1.26, an IPv4/ICMP ping round-trip is v0.1.27, UDP plus a
-      DHCP lease is v0.1.28, and the TCP + HTTP-GET-into-a-window plus a package
-      manager over it are the releases that follow.
+      DHCP lease is v0.1.28, a TCP handshake with an HTTP GET is v0.1.29, and the
+      package manager over it plus a window showing the result are the releases that
+      follow.
 - [x] The **network card wakes up** (v0.1.25). The first honest slice of that edge:
       not a stack, but a driver that finds real silicon and moves a frame through
       it. `pci` grew a public lookup/config API (`pci_find`, `pci_bar`,
@@ -989,7 +990,16 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       now negotiated, not assumed. The scenario refuses a zero yiaddr as a mis-read, and
       the claim stays honest: this is a DISCOVER/OFFER round-trip, not yet a full
       four-step REQUEST/ACK — that would overstate what the receive path has proven.
-- [ ] TCP + an HTTP GET landing in a window, and a package manager over it (v0.1.29)
+- [x] TCP + an **HTTP GET** (v0.1.29). The transport layer with real state: the client
+      runs a SYN / SYN-ACK / ACK three-way handshake against an actual HTTP server, sends
+      `GET / HTTP/1.0`, and reads the response back (`http: status 200, 221 bytes read -
+      first web fetch over tcp`). Each segment carries a pseudo-header checksum (protocol
+      6) and the client tracks send/receive sequence numbers so the peer accepts it. The
+      harness serves the page itself — a throwaway HTTP server on the host loopback that
+      SLIRP exposes at 10.0.2.2 — so the connection is negotiated with a live TCP peer,
+      not a mock. The honest scope: a stop-and-wait client that fetches one page, not a
+      full concurrent stack. What it unlocks is the package manager, which is next.
+- [ ] A package manager over HTTP + showing the fetched page in a window (v0.1.30)
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
 - [ ] A block device driver (ATA or NVMe), so `tmpfs` can stop being the only

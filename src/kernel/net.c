@@ -6,6 +6,7 @@
 #include <stddef.h>
 
 #include "net.h"
+#include "tcp.h"
 #include "e1000.h"
 #include "timer.h"
 #include "log.h"
@@ -25,11 +26,12 @@ static const uint8_t GW_IP[4]  = { 10, 0, 2, 2 };
  * offer is the answer to OUR discover and not some other boot's leftover. */
 #define DHCP_XID 0x0dc1a7e5u
 
-enum { NET_OFF, NET_ARP, NET_PING, NET_DHCP, NET_DONE };
+enum { NET_OFF, NET_ARP, NET_PING, NET_DHCP, NET_TCP, NET_DONE };
 
 static int      state;
 static uint8_t  our_mac[6];
 static uint8_t  gw_mac[6];
+static uint8_t  lease_ip[4];
 static uint64_t last_send;
 static int      tries;
 static int      seq;
@@ -297,6 +299,14 @@ void net_init(void)
 
 void net_visit(void)
 {
+    /* Once the lease is in hand the TCP/HTTP machine owns the pump: it drains
+     * and retransmits on its own cadence, so hand it the loop and step back. */
+    if (state == NET_TCP) {
+        if (tcp_visit())
+            state = NET_DONE;
+        return;
+    }
+
     if (state != NET_ARP && state != NET_PING && state != NET_DHCP)
         return;
 
@@ -334,7 +344,9 @@ void net_visit(void)
                 char s[16];
                 ip_str(ip, s);
                 klog("dhcp: offer %s from 10.0.2.2 - lease understood", s);
-                state = NET_DONE;
+                for (int i = 0; i < 4; i++) lease_ip[i] = ip[i];
+                tcp_init(lease_ip, gw_mac);               /* now fetch over TCP */
+                state = NET_TCP;
                 return;
             }
         }

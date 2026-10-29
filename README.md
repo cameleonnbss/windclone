@@ -400,6 +400,18 @@ On boot the kernel:
    scenario refuses a zero yiaddr, which would mean a mis-read rather than a real lease.
    The one thing this deliberately does not fake is a full four-step REQUEST/ACK: the
    honest claim here is that a UDP datagram we built was accepted and answered.
+32. **fetches a web page over TCP (HTTP)**. The transport layer with real state: the
+   client runs a three-way handshake — SYN, SYN/ACK, ACK — against an actual HTTP
+   server, then sends `GET / HTTP/1.0`, reads the response, and parses its status line
+   (`http: status 200, 221 bytes read - first web fetch over tcp`). Every TCP segment
+   carries a checksum over the same pseudo-header the UDP datagram used, with protocol
+   6 this time, and the client tracks send and receive sequence numbers so the peer's
+   stack accepts it. The harness serves the page itself: it starts a throwaway HTTP
+   server on the host loopback, which the emulator's SLIRP exposes to the guest at
+   10.0.2.2, so the connection is genuinely negotiated with a real TCP peer and not a
+   mock. This is the primitive a package manager is built on — pull a file over HTTP —
+   and the claim is scoped to what is proven: a stop-and-wait client that fetches one
+   page and reads 200 back, not a full concurrent stack.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
