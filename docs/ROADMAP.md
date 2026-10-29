@@ -1063,6 +1063,23 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       program, still under the panel's 29-row room, so `hidden 0` keeps holding. Honest
       scope: 24-bit BI_RGB, 128×80 per picture, a file on the machine — a bitmap that
       arrives as pixels and lands as pixels, not the compositor above it.
+- [ ] inflate (DEFLATE) in `/bin/unzip`, so a *real* archive opens — a stored
+      member is only half of the format, and every `.whl`, `.jar` and most `.zip`
+      files carry compressed entries. Proven by unpacking a deflated entry and
+      matching a digest the test recomputes from the archive's own bytes.
+- [ ] cmd.exe-shaped batch semantics: `@echo off`, `SET` + `%VAR%`, `IF`/`FOR`,
+      `ERRORLEVEL`, `>` and `|`. `bat <NAME>` runs `/tmp/NAME.BAT` line by line
+      today; this is what makes a script written for Windows behave rather than
+      merely echo. Proven by a typed script and a byte-for-byte serial transcript.
+- [ ] the rest of the verbs a person types: `TYPE`, `CD`, `MKDIR`, `MOVE`
+- [ ] a small Python-language interpreter (`/bin/python`) for pure-Python
+      programs — the honest answer to "Python scripts run here". Not CPython:
+      the subset is ints/strings/lists/dicts/f-strings/functions/`import`, and a
+      release never claims a package it has not run. `pip install rich` needs
+      TLS, inflate and a stdlib depth this userland does not have; the sequence
+      and why are in `docs/WINDOWS-VM-PLAN.md`.
+- [ ] `file <path>` reports a PE (machine, subsystem, imports) — inspection is
+      honest; execution is the Wine problem and is not on this roadmap
 - [ ] Images in the browser window: decode and blit a bitmap the fetched page refers to
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar

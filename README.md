@@ -577,7 +577,13 @@ The full plan with checkboxes lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
    once with the timer switching them
 6. ⏳ Shell in C, drivers starting to move to Rust
 7. ⏳ POSIX/Linux compatibility layer (ELF loader + Linux syscall subset)
-8. ⏳ Graphical "windows" shell — earning the *Wind* in WindClone
+8. ⏳ Graphical "windows" shell — earning the *Wind* in *WindClone*
+9. ⏳ "Run real Windows programs" — examined and honestly scoped in
+   [`docs/WINDOWS-VM-PLAN.md`](docs/WINDOWS-VM-PLAN.md): what works today, why a
+   PE loader is not addable to this kernel, and the ladder that is (inflate →
+   batch semantics → the remaining `cmd` verbs → a small Python interpreter →
+   pure-Python packages). VirtualBox settings ship in
+   [`tools/virtualbox/`](tools/virtualbox/).
 
 ## Why these choices?
 

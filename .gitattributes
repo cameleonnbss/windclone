@@ -22,3 +22,10 @@ Makefile text eol=lf
 # newline conversion would repaint the image and break the digest the test
 # recomputes, so it is binary on every host, exactly like the archive above.
 *.bmp binary
+# cmd.exe reads a batch file one line at a time and tolerates a bare LF for
+# simple commands, but label and `goto` resolution is documented against CRLF
+# line endings - a LF-only script can run three lines and then jump to a label
+# it cannot find. So the Windows helpers keep CRLF on every host, unlike the
+# shell scripts above, which are run by bash on Linux.
+*.cmd text eol=crlf
+*.bat text eol=crlf
