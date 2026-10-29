@@ -527,10 +527,35 @@ On boot the kernel:
    flat members and compares each one against what the format says the file is,
    then reads `fixed.bl` back out of the store through `copy` — a byte stream
    that exists nowhere except inside a working inflate — and deletes it. The
-   honest scope: methods 0 and 8, flat names only (an entry carrying `/` is still
-   refused), 4 KiB per member and 8 KiB per archive, one archive per run.
-   `bzip2`/`LZMA` entries and directory trees are not in this, and no line above
-   claims they are.
+   honest scope: methods 0 and 8, flat names only (an entry carrying `/` was still
+   refused at this release — see item 39), 4 KiB per member and 8 KiB per archive,
+   one archive per run. `bzip2`/`LZMA` entries and directory trees were not in
+   this, and no line above claims they are.
+
+39. **unpacks an archive into folders, the way a wheel needs (v0.1.36)**.
+   v0.1.35 could decode any member but still refused one whose name carried a
+   `/`, so a `.whl` — every module of which lives under `demo/` and a metadata
+   directory — unpacked only entry by entry once you renamed it flat. This
+   release lifts the refusal that was actually about *danger*, and keeps the one
+   that was. An entry name is now a relative path: `/bin/unzip` writes
+   `<dest>/demo/__init__.py`, because the store keys a file by its whole path and
+   a nested name is one more key, not a filesystem. A folder record (a name ending
+   in `/`) is skipped, since the store has no directories and an empty file named
+   after one would lie. And the shape that is a real attack — a name with a `..`
+   component or a leading `/`, the zip-slip that drops a file outside the folder
+   you extracted into — is still refused by name and never written.
+   The per-entry line now leads with the digest (`unzip: extracted 0x… 148 b
+   demo/__init__.py`) because a long path pushed the eight hex digits — the whole
+   proof — off the 56-byte log line when it came last; a truncated label never
+   means a truncated file, since the path is proven separately by reading that
+   member back out of the store. Landing it exposed a genuine input bug: the
+   keyboard decoder swallowed scancode `0xAA` as a power-on BAT echo, but in the
+   set-1 stream it reads that byte is the LeftShift *release*, so the first typed
+   underscore left Shift stuck down and every later key came out uppercase. It is
+   fixed in `keyboard.c`, which is what lets a program type a real `__init__.py`.
+   The honest scope: STORED and DEFLATE members under relative paths, 4 KiB per
+   member and 8 KiB per archive; a `..` name is refused, not sanitised; bzip2/LZMA
+   and a true directory tree (this store has no folders) are still out of scope.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

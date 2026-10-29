@@ -1078,11 +1078,21 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       scenario unpacks five members (two stored, three deflated) and reads the
       canned-table one back through `copy`. Honest scope: methods 0 and 8, flat names,
       4 KiB per member, 8 KiB per archive; bzip2/LZMA entries are still refused.
-- [ ] **subdirectory entries in `/bin/unzip`** — a wheel's `demo/__init__.py` is
-      still refused, not because it cannot be decoded (it can now) but because the
-      extractor writes flat names only. The store keys files by their whole path,
-      so this is a name-validation rule plus a test, not a new filesystem; it must
-      keep refusing `..` and an absolute name inside an entry.
+- [x] **subdirectory entries in `/bin/unzip`** (v0.1.36) — a wheel's
+      `demo/__init__.py` now unpacks. An entry name is taken as a relative path,
+      because the store keys files by their whole path (a nested name is one more
+      key, not a filesystem); a folder record (a name ending in `/`) is skipped,
+      and the dangerous shape — a `..` component or a leading `/`, the zip-slip —
+      is still refused by name and never written. The per-entry log line leads
+      with the digest so a long path cannot push the eight hex digits (the proof)
+      off the 56-byte cap, and the nested path is confirmed separately by reading
+      the member back out of the store through `copy`. Getting there surfaced a
+      real input bug: `keyboard.c` swallowed scancode `0xAA` as a power-on BAT
+      echo, but in the set-1 stream that byte is the LeftShift *release*, so the
+      first typed underscore left Shift stuck and every later key came out
+      uppercase — fixed, which is what lets a program type a real `__init__.py`.
+      Honest scope: methods 0 and 8 under relative paths, `..` refused not
+      sanitised, this store still has no directories.
 - [ ] cmd.exe-shaped batch semantics: `@echo off`, `SET` + `%VAR%`, `IF`/`FOR`,
       `ERRORLEVEL`, `>` and `|`. `bat <NAME>` runs `/tmp/NAME.BAT` line by line
       today; this is what makes a script written for Windows behave rather than

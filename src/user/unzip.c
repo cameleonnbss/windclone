@@ -41,21 +41,40 @@
  * the real numbers, exactly the way copy refuses a source too big for the
  * store.
  *
- * The name and the path, kept honest: an entry is extracted to <dest>/<name>.
- * Only flat names are accepted — a name carrying '/' or '..' is refused, so a
- * malicious archive cannot make this program write outside the directory it was
- * pointed at. dest goes through the same path check copy uses.
+ * The name and the path, kept honest. An entry is extracted to <dest>/<name>,
+ * and since v0.1.36 <name> may carry '/': a real archive — a jar, a wheel, a
+ * Windows "extract here" folder — stores its members under directory names
+ * (`demo/__init__.py`, `assets/icon.png`), and the store keys a file by its
+ * whole path, so a nested member is one more key, not a filesystem. What is
+ * still refused is the shape that is actually dangerous: an absolute name (a
+ * leading '/'), a '..' component, or a '.' component, any of which would let an
+ * archive climb out of the destination it was pointed at. A name made only of
+ * the safe alphabet (letters digits _ . - and '/') and free of traversal is
+ * taken as given. A directory entry — a name ending in '/', which is how a ZIP
+ * records a folder — is skipped rather than written, because this store has no
+ * folders and an empty file named after one would be a lie. dest goes through
+ * the same path check copy uses, and the joined path is length-checked against
+ * the store's own limit before it is opened.
  *
- * Why a digest per entry. `unzip: extracted x 1819 bytes` proves a count, and a
- * count can be satisfied by 1819 wrong bytes. FNV-1a over the bytes unpacked —
- * the same 32-bit hash copy and note already print — gives the headless test a
- * way to require that what landed in the store is byte-for-byte what the
- * archive held, and gives a human the same eight hex digits on both sides. It
- * is not cryptographic and no line here says it is. For a deflated entry the
- * bytes hashed are the bytes that came out of inflate, not the compressed run:
- * the test then compares that number against fnv1a over what the archive's own
+ * Why a digest per entry. `unzip: extracted ...` proves a count, and a count can
+ * be satisfied by many wrong bytes. FNV-1a over the bytes unpacked — the same
+ * 32-bit hash copy and note already print — gives the headless test a way to
+ * require that what landed in the store is byte-for-byte what the archive held,
+ * and gives a human the same eight hex digits on both sides. It is not
+ * cryptographic and no line here says it is. For a deflated entry the bytes
+ * hashed are the bytes that came out of inflate, not the compressed run: the
+ * test then compares that number against fnv1a over what the archive's own
  * format says the file is, which is the only comparison that can tell a correct
  * decoder from one that produced 512 plausible-looking wrong bytes.
+ *
+ * Why the digest leads the entry line. Every appender caps a line at 56 bytes
+ * (wcstr.h), and a nested name like `demo-1.0.dist-info/METADATA` is long enough
+ * that if it came first it would push the eight hex digits — the whole proof —
+ * off the end of the line CI greps. So the line is `unzip: extracted 0x<hex>
+ * <n> b <name>`: the digest and the count are fixed-width and always survive,
+ * and only the tail of a very long name can be cut. The path itself is proven
+ * separately, by reading that member back out of the store at its full nested
+ * name, so a truncated label never means a truncated file.
  *
  * The words on screen are French, like every other window in this OS. The lines
  * it logs are English, because they are the lines CI greps.
@@ -72,9 +91,17 @@
  * half-unpacked. */
 #define UNZIP_MAX      8192
 #define UNZIP_PATH_MAX 64
-#define UNZIP_NAME_MAX 24          /* an entry name this program will build a path from */
+#define UNZIP_NAME_MAX 40          /* a relative entry path, dirs included, this program will build */
 #define UNZIP_CHUNK    512
 #define UNZIP_FILE_MAX 4096        /* TMPFS_FILE_MAX: the store's per-file ceiling */
+
+/* What classify_entry() decided about an archive member's name. A wheel or a
+ * jar mixes all three in one file: ordinary members, the folder records that
+ * carry them, and — if someone built it carelessly or on purpose — a name that
+ * would climb out of the destination. Only the first is written. */
+#define ENTRY_OK    0      /* a safe relative path, copied into nm        */
+#define ENTRY_DIR   1      /* ends in '/': a folder record, skipped       */
+#define ENTRY_BAD   2      /* absolute, or a '.' / '..' component: refuse */
 
 #define UNZIP_EXIT_OK       0
 #define UNZIP_EXIT_USAGE    1   /* wrong number of words, or a refused path */
@@ -163,29 +190,54 @@ static int valid_dest(const char *s)
     return 1;
 }
 
-/* An entry name, taken from the header (not NUL-terminated there), validated
- * and copied into nm[]. Flat only: a name with no '/', no '..', at least one
- * character, letters digits _ . - (a dot is how "readme.txt" keeps its type),
- * and short enough to survive the path check. Returns 0 for anything it will
- * not build a path from — a subdirectory entry, or one too long — and the
- * caller refuses it rather than guessing. */
-static int valid_entry(const char *p, unsigned len)
+/* An entry name, taken from the header (not NUL-terminated there), classified
+ * and — for the safe case — copied into nm[]. A '/' is now a path separator, not
+ * a refusal, so a wheel's `demo/__init__.py` unpacks; but the shapes that let an
+ * archive escape the destination are still refused: an absolute name (a leading
+ * '/'), a '.' or '..' component, an empty component from a doubled slash, or any
+ * character outside letters digits _ . -. A name that ends in '/' is a folder
+ * record (ENTRY_DIR): the store has no directories, so it is skipped rather than
+ * written. Anything safe lands in nm[] (whole relative path, separators kept)
+ * and the caller builds <dest>/<nm>. Returns ENTRY_OK/ENTRY_DIR/ENTRY_BAD. */
+static int classify_entry(const char *p, unsigned len)
 {
+    unsigned i;
+
     if (len == 0 || len > UNZIP_NAME_MAX)
-        return 0;
-    for (unsigned i = 0; i < len; i++) {
-        char c = p[i];
-        int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                 (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-';
-        if (!ok)
-            return 0;                     /* '/', and anything else, is refused */
-        if (c == '.' && i + 1 < len && p[i + 1] == '.')
-            return 0;
-    }
-    for (unsigned i = 0; i < len; i++)
+        return ENTRY_BAD;
+    if (p[0] == '/')
+        return ENTRY_BAD;                 /* absolute: would ignore dest */
+
+    for (i = 0; i < len; i++)
         nm[i] = p[i];
     nm[len] = '\0';
-    return 1;
+    if (p[len - 1] == '/')
+        return ENTRY_DIR;                 /* a folder record, nothing to write */
+
+    i = 0;
+    while (i < len) {
+        unsigned j = i;
+        unsigned clen;
+
+        while (j < len && p[j] != '/')
+            j++;
+        clen = j - i;
+        if (clen == 0)
+            return ENTRY_BAD;             /* "//" or a stray separator */
+        if (clen == 1 && p[i] == '.')
+            return ENTRY_BAD;             /* "." adds nothing and hides intent */
+        if (clen == 2 && p[i] == '.' && p[i + 1] == '.')
+            return ENTRY_BAD;             /* ".." climbs out of dest */
+        for (unsigned k = i; k < j; k++) {
+            char c = p[k];
+            int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                     (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-';
+            if (!ok)
+                return ENTRY_BAD;
+        }
+        i = j + 1;                        /* step over the separator */
+    }
+    return ENTRY_OK;
 }
 
 /* dest + '/' + nm, into outpath. dest was length-checked and nm is at most
@@ -344,14 +396,27 @@ void _start(int argc, char **argv)
             break;
         }
 
-        if (!valid_entry(namep, nlen)) {
-            n = wc_app_str(line, 0, "unzip: refused entry ");
-            n = wc_app_bytes(line, n, namep, nlen);
-            n = wc_app_str(line, n, " - only flat names are unpacked");
-            say_pid(n);
-            refused++;
-            off = (unsigned)(dataoff + comp);
-            continue;
+        {
+            int cls = classify_entry(namep, nlen);
+
+            if (cls == ENTRY_DIR) {
+                /* A folder record: the store has no directories, so there is
+                 * nothing to write and nothing refused — say so and move on. */
+                n = wc_app_str(line, 0, "unzip: skipped folder ");
+                n = wc_app_str(line, n, nm);
+                say_pid(n);
+                off = (unsigned)(dataoff + comp);
+                continue;
+            }
+            if (cls == ENTRY_BAD) {
+                n = wc_app_str(line, 0, "unzip: refused entry ");
+                n = wc_app_bytes(line, n, namep, nlen);
+                n = wc_app_str(line, n, " - path escapes the destination");
+                say_pid(n);
+                refused++;
+                off = (unsigned)(dataoff + comp);
+                continue;
+            }
         }
 
         if (flags & 0x08) {
@@ -474,12 +539,12 @@ void _start(int argc, char **argv)
 
         {
             unsigned long digest = wc_fnv1a(src, outlen);
-            n = wc_app_str(line, 0, "unzip: extracted ");
-            n = wc_app_str(line, n, nm);
+            n = wc_app_str(line, 0, "unzip: extracted 0x");
+            n = wc_app_hex(line, n, digest);
             n = wc_app_str(line, n, " ");
             n = wc_app_dec(line, n, outlen);
-            n = wc_app_str(line, n, " bytes digest 0x");
-            n = wc_app_hex(line, n, digest);
+            n = wc_app_str(line, n, " b ");
+            n = wc_app_str(line, n, nm);
             say_pid(n);
         }
         files++;

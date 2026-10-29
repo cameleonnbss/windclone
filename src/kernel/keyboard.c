@@ -225,8 +225,16 @@ static void keyboard_decode(uint8_t sc)
     }
     if (sc == 0xE0) { kb_state = K_E0; return; }
     if (sc == 0xE1) { kb_state = K_E1; return; }
-    if (sc == 0xF0 || sc == 0xAA || sc == 0x00)
-        return; /* set-2 release prefix / BAT echo: not make codes */
+    /* 0xF0 is a set-2 release prefix and 0x00 a spurious gap byte; neither is a
+     * make code. 0xAA is NOT swallowed here: in the set-1 stream this decoder
+     * reads it is the LeftShift *release* (make 0x2A | 0x80), and eating it as
+     * the power-on BAT echo left shift held down forever the first time a chord
+     * lifted it - so every key after an underscore came out uppercase. A real
+     * BAT echo only arrives before any key has been pressed, when treating it as
+     * "shift up" is a no-op; a LeftShift release must clear shift_down, so both
+     * go to the release handler below. */
+    if (sc == 0xF0 || sc == 0x00)
+        return; /* set-2 release prefix / gap byte: not make codes */
 
     int release = (sc & 0x80) != 0;
     uint8_t base = sc & 0x7F;

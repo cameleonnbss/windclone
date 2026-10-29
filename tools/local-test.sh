@@ -834,19 +834,20 @@ echo '==> file verbs on the store (copy -> dir -> ren -> del, archive refused)'
 python3 tools/qemu-desktop.py windclone.iso fileops \
     || fail 'dir/ren/del did not behave over the writable store, or the archive was not read-only'
 
-# v0.1.35: a real ZIP archive unpacked, compressed members included.
-# /bin/unzip reads the committed specimen whole and extracts every flat-named
-# entry byte for byte - the stored ones straight out of the archive, the deflated
-# ones through src/user/inflate.h (stored blocks, the canned tables, dynamic
-# Huffman, LZ77 matches) - each compared to fnv1a over the bytes Python's own
-# zipfile says the file is. A name carrying '/' is still refused, because a
-# program must not take its output path from an archive, and the result is an
-# ordinary store file: copy re-reads the canned-table member back out through a
-# second process and del frees it, which only works because the bytes landed in
-# the writable store, not the read-only archive they came from.
-echo '==> a zip archive unpacked into the store (stored and deflated, nested refused)'
+# v0.1.36: a real ZIP archive unpacked, folder names included.
+# /bin/unzip reads the committed specimen whole and extracts every safe entry
+# byte for byte - flat and nested, stored and deflated (the deflate path runs
+# through src/user/inflate.h) - each compared to fnv1a over the bytes Python's
+# own zipfile says the file is. A member named demo/__init__.py now lands at
+# /tmp/demo/__init__.py, because the store keys a file by its whole path; a
+# folder record (a name ending in '/') is skipped, since the store has no
+# directories; and a name carrying '..' is refused, not written - the zip-slip a
+# naive extractor would plant outside the destination. copy then re-reads the
+# nested deflated member back out through a second process and del frees it,
+# which only works because the bytes landed in the writable store at that path.
+echo '==> a zip archive unpacked into the store (flat and nested, folder skipped, slip refused)'
 python3 tools/qemu-desktop.py windclone.iso unzip \
-    || fail 'the archive did not unpack into the store, or a nested member was not refused'
+    || fail 'the archive did not unpack into the store, or a traversal name was not refused'
 
 # v0.1.34: a real bitmap painted as pixels. /bin/imgview decodes the committed
 # 24-bit BMP (little-endian header, four-byte row stride, bottom-up rows, BGR to

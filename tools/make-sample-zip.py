@@ -218,7 +218,17 @@ PACKED = b"packme packme packme packme packme packme\n" * 16
 FIXED = b"windclone-12" * 4
 STORED_A = bytes((i * 7 + 11) & 0xFF for i in range(90))
 STORED_B = bytes((255 - i * 3) & 0xFF for i in range(64))
-INNER = b"this member has a slash in its name and must be refused\n"
+# v0.1.36: the member that used to be refused for carrying a '/' now unpacks, so
+# the specimen writes it deflated - a compressed nested name, which is exactly
+# what a wheel's demo/__init__.py is. Kept under the digest-line budget so the
+# hex survives the 56-byte cap; the path is proven by a store read-back anyway.
+INNER = (b"\"\"\"A nested member. A real wheel puts its modules under a package\n"
+         b"directory, and since v0.1.36 /bin/unzip honours that name.\"\"\"\n"
+         b"__version__ = \"1.0\"\n")
+# The dangerous shape that stays refused: a name that climbs above the
+# destination. This is not a folder record and not a legal member - it is the
+# zip-slip, and the extractor must name it and skip it, never write it.
+SLIP = b"this byte stream must never reach the store\n"
 
 
 def streams():
@@ -226,19 +236,24 @@ def streams():
     packed = raw_deflate(PACKED)
     fixed = defl_fixed(FIXED, 12)
     stored = defl_stored([STORED_A, STORED_B])
+    inner = raw_deflate(INNER)
     # The reference implementation is the judge: a hand-built stream that zlib
     # cannot read back byte for byte is a bug in this script, not a test case.
     assert zlib.decompress(packed, -15) == PACKED
     assert zlib.decompress(fixed, -15) == FIXED, zlib.decompress(fixed, -15)
     assert zlib.decompress(stored, -15) == STORED_A + STORED_B
+    assert zlib.decompress(inner, -15) == INNER
     return [
         ("readme.txt", README, README, 0),
         ("notes.md", NOTES, NOTES, 0),
         ("packed.dat", packed, PACKED, 8),
         ("fixed.bl", fixed, FIXED, 8),
         ("stored.bl", stored, STORED_A + STORED_B, 8),
-        ("dir/inner.txt", INNER, INNER, 0),
+        ("demo/", b"", b"", 0),          # a folder record: skipped, not written
+        ("demo/__init__.py", inner, INNER, 8),   # nested + deflated: unpacks
+        ("../evil.txt", SLIP, SLIP, 0),  # zip-slip: refused, never written
     ]
+
 
 
 def main():

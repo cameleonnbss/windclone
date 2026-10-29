@@ -170,21 +170,31 @@ PROG_X0, PROG_Y0, PROG_STEP_X, PROG_STEP_Y = 150, 56, 24, 22
 # an edge, and a shrink stops at MIN_W x MIN_H. These mirror the kernel's
 # RESIZE_EDGE / MIN_W / MIN_H so the scenario can drive and assert against them.
 RESIZE_EDGE, MIN_W, MIN_H = 5, 200, 120
-# Characters a scenario may type that are not letters or digits. These are
-# QEMU's monitor key names, and the kernel's own scancode table (keyboard.c
-# map_plain) has to agree: 0x33 ',', 0x34 '.', 0x35 '/' are mapped there, so a
+# Characters a scenario may type that are not letters or digits. Most map to a
+# single QEMU monitor key name the kernel's scancode table (keyboard.c map_plain)
+# has to agree with: 0x33 ',', 0x34 '.', 0x35 '/' are mapped there, so a
 # `sendkey slash` really does land as a '/' in the shell's input buffer.
+#
+# An underscore is not one of those. There is no bare make code for it: on the
+# PS/2 set it is Shift + Minus, and keyboard.c only answers map_shift[0x0C] = '_'
+# while shift is held. `sendkey underscore` is a name QEMU accepts but delivers no
+# usable scancode for, so a wheel member named demo/__init__.py typed back at the
+# prompt arrived as demo/init.py - a silently dropped key, the exact failure the
+# docstring on type_text warns about. So '_' is spelled as the chord the kernel
+# actually decodes, and (having a dash) it goes through QMP like every other
+# chord: press shift, press minus, release both.
 KEYMAP = {" ": "spc", "\n": "ret", "/": "slash", ".": "dot", "-": "minus",
-          "_": "underscore"}
+          "_": "shift-minus"}
 # Key names the *human* monitor has been proved to deliver: the letters and
-# digits every scenario has always typed, plus the spellings KEYMAP maps to.
-# Anything else goes through QMP, because `sendkey` accepts an unknown name,
-# replies nothing, and sends no scancode - a Backspace spelled "bspace" looked
-# exactly like a guest that had lost the key. QMP answers, so a name QEMU does
-# not know fails the run at the keystroke instead of at the assertion 25
-# seconds later.
+# digits every scenario has always typed, plus the unshifted spellings KEYMAP
+# maps to. Anything else goes through QMP, because `sendkey` accepts an unknown
+# name, replies nothing, and sends no scancode - a Backspace spelled "bspace", or
+# an underscore, looked exactly like a guest that had lost the key. QMP answers,
+# so a name QEMU does not know fails the run at the keystroke instead of at the
+# assertion 25 seconds later.
 HMP_OK = set("abcdefghijklmnopqrstuvwxyz0123456789") | {
-    "spc", "ret", "slash", "dot", "minus", "underscore"}
+    "spc", "ret", "slash", "dot", "minus"}
+
 
 # The page the harness serves for the network scenarios. It is a fixed, known
 # body so the pkg test can recompute its FNV-1a here and require the kernel's
@@ -1934,39 +1944,40 @@ def scenario_actions(sc, mon, W, H):
             raise SystemExit("after the delete dir showed %s entries, want %d"
                              % (m4.group(1), n1 - 1))
     elif sc == "unzip":
-        # v0.1.35: /bin/unzip unpacks a real ZIP archive, compressed included.
-        # The archive is the single source of truth: the test opens it with
-        # Python's own zipfile and asks, per member, what the format says the
-        # file is - a flat-named member in method 0 or 8 must come out byte for
-        # byte with the digest of those decoded bytes, and a member whose name
-        # carries a '/' must be refused, because this program writes flat names
-        # only and a malicious archive must not be able to choose the path.
-        # Then the file verbs from v0.1.32 finish the claim on a *deflated*
-        # member: a second program re-digests it out of the store and a delete
-        # frees it, which only works because unzip wrote it into the writable
-        # store and not the read-only archive it came from.
+        # v0.1.36: /bin/unzip unpacks a real archive the way Windows does, folder
+        # names included. The archive is the single source of truth: the test
+        # opens it with Python's own zipfile and asks, per member in archive
+        # order, what the format says the file is. A safe member - flat or nested
+        # - must come out byte for byte, its digest and count on a line whose
+        # label may be the tail of a long path. A folder record (a name ending in
+        # '/') is skipped: this store has no directories. And a name that climbs
+        # above the destination (a '..' component) is refused, never written - the
+        # zip-slip a naive extractor would happily plant outside the folder.
         import io
         import zipfile as _zf
 
         raw = spec("rootfs/src/sample.zip")
         zf = _zf.ZipFile(io.BytesIO(raw))
-        flat, nested = [], []
+        plan = []                        # (kind, name, method, data), archive order
         for info in zf.infolist():
-            if info.is_dir():
-                continue
-            if "/" in info.filename:
-                nested.append(info.filename)
+            name = info.filename
+            if info.is_dir() or name.endswith("/"):
+                plan.append(("folder", name, 0, b""))
+            elif ".." in name.split("/"):
+                plan.append(("slip", name, 0, b""))
             else:
-                flat.append((info.filename, info.compress_type,
-                             zf.read(info.filename)))
-        if not flat or not nested:
-            raise SystemExit("the specimen must hold both a flat member and a "
-                             "nested one (flat %d, nested %d)"
-                             % (len(flat), len(nested)))
-        methods = {m for _, m, _ in flat}
-        if 8 not in methods:
-            raise SystemExit("the specimen has no deflated member: the whole "
-                             "point of this release is method 8")
+                plan.append(("file", name, info.compress_type, zf.read(name)))
+        if sum(1 for k, *_ in plan if k == "file") < 2:
+            raise SystemExit("the specimen must hold more than one real member")
+        if not any(k == "folder" for k, *_ in plan):
+            raise SystemExit("the specimen lost its folder record")
+        if not any(k == "slip" for k, *_ in plan):
+            raise SystemExit("the specimen lost its path-traversal member")
+        safe = [(n, m, d) for k, n, m, d in plan if k == "file"]
+        if not any(m == 8 for _, m, _ in safe):
+            raise SystemExit("the specimen has no deflated member")
+        if not any("/" in n for n, _, _ in safe):
+            raise SystemExit("the specimen has no nested member to unpack")
 
         tw = min(TERM_W, W - 40)
         tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
@@ -1981,63 +1992,71 @@ def scenario_actions(sc, mon, W, H):
                              "saw %s" % (len(raw), m.group(1)))
 
         total = 0
-        for name, method, data in flat:          # archive order, not ours
+        files = folders = slips = 0
+        for kind, name, method, data in plan:        # archive order, not ours
+            if kind == "folder":
+                mark, _ = wait_serial_after(
+                    mark, r"unzip: skipped folder %s" % re.escape(name))
+                folders += 1
+                continue
+            if kind == "slip":
+                mark, _ = wait_serial_after(
+                    mark, r"unzip: refused entry %s" % re.escape(name))
+                slips += 1
+                continue
             mark, m = wait_serial_after(
-                mark, r"unzip: extracted %s (\d+) bytes digest 0x([0-9a-f]{8})"
+                mark, r"unzip: extracted 0x([0-9a-f]{8}) (\d+) b %s"
                       % re.escape(name))
-            if int(m.group(1)) != len(data) or m.group(2) != fnv1a(data):
+            if int(m.group(2)) != len(data) or m.group(1) != fnv1a(data):
                 raise SystemExit("%s (method %d): unpacked %s bytes digest %s, "
                                  "want %d %s"
-                                 % (name, method, m.group(1), m.group(2),
+                                 % (name, method, m.group(2), m.group(1),
                                     len(data), fnv1a(data)))
             total += len(data)
-        for name in nested:
-            mark, _ = wait_serial_after(
-                mark, r"unzip: refused entry %s" % re.escape(name))
+            files += 1
 
         mark, m = wait_serial_after(
             mark, r"unzip: (\d+) files, (\d+) bytes into /tmp, refused (\d+)")
-        if (int(m.group(1)) != len(flat) or int(m.group(2)) != total
-                or int(m.group(3)) != len(nested)):
+        if (int(m.group(1)) != files or int(m.group(2)) != total
+                or int(m.group(3)) != slips):
             raise SystemExit("summary says %s files %s bytes refused %s, "
                              "want %d %d %d"
                              % (m.group(1), m.group(2), m.group(3),
-                                len(flat), total, len(nested)))
+                                files, total, slips))
         wait_serial(r"shell: unzip exited with 0")
 
-        # The round trip goes through the member that only exists if inflate
-        # worked - and through the canned-table block in preference to the
-        # zlib-produced ones, because those three bytes of BTYPE=01 are what no
-        # other path in this decoder touches. A different program opens it out
-        # of the store and must answer with the digest the archive's own format
-        # says the file is.
-        packed = None
-        for name, method, data in flat:
-            if method == 8:
-                if packed is None:
-                    packed = (name, data)
-                if name == "fixed.bl":
-                    packed = (name, data)
-                    break
-        if packed is None:
-            raise SystemExit("no deflated member to read back")
-        name, data = packed
+        # The nested path is the whole claim of this release, and a digest on a
+        # log line is only half of it: another program must be able to open the
+        # file at <dest>/<name-with-a-slash> out of the store and answer with the
+        # bytes the archive's own format says are there. fixed.bl is read back
+        # first to free a slot (the store is eight files), then the nested,
+        # deflated member - so the round trip proves a compressed file living
+        # under a directory name exists nowhere except inside a working extractor.
         mark = len(read_log())
-        mon.type_text("copy /tmp/%s /tmp/verify\n" % name)
+        mon.type_text("del /tmp/fixed.bl\n")
+        mark, _ = wait_serial_after(mark, r"shell: deleted /tmp/fixed\.bl -")
+
+        nested = next((n for n, m, d in safe if "/" in n and m == 8), None)
+        if nested is None:
+            raise SystemExit("no nested deflated member to read back")
+        want = next(fnv1a(d) for n, m, d in safe if n == nested)
+        mark = len(read_log())
+        mon.type_text("copy /tmp/%s /tmp/verify\n" % nested)
         mark, m = wait_serial_after(mark, r"copy: digest 0x([0-9a-f]{8}) pid")
-        if m.group(1) != fnv1a(data):
+        if m.group(1) != want:
             raise SystemExit("%s read back through the store digests to %s and "
                              "the archive member to %s"
-                             % (name, m.group(1), fnv1a(data)))
+                             % (nested, m.group(1), want))
         wait_serial(r"shell: copy exited with 0")
 
-        # And it can go, which only succeeds because it lives in the writable
-        # store: the archive's own copy of the same name would be refused as
-        # read-only.
+        # And the nested file can go, which only succeeds because it lives in the
+        # writable store under that exact path: the archive's own copy would be
+        # refused as read-only, and a flat-name store could not have held it.
         mark = len(read_log())
-        mon.type_text("del /tmp/%s\n" % name)
+        mon.type_text("del /tmp/%s\n" % nested)
         mark, _ = wait_serial_after(
-            mark, r"shell: deleted /tmp/%s -" % re.escape(name))
+            mark, r"shell: deleted /tmp/%s -" % re.escape(nested))
+
 
     elif sc == "img":
         # v0.1.34: /bin/imgview decodes a 24-bit bitmap and pushes its pixels
@@ -2261,21 +2280,21 @@ MARKERS = {
                   "shell: deleted /tmp/dst2", "entries left",
                   "shell: del refused /bin/hello - the archive is read-only",
                   "shell: del refused /tmp/ghost - no such file"],
-    # v0.1.35: a real ZIP unpacked, compressed members included. The strict
-    # byte/digest comparisons are in the scenario; these are the lines the claim
-    # turns on - the archive read whole, each flat member out byte for byte
-    # including the three deflated ones (dynamic trees, the canned tables and a
-    # stored block), the nested name refused because a program must not get its
-    # path from an archive, a summary that counts both, and the shell's exit.
-    "unzip":     ["unzip: read", "unzip: extracted readme.txt",
-                  "unzip: extracted notes.md",
-                  "unzip: extracted packed.dat",
-                  "unzip: extracted fixed.bl",
-                  "unzip: extracted stored.bl",
-                  "unzip: refused entry dir/inner.txt",
-                  "unzip: 5 files, 1011 bytes into /tmp, refused 1",
+    # v0.1.36: a real ZIP unpacked, folder names included. The strict byte/digest
+    # comparisons are in the scenario; these are the lines the claim turns on -
+    # the archive read whole, each safe member out byte for byte (flat and nested,
+    # stored and deflated) with the digest leading the line, the folder record
+    # skipped, the path-traversal member refused rather than written, a summary
+    # that counts them, and the nested file read back out of the store.
+    "unzip":     ["unzip: read", "b readme.txt", "b notes.md",
+                  "b packed.dat", "b fixed.bl", "b stored.bl",
+                  "unzip: skipped folder demo/", "b demo/__init__.py",
+                  "unzip: refused entry ../evil.txt",
+                  "unzip: 6 files,", "refused 1",
                   "shell: unzip exited with 0",
-                  "shell: deleted /tmp/fixed.bl"],
+                  "shell: deleted /tmp/fixed.bl",
+                  "shell: copy exited with 0",
+                  "shell: deleted /tmp/demo/__init__.py"],
     # v0.1.34: a bitmap decoded to real pixels. The strict digest match is in the
     # scenario; these are the lines the claim turns on - the file read whole, the
     # kernel accepting a whole RGB24 record into a window (its own dimensions, not
