@@ -455,6 +455,26 @@ On boot the kernel:
    The honest scope: a flat RAM store, so no directories, no move across stores (that
    is copy-then-del, and `copy` already ships), and nothing survives a reboot.
 
+36. **unpacks a real ZIP archive (v0.1.33)**.
+   `unzip /src/sample.zip /tmp` reads the whole archive into memory, walks its
+   sequential local file headers, and for every **stored** (uncompressed) member
+   writes the bytes into the writable store under `<dest>/<name>` — each one
+   printed with an FNV-1a digest the test recomputes from the archive's own bytes,
+   so "unzipped" means byte-for-byte and not merely "a count appeared". A
+   **deflated** member is *refused* rather than corrupted: this userland carries no
+   inflate engine, and an extractor that quietly wrote garbage under the original
+   name would be worse than one that says what it cannot do. Names are kept flat —
+   an entry carrying `/` or `..` is refused, so no archive can make it escape the
+   directory it was pointed at — and everything it unpacks lands in the store, which
+   is why the v0.1.32 verbs finish the proof: `copy` reads a member back out through
+   a *second* process at the same digest, and `del` removes it (a name the read-only
+   archive also holds is refused, so a successful delete proves it was the store's).
+   `tools/make-sample-zip.py` regenerates the committed specimen; the test opens that
+   same file with Python's own `zipfile` and derives every expectation from it. The
+   honest scope: stored entries only (no inflate yet), flat members (no subdirectory
+   trees), one archive per run — the primitive, wired end to end and proven by a
+   digest rather than a length.
+
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
 triple-faulting.

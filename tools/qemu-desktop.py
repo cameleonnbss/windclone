@@ -1933,6 +1933,92 @@ def scenario_actions(sc, mon, W, H):
         if int(m4.group(1)) != n1 - 1:
             raise SystemExit("after the delete dir showed %s entries, want %d"
                              % (m4.group(1), n1 - 1))
+    elif sc == "unzip":
+        # v0.1.33: /bin/unzip unpacks a real ZIP archive. The archive is the
+        # single source of truth: the test opens it with Python's own zipfile,
+        # asks which members are STORED (must come out byte for byte) and which
+        # are DEFLATED (this userland has no inflate, so must be refused, never
+        # written as garbage), and requires the guest's per-entry digests to
+        # equal fnv1a over the bytes the archive actually holds. Then the file
+        # verbs from v0.1.32 finish the claim: an extracted byte is readable by
+        # a *second* program (copy re-digests it out of the store) and can be
+        # deleted - which only works because unzip put it in the writable store,
+        # not the read-only archive it was read from.
+        import io
+        import zipfile as _zf
+
+        raw = spec("rootfs/src/sample.zip")
+        zf = _zf.ZipFile(io.BytesIO(raw))
+        stored, deflated = {}, []
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            if info.compress_type == _zf.ZIP_STORED:
+                stored[info.filename] = zf.read(info.filename)
+            else:
+                deflated.append(info.filename)
+        if not stored or not deflated:
+            raise SystemExit("the specimen must hold both a stored and a "
+                             "deflated member (stored %d, deflated %d)"
+                             % (len(stored), len(deflated)))
+
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+
+        mark = len(read_log())
+        mon.type_text("unzip /src/sample.zip /tmp\n")
+        mark, m = wait_serial_after(
+            mark, r"unzip: read (\d+) bytes from /src/sample\.zip pid")
+        if int(m.group(1)) != len(raw):
+            raise SystemExit("the archive is %d bytes on disk and the reader "
+                             "saw %s" % (len(raw), m.group(1)))
+
+        total = 0
+        for name, data in stored.items():
+            mark, m = wait_serial_after(
+                mark, r"unzip: extracted %s (\d+) bytes digest 0x([0-9a-f]{8})"
+                      % re.escape(name))
+            if int(m.group(1)) != len(data) or m.group(2) != fnv1a(data):
+                raise SystemExit("%s: unpacked %s bytes digest %s, want %d %s"
+                                 % (name, m.group(1), m.group(2),
+                                    len(data), fnv1a(data)))
+            total += len(data)
+        for name in deflated:
+            mark, _ = wait_serial_after(
+                mark, r"unzip: refused deflated entry %s" % re.escape(name))
+
+        mark, m = wait_serial_after(
+            mark, r"unzip: (\d+) files, (\d+) bytes into /tmp, refused (\d+)")
+        if (int(m.group(1)) != len(stored) or int(m.group(2)) != total
+                or int(m.group(3)) != len(deflated)):
+            raise SystemExit("summary says %s files %s bytes refused %s, "
+                             "want %d %d %d"
+                             % (m.group(1), m.group(2), m.group(3),
+                                len(stored), total, len(deflated)))
+        wait_serial(r"shell: unzip exited with 0")
+
+        # The extracted member is now an ordinary store file: a different
+        # program reads it back and must answer with the digest the archive
+        # held, so "unzipped" means the bytes round-tripped and not just that a
+        # count was reported.
+        first = sorted(stored)[0]
+        mark = len(read_log())
+        mon.type_text("copy /tmp/%s /tmp/verify\n" % first)
+        mark, m = wait_serial_after(mark, r"copy: digest 0x([0-9a-f]{8}) pid")
+        if m.group(1) != fnv1a(stored[first]):
+            raise SystemExit("read back through the store digests to %s and "
+                             "the archive member to %s"
+                             % (m.group(1), fnv1a(stored[first])))
+        wait_serial(r"shell: copy exited with 0")
+
+        # And it can go, which only succeeds because it lives in the writable
+        # store: the archive's own copy of the same name would be refused as
+        # read-only.
+        mark = len(read_log())
+        mon.type_text("del /tmp/%s\n" % first)
+        mark, _ = wait_serial_after(
+            mark, r"shell: deleted /tmp/%s -" % re.escape(first))
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -2089,6 +2175,16 @@ MARKERS = {
                   "shell: deleted /tmp/dst2", "entries left",
                   "shell: del refused /bin/hello - the archive is read-only",
                   "shell: del refused /tmp/ghost - no such file"],
+    # v0.1.33: a real ZIP unpacked. The strict byte/digest comparisons are in the
+    # scenario; these are the lines the claim turns on - the archive read whole,
+    # each stored member out byte for byte, the deflated member refused rather
+    # than corrupted, a summary that counts both, and the shell's exit line.
+    "unzip":     ["unzip: read", "unzip: extracted readme.txt",
+                  "unzip: extracted notes.md",
+                  "unzip: refused deflated entry packed.dat",
+                  "unzip: 2 files, 137 bytes into /tmp, refused 1",
+                  "shell: unzip exited with 0",
+                  "shell: deleted /tmp/notes.md"],
 }
 
 

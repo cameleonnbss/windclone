@@ -834,6 +834,17 @@ echo '==> file verbs on the store (copy -> dir -> ren -> del, archive refused)'
 python3 tools/qemu-desktop.py windclone.iso fileops \
     || fail 'dir/ren/del did not behave over the writable store, or the archive was not read-only'
 
+# v0.1.33: a real ZIP archive unpacked. /bin/unzip reads the committed specimen
+# whole, extracts every STORED member byte for byte (its own digest compared to
+# fnv1a over the bytes the archive holds), refuses the DEFLATED member instead
+# of writing corrupt bytes, and the result is an ordinary store file - copied
+# back out by a second program and deleted through the v0.1.32 verbs, which only
+# work because the bytes landed in the writable store, not the read-only archive
+# they came from.
+echo '==> a zip archive unpacked into the store (stored extracted, deflated refused)'
+python3 tools/qemu-desktop.py windclone.iso unzip \
+    || fail 'the archive did not unpack into the store, or a deflated member was not refused'
+
 # v0.1.12: the double buffer + damage claim, measured. The scenario reads the
 # kernel's own "gfx: flip <n> rects, <area> px" lines and requires three things:
 # the boot frame flipped the whole screen, a pure mouse move flipped only a

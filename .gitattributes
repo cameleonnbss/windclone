@@ -14,3 +14,7 @@ Makefile text eol=lf
 *.bin binary
 *.efi binary
 *.iso binary
+# The ZIP specimen is read byte-for-byte by /bin/unzip and packed into the
+# initrd exactly as stored (tools/mkinitrd.sh tars rootfs/ as-is), so git must
+# not convert its newlines on any host.
+*.zip binary

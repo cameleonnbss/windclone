@@ -1030,6 +1030,22 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       counts it via `dir`, renames and re-counts (same entry), deletes and re-counts
       (one fewer), then fires both refusals. Honest scope: a flat RAM store — no
       directories, no cross-store move (that is copy-then-del), nothing survives reboot.
+- [x] **A real ZIP archive unpacks into the store** (v0.1.33). `/bin/unzip` reads an
+      archive whole, walks its sequential local file headers, and writes every
+      **stored** member into the writable store under `<dest>/<name>`, printing an
+      FNV-1a digest the test recomputes from the archive's own bytes — so a byte that
+      round-tripped is proven, not counted. A **deflated** member is *refused* rather
+      than corrupted (no inflate engine in a libc-less userland), a name carrying `/`
+      or `..` is refused (no escaping the target directory), and an oversized or
+      size-disagreeing entry is refused with its real numbers. Everything lands in the
+      store, so the v0.1.32 verbs close the loop: `copy` re-reads a member through a
+      second process at the same digest, and `del` removes it — a refusal against the
+      same name in the read-only archive is what proves the deleted one was the store's.
+      `tools/make-sample-zip.py` regenerates the committed specimen; the scenario opens
+      that same file with Python's `zipfile` and derives every expectation from it, and
+      this was the free 24th slot in the start menu (room is 24 on a 1024×768 panel, 23
+      programs shipped before it), so `hidden 0` still holds. Honest scope: stored only,
+      flat members, one archive per run — the primitive, wired end to end.
 - [ ] Images in the browser window: decode and blit a bitmap the fetched page refers to
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
