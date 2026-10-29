@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """WindClone — build a real, DEFLATE-compressed wheel as a test specimen.
 
-/bin/unzip (v0.1.33) extracts STORED members and refuses deflated ones, because
-this userland carries no inflate decoder. That refusal is the wall this specimen
-exists to knock down: a `.whl` you can actually install is a ZIP whose entries
-are compressed, so the first honest step towards "fetch a package over the HTTP
-client we already have and unpack it" is a decoder for method 8.
+/bin/unzip can decode a deflated member since v0.1.35 (src/user/inflate.h), so
+the wall a `.whl` still hits is the *name*: every entry of a wheel lives under a
+directory (`demo/__init__.py`, `demo-1.0.dist-info/METADATA`), and unzip writes
+flat names only — a program must not take its output path from an archive. That
+refusal is the wall this specimen exists to knock down once extraction learns
+subdirectories: a `.whl` you can actually install is a ZIP whose entries are both
+compressed *and* nested, produced here by the reference implementation rather
+than by anything in this repository.
 
 The file this writes is *not* a stub and not a hand-made guess: it is written by
 Python's own zipfile with ZIP_DEFLATED, which is the same LZ77+Huffman output

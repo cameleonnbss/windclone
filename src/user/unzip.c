@@ -12,16 +12,26 @@
  * format. No new syscall number, no new ABI surface — the frozen int-0x80
  * contract in wcabi.h is untouched.
  *
- * What "stored" means, and why a deflated entry is refused and not faked:
- * a ZIP local file header records, per entry, a two-byte compression method.
- * Method 0 is STORED — the bytes are already the file, no decoding. Methods 8
- * and up are deflate and friends, which need a whole inflate engine. This is a
- * freestanding userland with no zlib, so it does the honest half: it extracts
- * every stored entry byte for byte, and when it meets a deflated entry it says
- * so and moves past it rather than writing garbage that names itself the file.
- * A copier that quietly produced a corrupt file would be worse than one that
- * admits what it cannot do — the same rule /bin/note applies to a truncated
- * document (v0.1.23) and copy applies to an oversized source.
+ * What "stored" and "deflated" mean, and what this program does with each. A
+ * ZIP local file header records, per entry, a two-byte compression method.
+ * Method 0 is STORED — the bytes in the archive are already the file. Method 8
+ * is DEFLATE, the format every real archive and every Python wheel uses, and it
+ * needs an inflate engine. v0.1.33 had the walk and the store but not the
+ * engine, so it extracted the stored half and refused the rest. This release
+ * adds the engine: inflate.h decodes method 8 here, in userland, in the same
+ * program, with no new syscall and nothing imported from zlib.
+ *
+ * The refusals that stay, and why they stay. A method that is neither 0 nor 8 is
+ * named and skipped: bzip2 and LZMA entries are not this decoder's format and
+ * guessing is how a corrupt file ends up called readme.txt. A deflated entry
+ * whose decoded length disagrees with the size its own header claims is refused
+ * with both numbers, because a stream that runs short or long is a damaged
+ * archive — writing what came out anyway would swap "incomplete" for "done"
+ * silently. And an entry that would overflow the store's per-file limit is
+ * refused with its real size, exactly the way /bin/copy refuses an oversized
+ * source. A copier that quietly produced a corrupt file is worse than one that
+ * admits what it cannot do — the rule /bin/note applies to a truncated document
+ * (v0.1.23) is the rule this program follows.
  *
  * Why the archive is read whole into a buffer before a byte is unpacked: so
  * that an input which is not a ZIP at all (bad signature) destroys nothing, and
@@ -41,7 +51,11 @@
  * the same 32-bit hash copy and note already print — gives the headless test a
  * way to require that what landed in the store is byte-for-byte what the
  * archive held, and gives a human the same eight hex digits on both sides. It
- * is not cryptographic and no line here says it is.
+ * is not cryptographic and no line here says it is. For a deflated entry the
+ * bytes hashed are the bytes that came out of inflate, not the compressed run:
+ * the test then compares that number against fnv1a over what the archive's own
+ * format says the file is, which is the only comparison that can tell a correct
+ * decoder from one that produced 512 plausible-looking wrong bytes.
  *
  * The words on screen are French, like every other window in this OS. The lines
  * it logs are English, because they are the lines CI greps.
@@ -49,6 +63,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "wcstr.h"
+#include "inflate.h"       /* the method-8 decoder, userland-side, no zlib */
 
 /* Largest archive this program will read into memory. The store caps a file at
  * TMPFS_FILE_MAX (src/kernel/tmpfs.h, 4096); an archive is a bag of files plus
@@ -73,6 +88,10 @@ static char line[64];
 static char dest[UNZIP_PATH_MAX];
 static char outpath[UNZIP_PATH_MAX];
 static char nm[UNZIP_NAME_MAX + 1];
+/* The deflated entry's decoded bytes, one per-file ceiling at a time. Static for
+ * the same reason zipbuf is: this userland has no heap on the path a program
+ * takes to write a file, and a 4 KiB local would be 4 KiB of a 16 KiB stack. */
+static unsigned char outbuf[UNZIP_FILE_MAX];
 
 /* Little-endian reads: the ZIP format is byte-for-byte LE on every platform,
  * and casting the buffer to a wider type would carry the host's endianness and
@@ -313,6 +332,8 @@ void _start(int argc, char **argv)
         unsigned elen = le16(zipbuf + off + 28);
         unsigned long dataoff = (unsigned long)off + 30 + nlen + elen;
         const char *namep = zipbuf + off + 30;
+        const char *src;
+        unsigned long outlen;
         unsigned n;
 
         if (dataoff + comp > (unsigned long)len) {
@@ -343,8 +364,8 @@ void _start(int argc, char **argv)
             say_pid(n);
             break;
         }
-        if (method != 0) {
-            n = wc_app_str(line, 0, "unzip: refused deflated entry ");
+        if (method != 0 && method != 8) {
+            n = wc_app_str(line, 0, "unzip: refused ");
             n = wc_app_str(line, n, nm);
             n = wc_app_str(line, n, " - method ");
             n = wc_app_dec(line, n, method);
@@ -353,18 +374,18 @@ void _start(int argc, char **argv)
             off = (unsigned)(dataoff + comp);
             continue;
         }
-        if (comp > UNZIP_FILE_MAX) {
+        if (uncomp > UNZIP_FILE_MAX) {
             n = wc_app_str(line, 0, "unzip: refused ");
             n = wc_app_str(line, n, nm);
             n = wc_app_str(line, n, " - ");
-            n = wc_app_dec(line, n, comp);
+            n = wc_app_dec(line, n, uncomp);
             n = wc_app_str(line, n, " bytes over the store's limit");
             say_pid(n);
             refused++;
             off = (unsigned)(dataoff + comp);
             continue;
         }
-        if (uncomp != comp) {
+        if (method == 0 && uncomp != comp) {
             n = wc_app_str(line, 0, "unzip: refused ");
             n = wc_app_str(line, n, nm);
             n = wc_app_str(line, n, " - stored entry sizes disagree");
@@ -372,6 +393,44 @@ void _start(int argc, char **argv)
             refused++;
             off = (unsigned)(dataoff + comp);
             continue;
+        }
+
+        /* The bytes to store, and how many. Stored: the archive's own run.
+         * Deflated: inflate it first, into the program's own buffer, and only
+         * hand the store a file once the whole stream decoded and came out the
+         * length the header promised. */
+        src = zipbuf + dataoff;
+        outlen = comp;
+        if (method == 8) {
+            unsigned long got = 0;
+            int err = inflate_bytes((const unsigned char *)(zipbuf + dataoff),
+                                    comp, outbuf, UNZIP_FILE_MAX, &got);
+
+            if (err != INFLATE_OK) {
+                n = wc_app_str(line, 0, "unzip: inflate failed on ");
+                n = wc_app_str(line, n, nm);
+                n = wc_app_str(line, n, " code ");
+                n = wc_app_dec(line, n, (unsigned long)err);
+                say_pid(n);
+                refused++;
+                off = (unsigned)(dataoff + comp);
+                continue;
+            }
+            if (got != uncomp) {
+                n = wc_app_str(line, 0, "unzip: refused ");
+                n = wc_app_str(line, n, nm);
+                n = wc_app_str(line, n, " - got ");
+                n = wc_app_dec(line, n, got);
+                n = wc_app_str(line, n, " of ");
+                n = wc_app_dec(line, n, uncomp);
+                n = wc_app_str(line, n, " bytes");
+                say_pid(n);
+                refused++;
+                off = (unsigned)(dataoff + comp);
+                continue;
+            }
+            src = (const char *)outbuf;
+            outlen = got;
         }
 
         if (!build_outpath()) {
@@ -397,14 +456,14 @@ void _start(int argc, char **argv)
                 off = (unsigned)(dataoff + comp);
                 continue;
             }
-            wrote = wc_write(fd, zipbuf + dataoff, comp);
+            wrote = wc_write(fd, src, outlen);
             wc_close(fd);
 
-            if (wrote != (long)comp) {
+            if (wrote != (long)outlen) {
                 n = wc_app_str(line, 0, "unzip: store took ");
                 n = wc_app_dec(line, n, (unsigned long)(wrote < 0 ? 0 : wrote));
                 n = wc_app_str(line, n, " of ");
-                n = wc_app_dec(line, n, comp);
+                n = wc_app_dec(line, n, outlen);
                 n = wc_app_str(line, n, " bytes for ");
                 n = wc_app_str(line, n, nm);
                 say_pid(n);
@@ -414,17 +473,17 @@ void _start(int argc, char **argv)
         }
 
         {
-            unsigned long digest = wc_fnv1a(zipbuf + dataoff, comp);
+            unsigned long digest = wc_fnv1a(src, outlen);
             n = wc_app_str(line, 0, "unzip: extracted ");
             n = wc_app_str(line, n, nm);
             n = wc_app_str(line, n, " ");
-            n = wc_app_dec(line, n, comp);
+            n = wc_app_dec(line, n, outlen);
             n = wc_app_str(line, n, " bytes digest 0x");
             n = wc_app_hex(line, n, digest);
             say_pid(n);
         }
         files++;
-        bytes += comp;
+        bytes += outlen;
         off = (unsigned)(dataoff + comp);
     }
 

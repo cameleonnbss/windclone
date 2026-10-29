@@ -834,16 +834,19 @@ echo '==> file verbs on the store (copy -> dir -> ren -> del, archive refused)'
 python3 tools/qemu-desktop.py windclone.iso fileops \
     || fail 'dir/ren/del did not behave over the writable store, or the archive was not read-only'
 
-# v0.1.33: a real ZIP archive unpacked. /bin/unzip reads the committed specimen
-# whole, extracts every STORED member byte for byte (its own digest compared to
-# fnv1a over the bytes the archive holds), refuses the DEFLATED member instead
-# of writing corrupt bytes, and the result is an ordinary store file - copied
-# back out by a second program and deleted through the v0.1.32 verbs, which only
-# work because the bytes landed in the writable store, not the read-only archive
-# they came from.
-echo '==> a zip archive unpacked into the store (stored extracted, deflated refused)'
+# v0.1.35: a real ZIP archive unpacked, compressed members included.
+# /bin/unzip reads the committed specimen whole and extracts every flat-named
+# entry byte for byte - the stored ones straight out of the archive, the deflated
+# ones through src/user/inflate.h (stored blocks, the canned tables, dynamic
+# Huffman, LZ77 matches) - each compared to fnv1a over the bytes Python's own
+# zipfile says the file is. A name carrying '/' is still refused, because a
+# program must not take its output path from an archive, and the result is an
+# ordinary store file: copy re-reads the canned-table member back out through a
+# second process and del frees it, which only works because the bytes landed in
+# the writable store, not the read-only archive they came from.
+echo '==> a zip archive unpacked into the store (stored and deflated, nested refused)'
 python3 tools/qemu-desktop.py windclone.iso unzip \
-    || fail 'the archive did not unpack into the store, or a deflated member was not refused'
+    || fail 'the archive did not unpack into the store, or a nested member was not refused'
 
 # v0.1.34: a real bitmap painted as pixels. /bin/imgview decodes the committed
 # 24-bit BMP (little-endian header, four-byte row stride, bottom-up rows, BGR to

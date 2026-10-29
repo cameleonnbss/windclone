@@ -4,12 +4,12 @@
 Windows does, with `pip install rich` working, on a desktop that behaves like a
 daily driver.
 
-**Where WindClone is today (v0.1.34):** a from-scratch x86-64 kernel on Limine,
+**Where WindClone is today (v0.1.35):** a from-scratch x86-64 kernel on Limine,
 its own ELF64 loader, its own int `0x80` ABI of fourteen numbered syscalls, a
 libc-less userland of 25 freestanding C programs, a tmpfs store, an e1000 driver
 with an ICMP/UDP/DHCP/TCP/HTTP stack on top of it, a compositor with per-cell
-colour and a pixel channel, and headless QEMU tests that compare bytes rather
-than impressions.
+colour and a pixel channel, an inflate decoder, and headless QEMU tests that
+compare bytes rather than impressions.
 
 That stack is good. It is not Windows. The honest consequence, stated up front
 because it is the biggest single fact in this file:
@@ -27,11 +27,11 @@ because it is the biggest single fact in this file:
 
 ## What already works, exactly
 
-| Requested | Reality in v0.1.34 |
+| Requested | Reality in v0.1.35 |
 |---|---|
 | `.bat` files run | Yes, narrowly: `bat <NAME>` executes `/tmp/<NAME>.BAT`, echoing each line as `> <line>`, skipping `;` comments, refusing a nested `bat`. **No** `@echo off`, no `%VAR%`, no `if`/`for`/`goto`/`errorlevel`, no redirection or pipes. |
 | Windows-like shell verbs | `DIR`, `DEL`, `REN` are built-ins with `cmd`'s error classes (`EPERM` read-only, `ENOENT`, `EEXIST`, `EBUSY`) — v0.1.32. Missing: `CD`, `TYPE`, `COPY` (a `/bin` program, not a verb), `MOVE`, `MKDIR`, `SET`. |
-| ZIP extraction "like Windows" | `/bin/unzip` extracts **STORED** members into the store with a per-entry digest — v0.1.33. A **DEFLATED** member is *refused*, not corrupted: there is no inflate decoder in a libc-less userland. Windowsexplorer.rar-style archives therefore do not open yet, and that is the honest boundary. |
+| ZIP extraction "like Windows" | `/bin/unzip` extracts **STORED** (v0.1.33) *and* **DEFLATE** (v0.1.35, `src/user/inflate.h`) members into the store with a per-entry digest the test recomputes from what the format says the file is. Still refused, by rule and not by accident: entries in a subdirectory (a member named `dir/x.txt` — the store is flat and a program does not take its output path from an archive), and bzip2/LZMA entries, which are not this decoder's format. So a real `.whl` unpacks only entry by entry once its names are flat; directory-aware extraction is the next archive rung. |
 | Internet access to download things | Yes over the e1000: DHCP lease, ARP, ICMP, UDP, a TCP handshake and an HTTP `GET` whose body lands in the store (`fetch <path>`, `/bin/pkg`, `/bin/browser`) — v0.1.25→31. |
 | Images on screen | `/bin/imgview` decodes a 24-bit BI_RGB BMP and the kernel blits it — v0.1.34. |
 | Python programs | **No.** There is no interpreter of any kind in this OS. |
@@ -48,9 +48,11 @@ The chain it needs, and what is missing at each link:
 1. **HTTPS.** PyPI is HTTPS-only; WindClone speaks plain HTTP to a local
    server in its tests. TLS is a crypto stack (X.509, AEAD, handshake) on its
    own — its own releases.
-2. **A wheel is a ZIP.** We can fetch bytes and we can unpack *stored* entries.
-   A real `.whl` is DEFLATE-compressed, so it needs **inflate** first. This is
-   the cheapest missing link and the one to do next.
+2. **A wheel is a ZIP.** We can fetch bytes, and since v0.1.35 we can unpack
+   deflated entries. What is still missing for a `.whl` specifically is that
+   every member of one lives under a directory (`demo/__init__.py`,
+   `demo-1.0.dist-info/METADATA`), and `/bin/unzip` writes flat names only — so
+   the archive rung that is left is directory-aware extraction, not a decoder.
 3. **An interpreter.** `rich` is ~40 modules of modern Python — classes,
    decorators, f-strings, generators, dataclasses, `typing`. It sits on a deep
    stdlib (`io`, `os`, `re`, `unicodedata`, `threading`). A partial interpreter
@@ -59,8 +61,13 @@ The chain it needs, and what is missing at each link:
 
 So the honest ladder, in the order each rung becomes testable:
 
-- [ ] **inflate** (DEFLATE) in `/bin/unzip` → real archives open. Proven by
-      unpacking a deflated entry and matching a digest the test recomputes.
+- [x] **inflate** (DEFLATE) in `/bin/unzip` → real archives open. Landed in
+      v0.1.35: `src/user/inflate.h`, proven by unpacking deflated members —
+      including a canned-table block no machine-generated archive would exercise —
+      and matching digests the test recomputes from the archive's own bytes.
+- [ ] **subdirectory entries in `/bin/unzip`**, so a wheel's
+      `demo/__init__.py` is not refused. The store already keys files by their
+      whole path, so this is a name-validation rule and a test, not a filesystem.
 - [ ] **`.cmd`-shaped batch semantics**: `@echo off`, `%VAR%` and `SET`,
       `IF`/`FOR`, `ERRORLEVEL`, `>`/`|`. Proven by typing a script at the prompt
       and comparing the serial transcript byte for byte.
@@ -72,7 +79,7 @@ So the honest ladder, in the order each rung becomes testable:
       This is the rung that answers "Python scripts run here", and it is worth
       reaching.
 - [ ] **`pip`-shaped install of a *pure-Python* package**: fetch over the HTTP
-      client that exists, unpack with the inflate that will exist, put the
+      client that exists, unpack with the inflate that landed in v0.1.35, put the
       modules on the import path, run against them. The set of packages this
       can serve is exactly the set that needs no C extension and no deep
       stdlib — and the release note will list which ones, with test output.

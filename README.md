@@ -473,7 +473,8 @@ On boot the kernel:
    same file with Python's own `zipfile` and derives every expectation from it. The
    honest scope: stored entries only (no inflate yet), flat members (no subdirectory
    trees), one archive per run — the primitive, wired end to end and proven by a
-   digest rather than a length.
+   digest rather than a length. *(The first of those limits is gone in v0.1.35;
+   see item 38.)*
 
 37. **paints a real bitmap into a window (v0.1.34)**.
    Every window so far was made of glyphs, which is a terminal and the right thing
@@ -496,6 +497,40 @@ On boot the kernel:
    than painted as garbage. The honest scope: 24-bit BI_RGB only, capped at
    128x80 pixels per picture, one image per run — pixels on screen, requested and
    verified byte for byte, not a scaled/alpha/blt-capable compositor.
+
+38. **opens a compressed archive, the way Windows does (v0.1.35)**.
+   The half of ZIP that every real file actually uses. A `.zip` from the internet,
+   a `.jar`, a `.whl`: their entries are DEFLATE (method 8), and until now
+   `/bin/unzip` had to refuse them — it could walk the container but had no
+   decoder, so it extracted only the stored members and named the rest. This
+   release writes the engine: `src/user/inflate.h`, a self-contained RFC 1951
+   inflate in the same freestanding C as every other program, no zlib and no new
+   syscall, decoding all three block types the format allows — stored
+   (`BTYPE=00`, with the byte-boundary align that trips people up), the canned
+   tables (`BTYPE=01`) and dynamic Huffman (`BTYPE=10`) with its code-length code
+   and three repeat opcodes — plus the LZ77 pass, including the overlapping
+   matches a `memcpy`-style copy gets wrong. Deflate packs numbers from the low
+   bit of each byte and Huffman codes from the high end, and that one sentence is
+   the difference between a decoder and a garbage generator, so both orders are
+   explicit in the code rather than implied. A deflated entry is only written once
+   its whole stream decoded *and* came out the length its own header promised:
+   a short or long run is reported with both numbers and refused, because half a
+   file that carries the original's name is worse than no file.
+   `tools/make-sample-zip.py` now hand-builds the specimen's deflate streams bit
+   by bit instead of asking `zipfile` for them, because zlib only ever emits
+   dynamic blocks and stored runs — the canned-table block, the branch no
+   machine-generated archive would test, is produced here and validated before it
+   ships: every stream must satisfy `zlib.decompress(stream) == the intended
+   bytes`, and the finished archive must read back through `zipfile` with intact
+   CRCs. So the reference decoder certifies the test data, and a guest digest
+   that disagrees can only mean the guest is wrong. The scenario unpacks all five
+   flat members and compares each one against what the format says the file is,
+   then reads `fixed.bl` back out of the store through `copy` — a byte stream
+   that exists nowhere except inside a working inflate — and deletes it. The
+   honest scope: methods 0 and 8, flat names only (an entry carrying `/` is still
+   refused), 4 KiB per member and 8 KiB per archive, one archive per run.
+   `bzip2`/`LZMA` entries and directory trees are not in this, and no line above
+   claims they are.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
@@ -580,9 +615,9 @@ The full plan with checkboxes lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 8. ⏳ Graphical "windows" shell — earning the *Wind* in *WindClone*
 9. ⏳ "Run real Windows programs" — examined and honestly scoped in
    [`docs/WINDOWS-VM-PLAN.md`](docs/WINDOWS-VM-PLAN.md): what works today, why a
-   PE loader is not addable to this kernel, and the ladder that is (inflate →
-   batch semantics → the remaining `cmd` verbs → a small Python interpreter →
-   pure-Python packages). VirtualBox settings ship in
+   PE loader is not addable to this kernel, and the ladder that is (batch
+   semantics → the remaining `cmd` verbs → a small Python interpreter →
+   pure-Python packages; inflate landed in v0.1.35). VirtualBox settings ship in
    [`tools/virtualbox/`](tools/virtualbox/).
 
 ## Why these choices?

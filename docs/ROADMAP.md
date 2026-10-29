@@ -1063,10 +1063,26 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       program, still under the panel's 29-row room, so `hidden 0` keeps holding. Honest
       scope: 24-bit BI_RGB, 128×80 per picture, a file on the machine — a bitmap that
       arrives as pixels and lands as pixels, not the compositor above it.
-- [ ] inflate (DEFLATE) in `/bin/unzip`, so a *real* archive opens — a stored
-      member is only half of the format, and every `.whl`, `.jar` and most `.zip`
-      files carry compressed entries. Proven by unpacking a deflated entry and
-      matching a digest the test recomputes from the archive's own bytes.
+- [x] **inflate (DEFLATE) in `/bin/unzip`, so a *real* archive opens** (v0.1.35).
+      `src/user/inflate.h` is a self-contained RFC 1951 decoder in freestanding C —
+      stored, canned-table and dynamic-Huffman blocks, the code-length code with its
+      three repeat opcodes, and the LZ77 pass with its overlapping matches — with no
+      zlib, no new syscall and both bit orders (numbers low-bit-first, codes
+      high-bit-first) written down rather than implied. A deflated member is written
+      only if the stream decoded *and* the result is the length the header claimed;
+      anything else is refused with both numbers. `tools/make-sample-zip.py` now
+      hand-builds the members' streams bit by bit, because zlib only emits dynamic
+      blocks and stored runs, and every stream must satisfy `zlib.decompress(...) ==
+      the intended bytes` before it ships: the reference decoder certifies the test
+      data, so a disagreeing guest digest can only mean the guest is wrong. The
+      scenario unpacks five members (two stored, three deflated) and reads the
+      canned-table one back through `copy`. Honest scope: methods 0 and 8, flat names,
+      4 KiB per member, 8 KiB per archive; bzip2/LZMA entries are still refused.
+- [ ] **subdirectory entries in `/bin/unzip`** — a wheel's `demo/__init__.py` is
+      still refused, not because it cannot be decoded (it can now) but because the
+      extractor writes flat names only. The store keys files by their whole path,
+      so this is a name-validation rule plus a test, not a new filesystem; it must
+      keep refusing `..` and an absolute name inside an entry.
 - [ ] cmd.exe-shaped batch semantics: `@echo off`, `SET` + `%VAR%`, `IF`/`FOR`,
       `ERRORLEVEL`, `>` and `|`. `bat <NAME>` runs `/tmp/NAME.BAT` line by line
       today; this is what makes a script written for Windows behave rather than
@@ -1076,8 +1092,9 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       programs — the honest answer to "Python scripts run here". Not CPython:
       the subset is ints/strings/lists/dicts/f-strings/functions/`import`, and a
       release never claims a package it has not run. `pip install rich` needs
-      TLS, inflate and a stdlib depth this userland does not have; the sequence
-      and why are in `docs/WINDOWS-VM-PLAN.md`.
+      TLS and a stdlib depth this userland does not have (inflate landed in
+      v0.1.35, so a compressed wheel can be unpacked); the sequence and why are
+      in `docs/WINDOWS-VM-PLAN.md`.
 - [ ] `file <path>` reports a PE (machine, subsystem, imports) — inspection is
       honest; execution is the Wine problem and is not on this roadmap
 - [ ] Images in the browser window: decode and blit a bitmap the fetched page refers to

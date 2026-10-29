@@ -1934,33 +1934,39 @@ def scenario_actions(sc, mon, W, H):
             raise SystemExit("after the delete dir showed %s entries, want %d"
                              % (m4.group(1), n1 - 1))
     elif sc == "unzip":
-        # v0.1.33: /bin/unzip unpacks a real ZIP archive. The archive is the
-        # single source of truth: the test opens it with Python's own zipfile,
-        # asks which members are STORED (must come out byte for byte) and which
-        # are DEFLATED (this userland has no inflate, so must be refused, never
-        # written as garbage), and requires the guest's per-entry digests to
-        # equal fnv1a over the bytes the archive actually holds. Then the file
-        # verbs from v0.1.32 finish the claim: an extracted byte is readable by
-        # a *second* program (copy re-digests it out of the store) and can be
-        # deleted - which only works because unzip put it in the writable store,
-        # not the read-only archive it was read from.
+        # v0.1.35: /bin/unzip unpacks a real ZIP archive, compressed included.
+        # The archive is the single source of truth: the test opens it with
+        # Python's own zipfile and asks, per member, what the format says the
+        # file is - a flat-named member in method 0 or 8 must come out byte for
+        # byte with the digest of those decoded bytes, and a member whose name
+        # carries a '/' must be refused, because this program writes flat names
+        # only and a malicious archive must not be able to choose the path.
+        # Then the file verbs from v0.1.32 finish the claim on a *deflated*
+        # member: a second program re-digests it out of the store and a delete
+        # frees it, which only works because unzip wrote it into the writable
+        # store and not the read-only archive it came from.
         import io
         import zipfile as _zf
 
         raw = spec("rootfs/src/sample.zip")
         zf = _zf.ZipFile(io.BytesIO(raw))
-        stored, deflated = {}, []
+        flat, nested = [], []
         for info in zf.infolist():
             if info.is_dir():
                 continue
-            if info.compress_type == _zf.ZIP_STORED:
-                stored[info.filename] = zf.read(info.filename)
+            if "/" in info.filename:
+                nested.append(info.filename)
             else:
-                deflated.append(info.filename)
-        if not stored or not deflated:
-            raise SystemExit("the specimen must hold both a stored and a "
-                             "deflated member (stored %d, deflated %d)"
-                             % (len(stored), len(deflated)))
+                flat.append((info.filename, info.compress_type,
+                             zf.read(info.filename)))
+        if not flat or not nested:
+            raise SystemExit("the specimen must hold both a flat member and a "
+                             "nested one (flat %d, nested %d)"
+                             % (len(flat), len(nested)))
+        methods = {m for _, m, _ in flat}
+        if 8 not in methods:
+            raise SystemExit("the specimen has no deflated member: the whole "
+                             "point of this release is method 8")
 
         tw = min(TERM_W, W - 40)
         tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
@@ -1975,50 +1981,63 @@ def scenario_actions(sc, mon, W, H):
                              "saw %s" % (len(raw), m.group(1)))
 
         total = 0
-        for name, data in stored.items():
+        for name, method, data in flat:          # archive order, not ours
             mark, m = wait_serial_after(
                 mark, r"unzip: extracted %s (\d+) bytes digest 0x([0-9a-f]{8})"
                       % re.escape(name))
             if int(m.group(1)) != len(data) or m.group(2) != fnv1a(data):
-                raise SystemExit("%s: unpacked %s bytes digest %s, want %d %s"
-                                 % (name, m.group(1), m.group(2),
+                raise SystemExit("%s (method %d): unpacked %s bytes digest %s, "
+                                 "want %d %s"
+                                 % (name, method, m.group(1), m.group(2),
                                     len(data), fnv1a(data)))
             total += len(data)
-        for name in deflated:
+        for name in nested:
             mark, _ = wait_serial_after(
-                mark, r"unzip: refused deflated entry %s" % re.escape(name))
+                mark, r"unzip: refused entry %s" % re.escape(name))
 
         mark, m = wait_serial_after(
             mark, r"unzip: (\d+) files, (\d+) bytes into /tmp, refused (\d+)")
-        if (int(m.group(1)) != len(stored) or int(m.group(2)) != total
-                or int(m.group(3)) != len(deflated)):
+        if (int(m.group(1)) != len(flat) or int(m.group(2)) != total
+                or int(m.group(3)) != len(nested)):
             raise SystemExit("summary says %s files %s bytes refused %s, "
                              "want %d %d %d"
                              % (m.group(1), m.group(2), m.group(3),
-                                len(stored), total, len(deflated)))
+                                len(flat), total, len(nested)))
         wait_serial(r"shell: unzip exited with 0")
 
-        # The extracted member is now an ordinary store file: a different
-        # program reads it back and must answer with the digest the archive
-        # held, so "unzipped" means the bytes round-tripped and not just that a
-        # count was reported.
-        first = sorted(stored)[0]
+        # The round trip goes through the member that only exists if inflate
+        # worked - and through the canned-table block in preference to the
+        # zlib-produced ones, because those three bytes of BTYPE=01 are what no
+        # other path in this decoder touches. A different program opens it out
+        # of the store and must answer with the digest the archive's own format
+        # says the file is.
+        packed = None
+        for name, method, data in flat:
+            if method == 8:
+                if packed is None:
+                    packed = (name, data)
+                if name == "fixed.bl":
+                    packed = (name, data)
+                    break
+        if packed is None:
+            raise SystemExit("no deflated member to read back")
+        name, data = packed
         mark = len(read_log())
-        mon.type_text("copy /tmp/%s /tmp/verify\n" % first)
+        mon.type_text("copy /tmp/%s /tmp/verify\n" % name)
         mark, m = wait_serial_after(mark, r"copy: digest 0x([0-9a-f]{8}) pid")
-        if m.group(1) != fnv1a(stored[first]):
-            raise SystemExit("read back through the store digests to %s and "
+        if m.group(1) != fnv1a(data):
+            raise SystemExit("%s read back through the store digests to %s and "
                              "the archive member to %s"
-                             % (m.group(1), fnv1a(stored[first])))
+                             % (name, m.group(1), fnv1a(data)))
         wait_serial(r"shell: copy exited with 0")
 
         # And it can go, which only succeeds because it lives in the writable
         # store: the archive's own copy of the same name would be refused as
         # read-only.
         mark = len(read_log())
-        mon.type_text("del /tmp/%s\n" % first)
+        mon.type_text("del /tmp/%s\n" % name)
         mark, _ = wait_serial_after(
-            mark, r"shell: deleted /tmp/%s -" % re.escape(first))
+            mark, r"shell: deleted /tmp/%s -" % re.escape(name))
 
     elif sc == "img":
         # v0.1.34: /bin/imgview decodes a 24-bit bitmap and pushes its pixels
@@ -2242,16 +2261,21 @@ MARKERS = {
                   "shell: deleted /tmp/dst2", "entries left",
                   "shell: del refused /bin/hello - the archive is read-only",
                   "shell: del refused /tmp/ghost - no such file"],
-    # v0.1.33: a real ZIP unpacked. The strict byte/digest comparisons are in the
-    # scenario; these are the lines the claim turns on - the archive read whole,
-    # each stored member out byte for byte, the deflated member refused rather
-    # than corrupted, a summary that counts both, and the shell's exit line.
+    # v0.1.35: a real ZIP unpacked, compressed members included. The strict
+    # byte/digest comparisons are in the scenario; these are the lines the claim
+    # turns on - the archive read whole, each flat member out byte for byte
+    # including the three deflated ones (dynamic trees, the canned tables and a
+    # stored block), the nested name refused because a program must not get its
+    # path from an archive, a summary that counts both, and the shell's exit.
     "unzip":     ["unzip: read", "unzip: extracted readme.txt",
                   "unzip: extracted notes.md",
-                  "unzip: refused deflated entry packed.dat",
-                  "unzip: 2 files, 137 bytes into /tmp, refused 1",
+                  "unzip: extracted packed.dat",
+                  "unzip: extracted fixed.bl",
+                  "unzip: extracted stored.bl",
+                  "unzip: refused entry dir/inner.txt",
+                  "unzip: 5 files, 1011 bytes into /tmp, refused 1",
                   "shell: unzip exited with 0",
-                  "shell: deleted /tmp/notes.md"],
+                  "shell: deleted /tmp/fixed.bl"],
     # v0.1.34: a bitmap decoded to real pixels. The strict digest match is in the
     # scenario; these are the lines the claim turns on - the file read whole, the
     # kernel accepting a whole RGB24 record into a window (its own dimensions, not
