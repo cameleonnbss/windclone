@@ -282,6 +282,7 @@ static void cmd_help(void)
     put_line("  COPY <A> <B>   DUPLIE UN FICHIER OCTET PAR OCTET");
     put_line("  NOTE <NOM>     EDITE /TMP/<NOM> (OU <NOM>.TXT)");
     put_line("  VIEW <FICHIER> AFFICHE UN FICHIER EN COULEUR");
+    put_line("  PKG            MONTRE LA PAGE RECUPEREE /NET/FETCHED");
     put_line("CE QUE TU LANCES ICI EST UN PROCESSUS: PID REEL,");
     /* The shell's pid is printed as the number the table holds, not as a "1"
      * written into this file: the claim on the screen is then whatever the

@@ -2,12 +2,13 @@
  *
  * This is the top of the stack for now: on the IPv4/ICMP/UDP path the `net`
  * module already proved, it runs a three-way handshake (SYN, SYN/ACK, ACK)
- * against a real server, sends an HTTP GET, and reads the response status line
- * back. It is deliberately a client only, and deliberately simple — no
- * congestion control, no sliding window beyond stop-and-wait, no reassembly
- * across many segments. That is enough to prove the transport works end-to-end
- * against the emulator's stack, and it is the primitive a package manager
- * needs to pull a file over HTTP.
+ * against a real server, sends an HTTP GET, reads the whole response back into
+ * a buffer, and hands the body to the writable store as /net/fetched. That last
+ * step is what turns "we read a status code" into a package manager's primitive:
+ * a file pulled over HTTP that a program can then open like any other. It is
+ * deliberately a client only, and deliberately simple - no congestion control,
+ * no sliding window beyond stop-and-wait, a response capped at one buffer -
+ * which is enough to pull a page end-to-end against the emulator's stack.
  *
  * Like the rest of the network code it is driven from the idle loop: SLIRP
  * only moves a connection forward while the guest yields the CPU, so nothing

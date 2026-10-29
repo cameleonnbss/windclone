@@ -801,6 +801,17 @@ echo '==> the network receives (arp resolve against the emulator subnet)'
 python3 tools/qemu-desktop.py windclone.iso net \
     || fail 'the card could not receive: the arp reply never came back through the rx ring'
 
+# v0.1.30: the fetched page is a package. The boot-time TCP/HTTP GET now writes
+# the response body into the writable store as /net/fetched, so a byte that came
+# off the network becomes a real file. /bin/pkg opens it through the same VFS the
+# editor and copier use and paints it in its own window. The scenario recomputes
+# the served page's FNV-1a and requires the rendered digest to match: the count is
+# the kernel's, the bytes are proven identical, and nothing here trusts a green
+# line that a mis-parsed or truncated response could also print.
+echo '==> a fetched page becomes a package a program opens (http -> store -> window)'
+python3 tools/qemu-desktop.py windclone.iso pkg \
+    || fail 'the fetched page was not stored, or /bin/pkg could not render it identically'
+
 # v0.1.12: the double buffer + damage claim, measured. The scenario reads the
 # kernel's own "gfx: flip <n> rects, <area> px" lines and requires three things:
 # the boot frame flipped the whole screen, a pure mouse move flipped only a

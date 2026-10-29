@@ -999,7 +999,16 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       SLIRP exposes at 10.0.2.2 — so the connection is negotiated with a live TCP peer,
       not a mock. The honest scope: a stop-and-wait client that fetches one page, not a
       full concurrent stack. What it unlocks is the package manager, which is next.
-- [ ] A package manager over HTTP + showing the fetched page in a window (v0.1.30)
+- [x] The fetched page becomes a **package a program opens** (v0.1.30). The GET now
+      keeps the whole response and hands its body to the writable store as
+      `/net/fetched`, so a file that came off the network is an ordinary file a process
+      can `open()`. A new `/bin/pkg` reads it back through the same VFS the editor and
+      copier use, paints it in its own window, and prints an FNV-1a digest; the harness
+      serves a page it knows the bytes of, recomputes the digest, and requires them to
+      match — the count is the kernel's, the identity of the bytes is the proof. The
+      honest scope: one fixed page fetched at boot into one buffer, not a repo, a
+      resolver, or a download-on-demand tool — the primitive, wired end to end.
+- [ ] Show the fetched page in a browser-style window with a real address bar (v0.1.31)
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
 - [ ] A block device driver (ATA or NVMe), so `tmpfs` can stop being the only

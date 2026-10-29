@@ -412,6 +412,18 @@ On boot the kernel:
    mock. This is the primitive a package manager is built on — pull a file over HTTP —
    and the claim is scoped to what is proven: a stop-and-wait client that fetches one
    page and reads 200 back, not a full concurrent stack.
+33. **turns the fetched page into a package a program opens (v0.1.30)**. Reading a
+   status line is a proof the transport works; keeping the body is what a package
+   manager is for. The client now accumulates the whole response — status line,
+   headers, the blank line that ends them, and the bytes after it — and hands that
+   body to the writable store as `/net/fetched`, so a file that arrived off the
+   network becomes an ordinary file (`http: stored 43 body bytes into /net/fetched -
+   a page installed from http`). A new `/bin/pkg` then opens it through the same VFS
+   the editor and copier already use, paints it into its own window, and prints an
+   FNV-1a digest of what it read. The headless test serves a page whose bytes it
+   knows, recomputes that digest itself, and requires the rendered one to match: the
+   count is the kernel's, but the *identity* of the bytes — TCP to the store to the
+   VFS to a pixel on screen — is what makes this a package and not a picture of one.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

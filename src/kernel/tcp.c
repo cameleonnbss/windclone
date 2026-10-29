@@ -10,11 +10,15 @@
 #include "timer.h"
 #include "log.h"
 #include "serial.h"
+#include "tmpfs.h"
 
 #define SERVER_PORT   8080      /* the harness http.server on the host loopback */
 #define CLIENT_PORT   12345     /* our fixed ephemeral port                     */
 #define RETRY_TICKS   20u       /* ~200ms between retransmits                   */
 #define MAX_TRIES     60u       /* then give up: the connection is not happening */
+#define RESP_MAX      2048      /* the whole response, headers and body         */
+#define FETCH_NAME    "net/fetched"   /* where the body lands in the store      */
+#define SETTLE_LIMIT  8u        /* idle visits before we call a response done   */
 
 enum { TCPC_IDLE, TCPC_SYN_SENT, TCPC_ESTABLISHED, TCPC_SENT_GET,
        TCPC_DONE, TCPC_FAILED };
@@ -30,7 +34,17 @@ static uint32_t rcv_nxt;      /* next seq byte we expect       */
 static uint64_t last_send;
 static int      tries;
 static int      get_sent;
-static int      bytes_read;
+
+/* The response is accumulated in full - status line, headers, the blank line
+ * that ends them, and the body after it - so that a package manager can pull a
+ * real file over HTTP and hand its bytes to the writable store, not merely read
+ * a status code and throw the payload away. server_fin is the honest "the whole
+ * thing arrived": an HTTP/1.0 peer closes once it has written the response, so a
+ * FIN is what tells us the body is complete rather than merely started. */
+static uint8_t  resp[RESP_MAX];
+static int      resp_len;
+static int      server_fin;
+static int      settled;
 
 /* Big-endian primitives: the wire is network byte order. */
 static void put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
@@ -146,8 +160,10 @@ void tcp_init(const uint8_t *ip, const uint8_t *mac)
     rcv_nxt = 0;
     tries = 0;
     get_sent = 0;
-    bytes_read = 0;
     last_send = 0;
+    resp_len = 0;
+    server_fin = 0;
+    settled = 0;
     tcp_state = TCPC_SYN_SENT;
     klog("tcp: connecting to 10.0.2.2:8080 from the leased address");
 }
@@ -169,6 +185,11 @@ static void pump_send(uint8_t *f)
         int len = build(f, 0x02 /* SYN */, snd_nxt, 0, 0, 0);
         if (e1000_tx(f, len) < 0) { tcp_state = TCPC_FAILED; return; }
     } else if (tcp_state == TCPC_SENT_GET) {
+        /* Retransmit the request only while nothing has come back yet. Once a
+         * byte of response is in hand the connection is answering us, and a
+         * second GET would ask a server that is already closing for more. */
+        if (resp_len != 0 || server_fin)
+            return;
         static const char req[] = "GET / HTTP/1.0\r\nHost: windclone\r\n\r\n";
         int len = build(f, 0x18 /* PSH|ACK */, snd_nxt, rcv_nxt,
                         (const uint8_t *)req, (int)sizeof(req) - 1);
@@ -180,12 +201,66 @@ static void pump_send(uint8_t *f)
     last_send = now;
 }
 
+/* The 3 digits after "HTTP/1.x " in the accumulated response, or 0 until the
+ * whole status line has arrived. Read from `resp` and not a single segment, so
+ * a response split across packets is still recognised once enough is in hand. */
+static int resp_status(void)
+{
+    if (resp_len < 12 || resp[0] != 'H' || resp[1] != 'T'
+        || resp[2] != 'T' || resp[3] != 'P' || resp[4] != '/' || resp[5] != '1')
+        return 0;
+    int k = 8;                                   /* skip "HTTP/1.x " */
+    while (k < resp_len && (resp[k] < '0' || resp[k] > '9'))
+        k++;
+    if (k + 2 >= resp_len)
+        return 0;                                /* digits not all in yet */
+    int d0 = resp[k], d1 = resp[k + 1], d2 = resp[k + 2];
+    if (d0 < '0' || d0 > '9' || d1 < '0' || d1 > '9' || d2 < '0' || d2 > '9')
+        return 0;
+    return (d0 - '0') * 100 + (d1 - '0') * 10 + (d2 - '0');
+}
+
+/* One past the blank line that ends the headers - "\r\n\r\n" - or -1 while it
+ * has not arrived. Everything at or after it is the body a package installs. */
+static int resp_body_start(void)
+{
+    for (int i = 3; i < resp_len; i++)
+        if (resp[i - 3] == '\r' && resp[i - 2] == '\n'
+            && resp[i - 1] == '\r' && resp[i] == '\n')
+            return i + 1;
+    return -1;
+}
+
+/* Hand the fetched body to the writable store under a real path, so a program
+ * (here, /bin/pkg) can open it exactly like any other file. Creating the name
+ * fresh each boot is fine: the store starts empty, and a re-fetch truncates and
+ * rewrites rather than stacking bytes. */
+static void store_body(int body_start)
+{
+    int blen = resp_len - body_start;
+    if (blen < 0)
+        blen = 0;
+
+    int idx = tmpfs_lookup(FETCH_NAME);
+    if (idx < 0)
+        idx = tmpfs_create(FETCH_NAME);
+    if (idx < 0) {
+        serial_write("http: store refused /net/fetched - no slot for the page\n");
+        return;
+    }
+    tmpfs_truncate(idx);
+    int64_t wrote = tmpfs_write(idx, 0, resp + body_start, (uint64_t)blen);
+    klog("http: stored %d body bytes into /net/fetched - a page installed from http",
+         (int)(wrote < 0 ? 0 : wrote));
+}
+
 int tcp_visit(void)
 {
     if (tcp_state == TCPC_DONE || tcp_state == TCPC_FAILED || tcp_state == TCPC_IDLE)
         return 1;
 
     static uint8_t buf[600];
+    int got_data = 0;
 
     /* Read what arrived and advance one honest step per match. */
     for (int drained = 0; drained < 4; drained++) {
@@ -204,28 +279,22 @@ int tcp_visit(void)
             /* fall through to send our ACK/GET on the next pump */
             break;
         }
-        if (tcp_state == TCPC_SENT_GET && plen > 0) {
-            bytes_read += plen;
-            rcv_nxt = seq + (uint32_t)plen;
-            /* Look for the status line "HTTP/1.x NNN" and read the 3 digits. */
-            int status = 0;
-            if (plen >= 12 && pl[0] == 'H' && pl[1] == 'T' && pl[2] == 'T' && pl[3] == 'P'
-                && pl[4] == '/' && pl[5] == '1') {
-                int k = 8;                             /* skip "HTTP/1.x " */
-                while (k < plen && (pl[k] < '0' || pl[k] > '9')) k++;
-                int d0 = pl[k], d1 = pl[k + 1], d2 = pl[k + 2];
-                if (d0 >= '0' && d0 <= '9' && d1 >= '0' && d1 <= '9'
-                    && d2 >= '0' && d2 <= '9')
-                    status = (d0 - '0') * 100 + (d1 - '0') * 10 + (d2 - '0');
-            }
-            if (status >= 100 && status < 600) {
-                klog("http: status %d, %d bytes read - first web fetch over tcp",
-                     status, bytes_read);
-                uint8_t f[84];
-                build(f, 0x01 /* FIN */, snd_nxt, rcv_nxt, 0, 0);
-                e1000_tx(f, 64);                       /* close politely     */
-                tcp_state = TCPC_DONE;
-                return 1;
+        if (tcp_state == TCPC_SENT_GET) {
+            if (flags & 0x01 /* FIN */)
+                server_fin = 1;               /* the peer is done writing us */
+            if (plen > 0) {
+                rcv_nxt = seq + (uint32_t)plen;
+                got_data = 1;
+                /* Accumulate the payload; a page bigger than the buffer is
+                 * stored as far as it fits rather than dropped - the honest
+                 * count in the log tells a reader what really landed. */
+                for (int i = 0; i < plen && resp_len < RESP_MAX; i++)
+                    resp[resp_len++] = pl[i];
+                /* Acknowledge the bytes so a well-behaved peer keeps sending
+                 * rather than retransmitting against an old window. */
+                uint8_t a[54];
+                int al = build(a, 0x10 /* ACK */, snd_nxt, rcv_nxt, 0, 0);
+                e1000_tx(a, al < 60 ? 60 : al);
             }
         }
     }
@@ -243,6 +312,35 @@ int tcp_visit(void)
         tcp_state = TCPC_SENT_GET;
         klog("http: GET sent, awaiting response");
         return 0;
+    }
+
+    /* Response bookkeeping: the idle counter is how we finish even if a peer
+     * never bothers to send FIN, and it only starts once a byte has landed. */
+    if (tcp_state == TCPC_SENT_GET) {
+        if (got_data)
+            settled = 0;
+        else if (resp_len > 0)
+            settled++;
+
+        int status = resp_status();
+        int body = resp_body_start();
+        if (status >= 100 && status < 600 && body >= 0
+            && (server_fin || (unsigned)settled >= SETTLE_LIMIT)) {
+            klog("http: status %d, %d bytes read - first web fetch over tcp",
+                 status, resp_len);
+            store_body(body);
+            uint8_t f[84];
+            int fl = build(f, 0x01 /* FIN */, snd_nxt, rcv_nxt, 0, 0);
+            e1000_tx(f, fl < 60 ? 60 : fl);        /* close politely       */
+            tcp_state = TCPC_DONE;
+            return 1;
+        }
+        /* Still waiting on the body: keep the request alive only if nothing has
+         * come back at all; a partial response means the pipe works and more is
+         * on the way (or a FIN is), so we simply return to the idle pump. */
+        if (resp_len == 0 && !server_fin)
+            pump_send(buf);
+        return (tcp_state == TCPC_DONE || tcp_state == TCPC_FAILED) ? 1 : 0;
     }
 
     pump_send(buf);

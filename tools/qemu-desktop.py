@@ -186,6 +186,12 @@ KEYMAP = {" ": "spc", "\n": "ret", "/": "slash", ".": "dot", "-": "minus",
 HMP_OK = set("abcdefghijklmnopqrstuvwxyz0123456789") | {
     "spc", "ret", "slash", "dot", "minus", "underscore"}
 
+# The page the harness serves for the network scenarios. It is a fixed, known
+# body so the pkg test can recompute its FNV-1a here and require the kernel's
+# whole fetch path (TCP -> the store -> the VFS -> /bin/pkg's window) to hand
+# back the same bytes it served, not merely a plausible count.
+PAGE_BODY = "<html><body>windclone-first-fetch</body></html>\n"
+
 
 def count_serial(pattern):
     """How many times the serial log already says `pattern`. A marker that a
@@ -1737,6 +1743,48 @@ def scenario_actions(sc, mon, W, H):
             raise SystemExit("bogus http status %d - the response was mis-parsed" % status)
         if nbytes <= 0:
             raise SystemExit("http fetch reported 0 bytes - nothing was really read back")
+    elif sc == "pkg":
+        # v0.1.30: the fetched page becomes a package a program can open. The
+        # boot-time TCP/HTTP GET now stores the response body in the writable
+        # file layer, so the whole claim is: bytes that came off the network land
+        # in a real file, /bin/pkg opens that file through the ordinary VFS, and
+        # the bytes it paints are the exact bytes this test served. The digest is
+        # the witness - a count alone is satisfied by any 43 wrong bytes.
+        s = wait_serial(r"http: stored (\d+) body bytes into /net/fetched")
+        stored = int(s.group(1))
+        if stored <= 0:
+            raise SystemExit("the kernel stored 0 body bytes - the response was "
+                             "parsed but nothing was handed to the file layer")
+        want = fnv1a(PAGE_BODY.encode())
+
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+        mon.type_text("pkg\n")
+
+        m = wait_serial(r"wm: program window opened 'pkg' pid (\d+)")
+        ppid = int(m.group(1))
+        # The file the kernel wrote is readable by a fresh process through the
+        # same open()/read() the editor and copier use - the count must match
+        # what was stored, which must match the page this harness served.
+        r = wait_serial(r"pkg: read (\d+) bytes from /net/fetched pid (\d+)")
+        if int(r.group(2)) != ppid:
+            raise SystemExit("pkg read on pid %s but its window is pid %s"
+                             % (r.group(2), ppid))
+        if int(r.group(1)) != stored or int(r.group(1)) != len(PAGE_BODY):
+            raise SystemExit("pkg read %s bytes, want %d stored of a %d-byte page"
+                             % (r.group(1), stored, len(PAGE_BODY)))
+        # The window was drawn as a screen (a form feed), not appended to the
+        # terminal's scrollback, and it is the pkg process that drew it.
+        wait_serial(r"wm: screen cleared pid %d" % ppid)
+        d = wait_serial(r"pkg: rendered fetched page, (\d+) bytes, digest 0x([0-9a-f]{8})")
+        if int(d.group(1)) != len(PAGE_BODY):
+            raise SystemExit("pkg rendered %s bytes, not the %d-byte page"
+                             % (d.group(1), len(PAGE_BODY)))
+        if d.group(2) != want:
+            raise SystemExit("the page round-tripped to 0x%s but the served body "
+                             "digests to 0x%s - the bytes are not the same"
+                             % (d.group(2), want))
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -1867,6 +1915,14 @@ MARKERS = {
                   "dhcp: discover broadcast", "lease understood",
                   "tcp: syn-ack received - connection established",
                   "first web fetch over tcp"],
+    # v0.1.30: the fetch lands in the file layer and a program opens it. The body
+    # bytes are stored, /bin/pkg reads them back through the VFS and paints them
+    # in its own window; the rendered digest (checked against the served page
+    # inside the scenario) is what makes "the same bytes" a fact and not a hope.
+    "pkg":       ["http: stored", "into /net/fetched",
+                  "wm: program window opened 'pkg'",
+                  "pkg: read", "bytes from /net/fetched",
+                  "wm: screen cleared", "pkg: rendered fetched page"],
 }
 
 
@@ -1885,10 +1941,10 @@ def main():
     # passes only if the kernel completes a TCP handshake and reads a 200 back.
     web = None
     webdir = None
-    if sc == "net":
+    if sc in ("net", "pkg"):
         webdir = tempfile.mkdtemp(prefix="wcweb-")
         with open(os.path.join(webdir, "index.html"), "w") as fh:
-            fh.write("<html><body>windclone-first-fetch</body></html>\n")
+            fh.write(PAGE_BODY)
         web = subprocess.Popen(
             [sys.executable, "-m", "http.server", "8080",
              "--bind", "127.0.0.1", "--directory", webdir],
