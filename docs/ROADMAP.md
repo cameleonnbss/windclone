@@ -1018,6 +1018,18 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       with different bytes and requires the rendered digest, the tag count and the bar
       text to all name *it*. Honest scope: plain text, one connection, no DOM — the half
       of a browser that is fetchable, not the rendering engine.
+- [x] **DIR, DEL and REN reach the writable store** (v0.1.32). cmd.exe keeps these as
+      internal commands, and so does this shell: `dir` lists the store then the archive
+      with a byte total, `del` frees a store slot, `ren` moves a name in place — bytes
+      and generation untouched, so an open descriptor keeps reading its own file. The
+      archive's read-only rule gates all three (`del /bin/hello` is refused as
+      read-only, not a silent program-eating success), a missing name is `ENOENT`, a
+      rename onto a taken name is `EEXIST` rather than an overwrite, and a file another
+      descriptor holds is `EBUSY`, checked before anything moves. Beneath: `vfs_remove`
+      / `vfs_rename` + `tmpfs_rename`. The scenario copies an archive file into `/tmp`,
+      counts it via `dir`, renames and re-counts (same entry), deletes and re-counts
+      (one fewer), then fires both refusals. Honest scope: a flat RAM store — no
+      directories, no cross-store move (that is copy-then-del), nothing survives reboot.
 - [ ] Images in the browser window: decode and blit a bitmap the fetched page refers to
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar

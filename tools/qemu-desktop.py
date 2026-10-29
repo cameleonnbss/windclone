@@ -1871,6 +1871,68 @@ def scenario_actions(sc, mon, W, H):
         if a.group(1) != "10.0.2.2:8080/second.html":
             raise SystemExit("the address bar showed %s, not the address the "
                              "kernel put on the wire" % a.group(1))
+    elif sc == "fileops":
+        # v0.1.32: DIR, DEL and REN — cmd.exe's own file verbs — reach the
+        # writable store through the VFS. A real file is put there by a program
+        # first (copy, the route the store already proved it takes), and then
+        # the shell's built-ins list it, move its name, and throw it away. The
+        # refusals are the other half of the release: a DEL of an archive file
+        # must fail because the initrd is read-only, and a DEL of a name nobody
+        # wrote must say "no such file" rather than pretend.
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+        mon.type_text("copy /src/hello.c /tmp/dst1\n")
+        wait_serial(r"copy: wrote \d+ bytes to /tmp/dst1")
+        wait_serial(r"shell: copy exited with 0")
+
+        mon.type_text("dir\n")
+        m = wait_serial(r"shell: dir shows (\d+) entries, (\d+) bytes"
+                        r" in the file layer")
+        n1, base = int(m.group(1)), m.end()
+        if n1 < 1:
+            raise SystemExit("dir showed %d entries after a file was copied "
+                             "into the store" % n1)
+
+        # A rename moves the name and nothing else: the store keeps one file.
+        mon.type_text("ren /tmp/dst1 /tmp/dst2\n")
+        base, _ = wait_serial_after(base,
+                                    r"shell: renamed /tmp/dst1 -> /tmp/dst2")
+        mon.type_text("dir\n")
+        base, m2 = wait_serial_after(base, r"shell: dir shows (\d+) entries")
+        if int(m2.group(1)) != n1:
+            raise SystemExit("a rename left the file layer holding %s entries, "
+                             "want the same %d - bytes moved with the name"
+                             % (m2.group(1), n1))
+
+        # The archive is read-only, and that rule reaches the new verbs too:
+        # ren refuses before a single byte of /bin/hello is relabelled.
+        mon.type_text("ren /bin/hello /tmp/x\n")
+        base, _ = wait_serial_after(
+            base, r"shell: ren refused /bin/hello - the archive is read-only")
+
+        mon.type_text("del /tmp/dst2\n")
+        base, m3 = wait_serial_after(
+            base, r"shell: deleted /tmp/dst2 - (\d+) entries left")
+        if int(m3.group(1)) != n1 - 1:
+            raise SystemExit("deleting the one store file left %s entries, "
+                             "want %d" % (m3.group(1), n1 - 1))
+
+        # Deleting what is not yours, and deleting what is not there, are two
+        # different answers and the shell gives both in their own words.
+        mon.type_text("del /bin/hello\n")
+        base, _ = wait_serial_after(
+            base, r"shell: del refused /bin/hello - the archive is read-only")
+        mon.type_text("del /tmp/ghost\n")
+        base, _ = wait_serial_after(
+            base, r"shell: del refused /tmp/ghost - no such file")
+
+        # And the file really went: gone is counted, not assumed.
+        mon.type_text("dir\n")
+        base, m4 = wait_serial_after(base, r"shell: dir shows (\d+) entries")
+        if int(m4.group(1)) != n1 - 1:
+            raise SystemExit("after the delete dir showed %s entries, want %d"
+                             % (m4.group(1), n1 - 1))
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -2018,6 +2080,15 @@ MARKERS = {
                   "http: stored", "wm: program window opened 'browser'",
                   "browser: read", "wm: colour pid",
                   "browser: rendered", "browser: address bar shows"],
+    # v0.1.32: the shell's own file verbs. copy (a program) puts a real file in
+    # the store, then dir lists it, ren moves its name, del throws it away - and
+    # the archive answers both mutations with its own refusal.
+    "fileops":   ["copy: wrote", "bytes to /tmp/dst1",
+                  "shell: dir shows", "shell: renamed /tmp/dst1 -> /tmp/dst2",
+                  "shell: ren refused /bin/hello - the archive is read-only",
+                  "shell: deleted /tmp/dst2", "entries left",
+                  "shell: del refused /bin/hello - the archive is read-only",
+                  "shell: del refused /tmp/ghost - no such file"],
 }
 
 

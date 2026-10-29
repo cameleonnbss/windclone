@@ -117,6 +117,34 @@ unsigned tmpfs_count(void)
     return live;
 }
 
+/* Move a name, not the bytes. A real `ren` keeps the file exactly where it is
+ * and changes only its label, so the slot, the data and the generation all stay
+ * put; the descriptor rule in the header (an open fd must survive a rename of
+ * its file) is satisfied for free, because `gen` is never touched here. */
+int tmpfs_rename(const char *name, const char *newname)
+{
+    int idx = find_by_name(name);
+    if (idx < 0)
+        return WC_ENOENT;
+    if (newname == NULL || newname[0] == '\0')
+        return WC_EINVAL;
+    if (strcmp(newname, name) == 0)
+        return 0;                         /* renaming onto itself is a no-op */
+
+    /* An exact length check, not the truncating one create() uses: two files
+     * cannot share a name, and a rename that silently shortened the new name
+     * could collide with an existing file or land on the wrong one. */
+    size_t l = strlen(newname);
+    if (l >= TMPFS_NAME_MAX)
+        return WC_ENAMETOOLONG;
+    if (find_by_name(newname) >= 0)
+        return WC_EEXIST;
+
+    memcpy(pool[idx].name, newname, l);
+    pool[idx].name[l] = '\0';
+    return 0;
+}
+
 /* Every accessor checks the slot rather than trusting the caller's index: a
  * descriptor is a number that outlives the gesture that made it, and a stale one
  * must not be able to read or write whichever file happens to sit there now. */

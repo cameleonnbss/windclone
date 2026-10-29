@@ -56,6 +56,15 @@ int tmpfs_create(const char *name);
 /* Forget a file and free its slot. 0 / -WC_ENOENT. */
 int tmpfs_remove(const char *name);
 
+/* Give a live file a new name, in place: the bytes and the slot stay where
+ * they are, and the generation does not move, so this is a rename and not a
+ * copy-with-a-delete. 0 on success; -WC_ENOENT when `name` holds nothing,
+ * -WC_EEXIST when `newname` is already taken, -WC_EINVAL / -WC_ENAMETOOLONG
+ * when the new name is not a name the store can hold. The VFS refuses a rename
+ * out of the archive before reaching here, and refuses one whose file any
+ * descriptor still holds; neither rule is checked in this file. */
+int tmpfs_rename(const char *name, const char *newname);
+
 /* Live-file count, in pool order. Also the number of entries the merged
  * directory enumeration has to offer before the archive's turn comes. */
 unsigned tmpfs_count(void);

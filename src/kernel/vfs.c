@@ -348,3 +348,77 @@ unsigned vfs_open_count(void)
 {
     return live;
 }
+
+/* Is any descriptor in this table holding this exact store file — the same
+ * slot *and* the same generation? The generation is what makes the question
+ * honest: a slot number outlives its file, and a descriptor left open on a
+ * removed note must not be what keeps the *next* note in that slot undeletable.
+ * Deliberately not `live_file()`: that helper answers "is this fd still
+ * usable", and an fd whose file is gone is unusable in exactly the way that
+ * makes it safe to delete over. */
+static int holds_file(int idx)
+{
+    for (int i = 0; i < VFS_MAX_OPEN; i++)
+        if (slots[i].used && slots[i].tidx == idx &&
+            slots[i].gen == tmpfs_gen(idx))
+            return 1;
+    return 0;
+}
+
+/* One path into the store's name form, after the archive gets the first
+ * refusal. Both DEL and REN ask the same two questions in the same order —
+ * is this a read-only name, and can the store even say it back — so they share
+ * the crossing. Returns 0 when `out` holds the normalised name, or the
+ * negative answer: -WC_EPERM when the archive owns the path, -WC_EINVAL /
+ * -WC_ENAMETOOLONG when the store cannot name it at all. */
+static int64_t store_only(const char *path, char *out, size_t cap)
+{
+    if (path == NULL || path[0] == '\0')
+        return WC_EINVAL;
+    if (initrd_find(path) != NULL)
+        return WC_EPERM;
+    return (int64_t)tmpfs_norm(path, out, cap);
+}
+
+int64_t vfs_remove(const char *path)
+{
+    char name[TMPFS_NAME_MAX];
+
+    int64_t r = store_only(path, name, sizeof name);
+    if (r < 0)
+        return r;
+
+    int idx = tmpfs_lookup(name);
+    if (idx < 0)
+        return WC_ENOENT;
+    if (holds_file(idx))
+        return WC_EBUSY;
+    return tmpfs_remove(name);
+}
+
+int64_t vfs_rename(const char *from, const char *to)
+{
+    char a[TMPFS_NAME_MAX], b[TMPFS_NAME_MAX];
+
+    int64_t r = store_only(from, a, sizeof a);
+    if (r < 0)
+        return r;
+    r = store_only(to, b, sizeof b);
+    if (r < 0)
+        return r;
+
+    int idx = tmpfs_lookup(a);
+    if (idx < 0)
+        return WC_ENOENT;
+    /* Checked before the name moves, not after the copy of a rename-two-steps:
+     * a refused REN has to leave the file exactly where it was, and the only
+     * way to promise that is to decide before changing anything. */
+    if (holds_file(idx))
+        return WC_EBUSY;
+    if (strcmp(b, a) == 0)
+        return 0;                     /* same name: success, no edit */
+    if (tmpfs_lookup(b) >= 0)
+        return WC_EEXIST;
+
+    return tmpfs_rename(a, b);
+}

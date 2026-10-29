@@ -823,6 +823,17 @@ echo '==> a browser that navigates (fetch -> tcp -> store -> address bar + page)
 python3 tools/qemu-desktop.py windclone.iso browser \
     || fail 'the shell could not navigate, or the browser window did not show the page it fetched'
 
+# v0.1.32: cmd's file verbs over the writable store. copy (a program) puts a
+# real archive file into /tmp, then DIR counts it, REN moves its name while the
+# entry count proves the bytes stayed, and DEL frees the slot - with the count
+# proving the file is really gone rather than merely unlisted. Both mutations
+# answer a separate refusal for an archive path, because the initrd is
+# read-only by contract and a DEL that ate /bin/hello would be a program
+# deleted from a store that never held it.
+echo '==> file verbs on the store (copy -> dir -> ren -> del, archive refused)'
+python3 tools/qemu-desktop.py windclone.iso fileops \
+    || fail 'dir/ren/del did not behave over the writable store, or the archive was not read-only'
+
 # v0.1.12: the double buffer + damage claim, measured. The scenario reads the
 # kernel's own "gfx: flip <n> rects, <area> px" lines and requires three things:
 # the boot frame flipped the whole screen, a pure mouse move flipped only a

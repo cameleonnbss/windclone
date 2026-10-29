@@ -142,6 +142,7 @@ struct wc_dirent {
 #define WC_EBADF    (-9)
 #define WC_ECHILD   (-10)               /* no children to wait for   */
 #define WC_EFAULT   (-14)
+#define WC_EBUSY    (-16)                /* somebody else is using it now */
 #define WC_EEXIST   (-17)               /* the name is already taken    */
 #define WC_EINVAL   (-22)
 #define WC_EMFILE   (-24)

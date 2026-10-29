@@ -89,6 +89,28 @@ int64_t vfs_close(int fd);
  * because it must know how far the program headers go before mapping. */
 int64_t vfs_size(int fd);
 
+/* Delete a file, the way DEL does. The rule this header opened with decides
+ * every answer here: the archive is read-only, so a name the initrd owns is
+ * refused (-WC_EPERM) rather than freed from a store that never held it — and
+ * a program file a person meant to delete is not the same thing as a note,
+ * which is why the refusal is its own error instead of a silent -WC_ENOENT.
+ * A store file any descriptor still holds (same slot *and* same generation,
+ * so a recycled slot does not count) is refused -WC_EBUSY: tmpfs could free
+ * the bytes, but a DEL that throws away a file while another process is
+ * mid-write to it is data loss the caller could not have expected. 0 on
+ * success; -WC_ENOENT when neither store has the path; -WC_EINVAL /
+ * -WC_ENAMETOOLONG on a path the store cannot name. */
+int64_t vfs_remove(const char *path);
+
+/* Rename inside the writable store — REN's whole claim: the bytes stay, the
+ * name moves. Either side being an archive name is -WC_EPERM, a busy source
+ * is -WC_EBUSY (the same guard as vfs_remove, checked before the edit so a
+ * refused rename changes nothing), and a destination already in use is
+ * -WC_EEXIST rather than an overwrite: cmd asks before replacing, and this
+ * has no question to ask, so it refuses. Renaming a file onto its own name
+ * succeeds and does nothing. */
+int64_t vfs_rename(const char *from, const char *to);
+
 /* Does this path resolve to anything? The shell needs the yes/no answer to
  * decide whether a word is a program, and it must not have to reach into the
  * initrd to get it — that is the rule this header opened with. Both stores are

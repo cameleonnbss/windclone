@@ -438,6 +438,22 @@ On boot the kernel:
    request line, stored body and painted page are then one navigation, not three hopes.
    The honest scope: plain-text pages over one stop-and-wait connection, not a DOM, a
    renderer, or TLS — an address bar and the bytes behind it.
+35. **answers its own file verbs — DIR, DEL, REN (v0.1.32)**.
+   cmd.exe keeps these as *internal* commands rather than shipping three .exe's, and
+   so does this shell: `dir` lists the writable store and then the archive with a byte
+   total, `del` frees a store file's slot, `ren` moves a name in place while the bytes
+   — and the slot's generation, so an open descriptor still reads its own file — stay
+   where they are. The archive's rule reaches all three: `del /bin/hello` is refused
+   as *read-only* rather than silently deleting a program from a store that never held
+   it, and `del /tmp/ghost` says *no such file*; a rename onto a taken name says *the
+   new name is already taken* instead of overwriting, because this shell has no prompt
+   to ask with. Beneath them, `vfs_remove`/`vfs_rename` in the VFS and `tmpfs_rename`
+   in the store — a file another descriptor still holds is `-EBUSY`, checked *before*
+   anything moves, so a refused rename changes nothing. The headless test copies a
+   real archive file into `/tmp`, watches `dir` count it, renames it and counts the
+   same entry, deletes it and counts one fewer, then fires both read-only refusals.
+   The honest scope: a flat RAM store, so no directories, no move across stores (that
+   is copy-then-del, and `copy` already ships), and nothing survives a reboot.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

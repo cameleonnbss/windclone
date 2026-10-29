@@ -272,6 +272,9 @@ static void cmd_help(void)
     put_line("  CLEAR          EFFACE L'ECRAN");
     put_line("  BAT <NOM>      EXECUTE /TMP/<NOM>.BAT");
     put_line("  FETCH <CHEMIN> NAVIGUE : GET <CHEMIN> -> /NET/FETCHED");
+    put_line("  DIR            LISTE LE STOCKAGE PUIS L'ARCHIVE");
+    put_line("  DEL <CHEMIN>   SUPPRIME UN FICHIER ECRIVABLE");
+    put_line("  REN <A> <B>    RENOMME UN FICHIER ECRIVABLE");
     put_line("  - PROGRAMMES DANS /BIN -");
     put_line("  LS             LISTE L'INITRD");
     put_line("  CAT <FICHIER>  AFFICHE UN FICHIER");
@@ -762,6 +765,177 @@ static void cmd_fetch(int argc, const char *const *argv)
     serial_write(" - navigating over tcp\n");
 }
 
+/* --- cmd.exe's file verbs: DIR, DEL, REN ---------------------------------
+ * `ls` and `copy` already live in /bin, and they are what a *program* can do.
+ * These three are built-ins because they are the shell's own verbs — the ones
+ * a person at a prompt expects the command line itself to answer, exactly as
+ * cmd.exe keeps DIR/DEL/REN internal rather than shipping three .exe's. They
+ * reach the file layer through the VFS and nothing else: the archive is
+ * read-only, so DEL and REN refuse an initrd name with a line that says why,
+ * and only a file in the writable store can actually move or vanish.
+ *
+ * Each refusal is its own sentence rather than one "error" string: the
+ * difference between "the archive is read-only", "no such file" and "the new
+ * name is taken" is the difference a person needs to fix what they typed. */
+
+/* Count every entry the file layer offers, store first then archive, the way
+ * a caller loop does. The numbers go out on the serial port, so a headless test
+ * can watch one appear after a copy and vanish after a del without parsing the
+ * French on the screen. */
+static void count_files(unsigned *files, unsigned long *bytes)
+{
+    *files = 0;
+    *bytes = 0;
+    for (unsigned long i = 0; ; i++) {
+        struct wc_dirent de;
+        if (vfs_dirent(i, &de) != 0)
+            break;
+        if (de.namelen == 0)
+            continue;
+        (*files)++;
+        *bytes += (unsigned long)de.size;
+    }
+}
+
+/* Append a decimal to a screen buffer. There is no printf in the kernel, and a
+ * DIR that shows a size needs one; this is the smallest honest version. The cap
+ * is checked rather than assumed: a uint64 printed in full is twenty digits,
+ * and a formatter that overflowed the row it was filling would be a stack
+ * smash hiding behind a cosmetic command. */
+static int dec_into(char *out, int n, unsigned long v, int cap)
+{
+    char d[24];
+    int m = 0;
+
+    if (v == 0)
+        d[m++] = '0';
+    while (v > 0 && m < (int)sizeof d) {
+        d[m++] = (char)('0' + (v % 10));
+        v /= 10;
+    }
+    while (m > 0 && n + 1 <= cap)
+        out[n++] = d[--m];
+    return n;
+}
+
+static void cmd_dir(void)
+{
+    unsigned files;
+    unsigned long bytes;
+
+    count_files(&files, &bytes);
+    put_line("FICHIERS - STOCKAGE TEMPORAIRE PUIS ARCHIVE:");
+
+    for (unsigned long i = 0; ; i++) {
+        struct wc_dirent de;
+        if (vfs_dirent(i, &de) != 0)
+            break;
+        if (de.namelen == 0)
+            continue;
+
+        char row[SHELL_COLS + 1];
+        int n = 0;
+        row[n++] = ' ';
+        row[n++] = ' ';
+        for (unsigned k = 0; k < de.namelen && n < SHELL_COLS - 12; k++)
+            row[n++] = upper(de.name[k]);
+        for (; n < SHELL_COLS - 12; n++)
+            row[n] = ' ';
+        n = dec_into(row, n, (unsigned long)de.size, SHELL_COLS);
+        row[n] = '\0';
+        put_line(row);
+    }
+
+    {
+        char row[SHELL_COLS + 1];
+        int n = 0;
+        const char *pre = "TOTAL: ";
+        for (; *pre != '\0' && n < SHELL_COLS - 1; pre++)
+            row[n++] = *pre;
+        n = dec_into(row, n, files, SHELL_COLS);
+        const char *mid = " FICHIERS, ";
+        for (; *mid != '\0' && n < SHELL_COLS - 1; mid++)
+            row[n++] = *mid;
+        n = dec_into(row, n, bytes, SHELL_COLS);
+        row[n] = '\0';
+        put_line(row);
+    }
+
+    serial_write("shell: dir shows ");
+    serial_write_dec((uint64_t)files);
+    serial_write(" entries, ");
+    serial_write_dec((uint64_t)bytes);
+    serial_write(" bytes in the file layer\n");
+}
+
+static void cmd_del(int argc, const char *const *argv)
+{
+    if (argc < 2) {
+        put_line("USAGE: DEL <CHEMIN>");
+        return;
+    }
+
+    int64_t r = vfs_remove(argv[1]);
+    if (r == 0) {
+        unsigned files;
+        unsigned long bytes;
+        count_files(&files, &bytes);
+        put_line("FICHIER SUPPRIME DU STOCKAGE ECRIVABLE");
+        serial_write("shell: deleted ");
+        serial_write(argv[1]);
+        serial_write(" - ");
+        serial_write_dec((uint64_t)files);
+        serial_write(" entries left in the file layer\n");
+        return;
+    }
+
+    put_line("SUPPRESSION REFUSEE");
+    serial_write("shell: del refused ");
+    serial_write(argv[1]);
+    if (r == WC_EPERM)
+        serial_write(" - the archive is read-only\n");
+    else if (r == WC_ENOENT)
+        serial_write(" - no such file\n");
+    else if (r == WC_EBUSY)
+        serial_write(" - a descriptor still holds it\n");
+    else
+        serial_write(" - not a name the store can hold\n");
+}
+
+static void cmd_ren(int argc, const char *const *argv)
+{
+    if (argc < 3) {
+        put_line("USAGE: REN <ANCIEN> <NOUVEAU>");
+        return;
+    }
+
+    int64_t r = vfs_rename(argv[1], argv[2]);
+    if (r == 0) {
+        put_line("FICHIER RENOME DANS LE STOCKAGE ECRIVABLE");
+        serial_write("shell: renamed ");
+        serial_write(argv[1]);
+        serial_write(" -> ");
+        serial_write(argv[2]);
+        serial_write("\n");
+        return;
+    }
+
+    put_line("RENOMMAGE REFUSE");
+    serial_write("shell: ren refused ");
+    serial_write(argv[1]);
+    if (r == WC_EPERM)
+        serial_write(" - the archive is read-only\n");
+    else if (r == WC_ENOENT)
+        serial_write(" - no such file\n");
+    else if (r == WC_EEXIST)
+        serial_write(" -> the new name is already taken\n");
+    else if (r == WC_EBUSY)
+        serial_write(" - a descriptor still holds it\n");
+    else
+        serial_write(" - not a name the store can hold\n");
+}
+
+
 /* One command line, wherever it came from. `line` is written in place — spaces
  * become NULs so argv[] points into it and there is no second copy to keep in
  * sync — and the buffer belongs to the caller, which is what lets a typed line
@@ -795,6 +969,12 @@ static void run_line(char *line, int len, const char *origin)
         cmd_bat(argc, argv);
     else if (strcmp(argv[0], "fetch") == 0)
         cmd_fetch(argc, argv);
+    else if (strcmp(argv[0], "dir") == 0)
+        cmd_dir();
+    else if (strcmp(argv[0], "del") == 0)
+        cmd_del(argc, argv);
+    else if (strcmp(argv[0], "ren") == 0)
+        cmd_ren(argc, argv);
     else
         cmd_program(argc, argv, origin);
 }
