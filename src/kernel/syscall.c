@@ -38,6 +38,7 @@
 #include "idt.h"
 #include "serial.h"
 #include "string.h"
+#include "net.h"
 
 extern void syscall_stub(void);
 
@@ -163,6 +164,34 @@ static int64_t sys_open2(uint64_t upath, uint64_t flags)
 static int64_t sys_close(uint64_t fd)
 {
     return vfs_close((int)fd);
+}
+
+/* net_addr(buf, len) — the browser's address bar, answered from tcp.c's own
+ * record of the request that went on the wire. The string is copied byte by
+ * byte into a buffer the caller owns, after the pages behind it have been
+ * checked for write access; the kernel pointer itself never leaves ring 0. */
+static int64_t sys_net_addr(uint64_t buf, uint64_t len)
+{
+    const char *a = net_last_addr();
+
+    if (a == 0)
+        return WC_ENOENT;
+    if (len > USER_BUF_MAX)
+        len = USER_BUF_MAX;
+
+    uint64_t n = 0;
+    while (a[n] != '\0')
+        n++;
+    n++;                              /* the bar reads the NUL too */
+    if (len < n)
+        return WC_ERANGE;
+    if (!user_ptr_ok(buf, n, 1))
+        return WC_EFAULT;
+
+    char *dst = (char *)(uintptr_t)buf;
+    for (uint64_t i = 0; i < n; i++)
+        dst[i] = a[i];
+    return 0;
 }
 
 /* getdirent(index, struct wc_dirent *out) — the one call that hands a program
@@ -323,6 +352,10 @@ void syscall_handler(struct syscall_frame *f)
          * can change while a program runs, and no argument to validate — the
          * answer is a number the caller cannot influence. */
         f->rax = (uint64_t)proc_current_ppid();
+        break;
+
+    case SYS_NET_ADDR:
+        f->rax = (uint64_t)sys_net_addr(f->rdi, f->rsi);
         break;
 
     case SYS_SCHED_YIELD:

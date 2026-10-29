@@ -30,6 +30,7 @@
 #include "timer.h"
 #include "version.h"
 #include "desktop.h"
+#include "net.h"
 
 #define SHELL_ROWS 17
 #define SHELL_COLS 62
@@ -270,6 +271,7 @@ static void cmd_help(void)
     put_line("  ABOUT          VERSION ET UPTIME");
     put_line("  CLEAR          EFFACE L'ECRAN");
     put_line("  BAT <NOM>      EXECUTE /TMP/<NOM>.BAT");
+    put_line("  FETCH <CHEMIN> NAVIGUE : GET <CHEMIN> -> /NET/FETCHED");
     put_line("  - PROGRAMMES DANS /BIN -");
     put_line("  LS             LISTE L'INITRD");
     put_line("  CAT <FICHIER>  AFFICHE UN FICHIER");
@@ -283,6 +285,7 @@ static void cmd_help(void)
     put_line("  NOTE <NOM>     EDITE /TMP/<NOM> (OU <NOM>.TXT)");
     put_line("  VIEW <FICHIER> AFFICHE UN FICHIER EN COULEUR");
     put_line("  PKG            MONTRE LA PAGE RECUPEREE /NET/FETCHED");
+    put_line("  BROWSER        BARRE D'ADRESSE + LA PAGE RECUPEREE");
     put_line("CE QUE TU LANCES ICI EST UN PROCESSUS: PID REEL,");
     /* The shell's pid is printed as the number the table holds, not as a "1"
      * written into this file: the claim on the screen is then whatever the
@@ -722,6 +725,43 @@ static void cmd_about(void)
 
 static void cmd_bat(int argc, const char *const *argv);
 
+/* `fetch /second` — the address bar's other half, and the shell's only built-in
+ * that does not finish while the call is running. The page cannot be read back
+ * here: a received frame exists only once the emulator's network gets the CPU,
+ * and that happens in `hlt` in the idle loop, so this function can only hand the
+ * request to net.c and say out loud what it asked for. The transfer, the store
+ * and the digest come later, from the same machine that fetched the boot page.
+ *
+ * Three refusals, each a line rather than a silent drop: no name, a name the
+ * client will not accept (nothing resolved yet, or a navigation already under
+ * way), and a path with no leading '/'. The last one is not pedantry — the GET
+ * line is built from this string byte for byte, so "second" would ask a real
+ * server for a document it does not have and read a 404 back as if the network
+ * had failed. */
+static void cmd_fetch(int argc, const char *const *argv)
+{
+    if (argc < 2) {
+        put_line("USAGE: FETCH <CHEMIN>  PAR /SECOND");
+        return;
+    }
+    if (argv[1][0] != '/') {
+        put_line("FETCH: LE CHEMIN COMMENCE PAR /");
+        return;
+    }
+    if (!net_resolved()) {
+        put_line("FETCH: PAS DE PASSERELLE RESOLUE - RESEAU OCCUPE");
+        return;
+    }
+    if (!net_start_fetch(argv[1], "net/fetched")) {
+        put_line("FETCH: NAVIGATION DEJA EN COURS");
+        return;
+    }
+    put_line("FETCH: REQUETE ENREGISTREE - LE RESEAU VA NAVIGUER");
+    serial_write("shell: fetch ");
+    serial_write(argv[1]);
+    serial_write(" - navigating over tcp\n");
+}
+
 /* One command line, wherever it came from. `line` is written in place — spaces
  * become NULs so argv[] points into it and there is no second copy to keep in
  * sync — and the buffer belongs to the caller, which is what lets a typed line
@@ -753,6 +793,8 @@ static void run_line(char *line, int len, const char *origin)
         surf_clear(&term);
     else if (strcmp(argv[0], "bat") == 0)
         cmd_bat(argc, argv);
+    else if (strcmp(argv[0], "fetch") == 0)
+        cmd_fetch(argc, argv);
     else
         cmd_program(argc, argv, origin);
 }

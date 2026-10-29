@@ -192,6 +192,13 @@ HMP_OK = set("abcdefghijklmnopqrstuvwxyz0123456789") | {
 # back the same bytes it served, not merely a plausible count.
 PAGE_BODY = "<html><body>windclone-first-fetch</body></html>\n"
 
+# The page the browser scenario navigates to *after* boot. The boot fetch is
+# fixed ("/"), so the second file is what proves the address bar and the stored
+# body followed the request rather than the first page: different bytes, a
+# different digest, and an attribute for the lexer to colour.
+SECOND_BODY = ('<html><body><p class="second">windclone-second-page</p>'
+               '</body></html>\n')
+
 
 def count_serial(pattern):
     """How many times the serial log already says `pattern`. A marker that a
@@ -1785,6 +1792,85 @@ def scenario_actions(sc, mon, W, H):
             raise SystemExit("the page round-tripped to 0x%s but the served body "
                              "digests to 0x%s - the bytes are not the same"
                              % (d.group(2), want))
+    elif sc == "browser":
+        # v0.1.31: the machine navigates on request and a window says where it
+        # went. The boot fetch ("/") belongs to the pkg scenario; here the test
+        # asks the shell for a second page, and every assertion is made against
+        # bytes only /second.html has - a different body, a different digest.
+        # The address bar text is not echoed from the keyboard: a ring-3 program
+        # cannot invent it, it reads the kernel's own record over syscall 14, so
+        # a bar naming /second.html means the request line, the stored body and
+        # the painted page all followed the same navigation.
+        s = wait_serial(r"http: stored (\d+) body bytes into /net/fetched")
+        if int(s.group(1)) != len(PAGE_BODY):
+            raise SystemExit("the boot fetch stored %s bytes, not the %d-byte "
+                             "index page - there is nothing to navigate away from"
+                             % (s.group(1), len(PAGE_BODY)))
+
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+        mon.type_text("fetch /second.html\n")
+
+        n = wait_serial(r"shell: fetch /second\.html - navigating over tcp")
+        mark = n.end()
+        # Same client, re-armed: a fresh ephemeral port and a new handshake,
+        # on the lease and gateway MAC the boot already negotiated.
+        mark, _ = wait_serial_after(
+            mark, r"tcp: connecting to 10\.0\.2\.2:8080/second\.html")
+        mark, h = wait_serial_after(
+            mark, r"http: status (\d+), (\d+) bytes read"
+                  r" - first web fetch over tcp: /second\.html")
+        status = int(h.group(1))
+        if not (100 <= status <= 599):
+            raise SystemExit("bogus http status %d on the second navigation"
+                             % status)
+        mark, st = wait_serial_after(
+            mark, r"http: stored (\d+) body bytes into /net/fetched")
+        stored = int(st.group(1))
+        if stored != len(SECOND_BODY):
+            raise SystemExit("the navigation stored %s bytes where the server "
+                             "holds %d for /second.html" % (st.group(1),
+                                                            len(SECOND_BODY)))
+        want = fnv1a(SECOND_BODY.encode())
+        if want == fnv1a(PAGE_BODY.encode()):
+            raise SystemExit("the two served pages digest alike - the test "
+                             "cannot tell a navigation from the boot fetch")
+
+        mon.type_text("browser\n")
+        mark, m = wait_serial_after(
+            mark, r"wm: program window opened 'browser' pid (\d+)")
+        ppid = int(m.group(1))
+        mark, r2 = wait_serial_after(
+            mark, r"browser: read (\d+) bytes from /net/fetched pid (\d+)")
+        if int(r2.group(2)) != ppid:
+            raise SystemExit("browser read on pid %s but its window is pid %s"
+                             % (r2.group(2), ppid))
+        if int(r2.group(1)) != stored:
+            raise SystemExit("browser read %s bytes, not the %d the navigation "
+                             "stored - the file kept the old page"
+                             % (r2.group(1), stored))
+        mark, _ = wait_serial_after(mark, r"wm: screen cleared pid %d" % ppid)
+        mark, _ = wait_serial_after(mark, r"wm: colour pid %d" % ppid)
+        mark, d = wait_serial_after(
+            mark, r"browser: rendered (\d+) bytes, (\d+) tags, "
+                  r"digest 0x([0-9a-f]{8})")
+        if int(d.group(1)) != stored:
+            raise SystemExit("browser rendered %s bytes but read %d"
+                             % (d.group(1), stored))
+        if int(d.group(2)) < 4:
+            raise SystemExit("the lexer counted %s tags in a document with six "
+                             "- it painted the page without reading it"
+                             % d.group(2))
+        if d.group(3) != want:
+            raise SystemExit("the second page round-tripped to 0x%s but the "
+                             "served body digests to 0x%s - the bytes are not "
+                             "the same" % (d.group(3), want))
+        mark, a = wait_serial_after(
+            mark, r"browser: address bar shows (\S+)")
+        if a.group(1) != "10.0.2.2:8080/second.html":
+            raise SystemExit("the address bar showed %s, not the address the "
+                             "kernel put on the wire" % a.group(1))
     else:
         raise SystemExit("unknown scenario: %s" % sc)
 
@@ -1923,6 +2009,15 @@ MARKERS = {
                   "wm: program window opened 'pkg'",
                   "pkg: read", "bytes from /net/fetched",
                   "wm: screen cleared", "pkg: rendered fetched page"],
+    # v0.1.31: a navigation, not a download. The shell queues /second.html, the
+    # same TCP client re-arms and fetches it, the store holds the new bytes, and
+    # /bin/browser paints them under the address the kernel itself recorded (all
+    # cross-checked - digest, byte counts, pid, bar text - inside the scenario).
+    "browser":   ["shell: fetch /second.html", "tcp: connecting to 10.0.2.2:8080",
+                  "first web fetch over tcp: /second.html",
+                  "http: stored", "wm: program window opened 'browser'",
+                  "browser: read", "wm: colour pid",
+                  "browser: rendered", "browser: address bar shows"],
 }
 
 
@@ -1941,10 +2036,13 @@ def main():
     # passes only if the kernel completes a TCP handshake and reads a 200 back.
     web = None
     webdir = None
-    if sc in ("net", "pkg"):
+    if sc in ("net", "pkg", "browser"):
         webdir = tempfile.mkdtemp(prefix="wcweb-")
         with open(os.path.join(webdir, "index.html"), "w") as fh:
             fh.write(PAGE_BODY)
+        if sc == "browser":
+            with open(os.path.join(webdir, "second.html"), "w") as fh:
+                fh.write(SECOND_BODY)
         web = subprocess.Popen(
             [sys.executable, "-m", "http.server", "8080",
              "--bind", "127.0.0.1", "--directory", webdir],
@@ -2016,8 +2114,12 @@ def main():
             except subprocess.TimeoutExpired:
                 web.kill()
         if webdir is not None:
+            for name in ("index.html", "second.html"):
+                try:
+                    os.remove(os.path.join(webdir, name))
+                except OSError:
+                    pass
             try:
-                os.remove(os.path.join(webdir, "index.html"))
                 os.rmdir(webdir)
             except OSError:
                 pass

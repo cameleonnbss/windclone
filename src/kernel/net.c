@@ -11,6 +11,7 @@
 #include "timer.h"
 #include "log.h"
 #include "serial.h"
+#include "string.h"
 
 /* QEMU's SLIRP user-mode network hands the guest 10.0.2.15, answers for its
  * gateway at 10.0.2.2, replies to an ICMP echo sent there, and runs a BOOTP/
@@ -27,6 +28,17 @@ static const uint8_t GW_IP[4]  = { 10, 0, 2, 2 };
 #define DHCP_XID 0x0dc1a7e5u
 
 enum { NET_OFF, NET_ARP, NET_PING, NET_DHCP, NET_TCP, NET_DONE };
+
+/* A navigation the shell asked for, in the three states that matter to a test:
+ * `req_busy` is set the moment net_start_fetch() accepts a request and cleared by
+ * the pump when it takes it, so a fetch that was refused (no lease yet) can never
+ * be mistaken for one that finished, and a second keystroke cannot put two
+ * connections on top of one another. `req_pending` is the request itself waiting
+ * for the pump to be free. */
+static int      req_busy;
+static int      req_pending;
+static char     req_url[64];
+static char     req_dest[64];
 
 static int      state;
 static uint8_t  our_mac[6];
@@ -294,7 +306,57 @@ void net_init(void)
     tries = 0;
     seq = 0;
     last_send = 0;
+    req_busy = 0;
+    req_pending = 0;
     klog("net: arp/icmp/dhcp client armed for 10.0.2.2 on top of e1000");
+}
+
+/* A bounded copy of one half of a navigation request. The caller is the shell,
+ * so the string is typed text: it is capped to the buffer rather than trusted,
+ * and a request whose path will not fit is refused by the caller instead of being
+ * sent half. */
+static void copy_req(char *dst, int cap, const char *src)
+{
+    int i = 0;
+
+    if (src == 0) {
+        dst[0] = '\0';
+        return;
+    }
+    while (src[i] != '\0' && i + 1 < cap) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
+int net_start_fetch(const char *url, const char *dest)
+{
+    /* Nothing to build a frame with until the lease arrived: the client has no
+     * source address and no gateway MAC, and sending a SYN built from guesses
+     * would be a connection that cannot be the one it claims to be. */
+    if (state != NET_DONE || req_busy || req_pending)
+        return 0;
+    if (url == 0 || url[0] == '\0')
+        return 0;
+    if (strlen(url) >= sizeof req_url)
+        return 0;                       /* refuse a path that would be sent half */
+    copy_req(req_url, (int)sizeof req_url, url);
+    copy_req(req_dest, (int)sizeof req_dest,
+             (dest == 0 || dest[0] == '\0') ? "net/fetched" : dest);
+    req_busy = 1;
+    req_pending = 1;
+    return 1;
+}
+
+int net_fetch_busy(void)
+{
+    return req_busy || req_pending;
+}
+
+const char *net_last_addr(void)
+{
+    return tcp_last_addr();
 }
 
 void net_visit(void)
@@ -302,8 +364,25 @@ void net_visit(void)
     /* Once the lease is in hand the TCP/HTTP machine owns the pump: it drains
      * and retransmits on its own cadence, so hand it the loop and step back. */
     if (state == NET_TCP) {
-        if (tcp_visit())
+        if (tcp_visit()) {
             state = NET_DONE;
+            req_busy = 0;                 /* the machine is free to navigate again */
+        }
+        return;
+    }
+
+    /* The exchange is over and somebody asked for a page: take the request, empty
+     * the ring of anything the last connection left in it, and hand the pump back.
+     * Draining first matters - an ACK that arrives after our own FIN belongs to the
+     * connection we just closed, and a new one must not start with it waiting. */
+    if (state == NET_DONE && req_pending) {
+        uint8_t drain[340];
+        for (int i = 0; i < 8; i++)
+            if (e1000_rx(drain, (int)sizeof drain) <= 0)
+                break;
+        req_pending = 0;
+        tcp_start(lease_ip, gw_mac, req_url, req_dest);
+        state = NET_TCP;
         return;
     }
 
@@ -345,7 +424,7 @@ void net_visit(void)
                 ip_str(ip, s);
                 klog("dhcp: offer %s from 10.0.2.2 - lease understood", s);
                 for (int i = 0; i < 4; i++) lease_ip[i] = ip[i];
-                tcp_init(lease_ip, gw_mac);               /* now fetch over TCP */
+                tcp_start(lease_ip, gw_mac, "/", "net/fetched");
                 state = NET_TCP;
                 return;
             }

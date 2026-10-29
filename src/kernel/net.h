@@ -28,6 +28,12 @@
  * BOOTP server hands us the lease, and we match on the transaction id so we
  * know the offer answers our discover.
  *
+ * v0.1.31 turned the boot-only exchange into a machine that can be asked again:
+ * once the first page has been fetched the pump is idle, and net_start_fetch()
+ * hands it back to the TCP client for a new address. That is what a browser's
+ * address bar needs - not a second network stack, but the same one driven a
+ * second time, with the lease and the resolved gateway it already negotiated.
+ *
  * SPDX-License-Identifier: MIT
  */
 #ifndef WINDCLONE_NET_H
@@ -43,5 +49,22 @@ void net_visit(void);
 
 /* 1 once the gateway (10.0.2.2) MAC has been resolved from a real reply. */
 int net_resolved(void);
+
+/* Navigate: ask the machine for one more page, now, from the shell. `url` is
+ * the path put in the GET line and `dest` the file the body lands in (either may
+ * be NULL for the boot default). Returns 0 when the address was never resolved
+ * and 1 when there is nothing to take the lease's place - the request is queued
+ * and net_visit() drives it from the idle loop, because a ring-3 program cannot
+ * pump SLIRP any more than it could before. Refuses a second navigation while one
+ * is in flight rather than letting two connections share one pump. */
+int net_start_fetch(const char *url, const char *dest);
+
+/* 1 while a fetch the shell asked for is still running. */
+int net_fetch_busy(void);
+
+/* The address of the last fetch as the kernel recorded it, or NULL before the
+ * first one. The address bar shows this, so the text is the machine's own answer
+ * and not a copy of what someone typed. */
+const char *net_last_addr(void);
 
 #endif

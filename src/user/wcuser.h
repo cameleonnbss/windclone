@@ -120,6 +120,16 @@ static inline long wc_getppid(void)
     return wc_call1(SYS_GETPPID, 0);
 }
 
+/* The kernel's own record of the last address it fetched — "10.0.2.2:8080/page"
+ * as tcp.c put it on the wire, not a string this program can invent. 0 fills
+ * buf with the NUL-terminated text; -WC_ENOENT means nothing has been fetched
+ * yet, and an address bar that prints "no request" on that error is honest in a
+ * way a bar that prints nothing is not. */
+static inline long wc_net_addr(char *buf, unsigned long len)
+{
+    return wc_call2(SYS_NET_ADDR, (long)buf, (long)len);
+}
+
 /* Give the CPU up and come back later. This is the cooperative half of the
  * scheduler: the kernel switches to the next runnable process and returns here
  * as if the call had simply finished. Returns 0. */

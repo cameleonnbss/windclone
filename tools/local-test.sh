@@ -812,6 +812,17 @@ echo '==> a fetched page becomes a package a program opens (http -> store -> win
 python3 tools/qemu-desktop.py windclone.iso pkg \
     || fail 'the fetched page was not stored, or /bin/pkg could not render it identically'
 
+# v0.1.31: the machine navigates on request. `fetch /second.html` at the prompt
+# re-arms the same TCP client on the boot's lease, the body of the *second* page
+# replaces the first in the store, and /bin/browser paints it under the address
+# the kernel recorded - read back over syscall 14 by a ring-3 program that has
+# no other way to know it. The scenario digests the rendered page against the
+# bytes it served and requires the bar to name /second.html, so a window that
+# quietly kept the boot page, or a bar echoing the keyboard, both fail the run.
+echo '==> a browser that navigates (fetch -> tcp -> store -> address bar + page)'
+python3 tools/qemu-desktop.py windclone.iso browser \
+    || fail 'the shell could not navigate, or the browser window did not show the page it fetched'
+
 # v0.1.12: the double buffer + damage claim, measured. The scenario reads the
 # kernel's own "gfx: flip <n> rects, <area> px" lines and requires three things:
 # the boot frame flipped the whole screen, a pure mouse move flipped only a

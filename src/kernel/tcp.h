@@ -20,6 +20,13 @@
  * loopback, which SLIRP exposes to the guest at 10.0.2.2. We connect to the
  * gateway we already resolved, using the address the DHCP offer handed us.
  *
+ * v0.1.31 added the part a browser needs: the request line and the destination
+ * are arguments instead of constants, and every fetch gets its own ephemeral
+ * port and its own initial sequence number, so a second navigation is a second
+ * real connection rather than a replay of the first. The address of the last
+ * fetch is kept for the address bar, which is the only way a program can show
+ * what the kernel actually asked for.
+ *
  * SPDX-License-Identifier: MIT
  */
 #ifndef WINDCLONE_TCP_H
@@ -28,8 +35,19 @@
 #include <stdint.h>
 
 /* Start a fresh connection attempt. our_ip is the lease we negotiated, gw_mac
- * the gateway resolved by ARP; the server lives at 10.0.2.2 on SERVER_PORT. */
-void tcp_init(const uint8_t *our_ip, const uint8_t *gw_mac);
+ * the gateway resolved by ARP; the server lives at 10.0.2.2 on SERVER_PORT.
+ * `url` is the path asked for in the GET line and `dest` the name the body is
+ * stored under; either may be NULL, which means the boot default - "/" and
+ * /net/fetched. That is what lets the same machine answer a keystroke for a new
+ * address and not only the one page it fetched at boot. */
+void tcp_start(const uint8_t *our_ip, const uint8_t *gw_mac,
+               const char *url, const char *dest);
+
+/* The address the running or last finished fetch asked for, in the form the
+ * address bar shows it (10.0.2.2:8080/second). NULL until a fetch has named
+ * one. A shell built-in and /bin/browser read this so the text in the bar is
+ * the kernel's own record of the request, not a string the program guessed. */
+const char *tcp_last_addr(void);
 
 /* Advance the TCP/HTTP state machine once: read any arrived segment, send the
  * next expected packet (or retransmit on the cadence). Non-blocking. Returns 1

@@ -97,6 +97,18 @@
 #define WC_O_TRUNC    0x200   /* 01000: throw away what is already in it     */
 #define WC_O_EXCL     0x400   /* 04000: fail if O_CREAT finds it already there */
 
+/* net_addr(buf, len) — the fourteenth call, added with v0.1.31's browser. The
+ * address bar of a browser must show the request the *machine* actually put on
+ * the wire, and that record lives in the kernel (tcp.c), not in any file a
+ * program could open. Handing ring 3 a kernel pointer would break the border,
+ * and storing the text in a side file would make every scenario that counts
+ * the files in the store wrong; so this copies the kernel's own words into a
+ * caller-owned buffer, checked page by page like every other return. 0 on
+ * success (buf holds a NUL-terminated address), -WC_ENOENT when nothing has
+ * been fetched this boot, -WC_EFAULT for an unmapped or read-only buffer and
+ * -WC_ERANGE when the buffer cannot hold the whole string plus its NUL. */
+#define SYS_NET_ADDR 14
+
 /* --- signals ------------------------------------------------------------ */
 /* Only SIGKILL exists so far, and only as the argument of kill(): there is no
  * delivery, no masking, no handler. It is Linux's number because Linux's

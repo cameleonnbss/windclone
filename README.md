@@ -424,6 +424,20 @@ On boot the kernel:
    knows, recomputes that digest itself, and requires the rendered one to match: the
    count is the kernel's, but the *identity* of the bytes — TCP to the store to the
    VFS to a pixel on screen — is what makes this a package and not a picture of one.
+34. **navigates on request, in a browser window with a real address bar (v0.1.31)**.
+   One boot-time page is a download; a browser answers *this* address, *now*. `fetch
+   /second.html` at the prompt queues the path to net.c, the same TCP client re-arms
+   on the boot's lease with a fresh ephemeral port and ISS, builds `GET /second.html
+   HTTP/1.0`, and the body replaces the first page in the store. A new `/bin/browser`
+   then paints the markup — tags, names, quoted values and text in four inks — under
+   a bar whose text is not an echo of the keyboard: a ring-3 program cannot call the
+   kernel, so syscall 14 (`net_addr`) copies tcp.c's own record of the address it put
+   on the wire into the program's buffer. The headless test serves a second page whose
+   bytes differ from the boot page, and requires the rendered digest to match *it*, the
+   tag lexer to have counted six tags, and the bar to read `10.0.2.2:8080/second.html`:
+   request line, stored body and painted page are then one navigation, not three hopes.
+   The honest scope: plain-text pages over one stop-and-wait connection, not a DOM, a
+   renderer, or TLS — an address bar and the bytes behind it.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

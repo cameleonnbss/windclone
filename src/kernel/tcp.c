@@ -13,12 +13,15 @@
 #include "tmpfs.h"
 
 #define SERVER_PORT   8080      /* the harness http.server on the host loopback */
-#define CLIENT_PORT   12345     /* our fixed ephemeral port                     */
+#define FIRST_PORT    12345     /* the first ephemeral port we use              */
 #define RETRY_TICKS   20u       /* ~200ms between retransmits                   */
 #define MAX_TRIES     60u       /* then give up: the connection is not happening */
 #define RESP_MAX      2048      /* the whole response, headers and body         */
-#define FETCH_NAME    "net/fetched"   /* where the body lands in the store      */
+#define FETCH_NAME    "net/fetched"   /* where the body lands by default        */
 #define SETTLE_LIMIT  8u        /* idle visits before we call a response done   */
+#define URL_MAX       64        /* the path asked for in the GET line           */
+#define NAME_MAX      64        /* the store name the body is written to        */
+#define ADDR_MAX      96        /* host:port + path, what the bar shows         */
 
 enum { TCPC_IDLE, TCPC_SYN_SENT, TCPC_ESTABLISHED, TCPC_SENT_GET,
        TCPC_DONE, TCPC_FAILED };
@@ -34,6 +37,7 @@ static uint32_t rcv_nxt;      /* next seq byte we expect       */
 static uint64_t last_send;
 static int      tries;
 static int      get_sent;
+static uint16_t srv_port;     /* our ephemeral port for THIS fetch */
 
 /* The response is accumulated in full - status line, headers, the blank line
  * that ends them, and the body after it - so that a package manager can pull a
@@ -45,6 +49,19 @@ static uint8_t  resp[RESP_MAX];
 static int      resp_len;
 static int      server_fin;
 static int      settled;
+
+/* What this fetch asked for and where its body goes. They are arguments rather
+ * than constants because a browser is not one page: typing a new address has to
+ * change the request line and the file it lands in, while the machine driving
+ * the connection stays exactly the one that fetched the boot page. `addr` is the
+ * two joined in the form an address bar shows, kept after the transfer ends so
+ * the window a program opens a minute later still names the page it is rendering.
+ * A fetch that has never run leaves `url` empty, and the boot path fills it with
+ * "/" so even the first page has an address of its own. */
+static char     url[URL_MAX];
+static char     dest[NAME_MAX];
+static char     addr[ADDR_MAX];
+static unsigned fetch_no;         /* one per navigation, feeds port and iss */
 
 /* Big-endian primitives: the wire is network byte order. */
 static void put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
@@ -98,7 +115,7 @@ static int build(uint8_t *f, uint8_t flags, uint32_t seq, uint32_t ack,
     put16(&f[24], cksum_bytes(0, &f[14], 20));        /* IPv4 header checksum */
 
     uint8_t *t = &f[34];                               /* TCP header         */
-    put16(&t[0], CLIENT_PORT);
+    put16(&t[0], srv_port);
     put16(&t[2], SERVER_PORT);
     put32(&t[4], seq);
     put32(&t[8], ack);
@@ -136,7 +153,7 @@ static int tcp_segment(const uint8_t *f, int n, uint8_t *flags_out,
     const uint8_t *t = f + 14 + ihl;
     if ((int)(t - f) + 20 > n) return 0;
     if (get16(&t[0]) != SERVER_PORT) return 0;         /* from our server     */
-    if (get16(&t[2]) != CLIENT_PORT) return 0;         /* to our port         */
+    if (get16(&t[2]) != srv_port) return 0;            /* to our port         */
     int tcp_len = (t[12] >> 4) * 4;
     int ip_total = get16(&f[16]);
     int avail = 14 + ip_total;
@@ -150,12 +167,76 @@ static int tcp_segment(const uint8_t *f, int n, uint8_t *flags_out,
     return 1;
 }
 
-void tcp_init(const uint8_t *ip, const uint8_t *mac)
+/* Copy the requested path and destination, defaulting either one when the
+ * caller did not name it, then render the address the bar will show. Lengths are
+ * capped rather than refused: a path longer than URL_MAX is truncated to what
+ * fits, and the log line that reports the fetch uses the same truncated string,
+ * so what the kernel asked for and what it says it asked for stay one fact. */
+static void set_request(const char *u, const char *d)
+{
+    unsigned n = 0;
+
+    if (u == 0 || *u == '\0')
+        u = "/";
+    if (d == 0 || *d == '\0')
+        d = FETCH_NAME;
+    while (u[n] != '\0' && n + 1 < URL_MAX) {
+        url[n] = u[n];
+        n++;
+    }
+    url[n] = '\0';
+
+    n = 0;
+    while (d[n] != '\0' && n + 1 < NAME_MAX) {
+        dest[n] = d[n];
+        n++;
+    }
+    dest[n] = '\0';
+
+    /* "10.0.2.2:8080/second" - spelled out rather than formatted, because this
+     * kernel has no printf and an address bar is not worth a varargs engine. */
+    n = 0;
+    const char *host = "10.0.2.2:8080";
+    while (*host != '\0' && n + 1 < ADDR_MAX)
+        addr[n++] = *host++;
+    unsigned i = 0;
+    while (url[i] != '\0' && n + 1 < ADDR_MAX)
+        addr[n++] = url[i++];
+    addr[n] = '\0';
+}
+
+/* The one request line this client knows, built around the asked-for path. It
+ * is HTTP/1.0 on purpose: the peer closes after its response, so a FIN is the
+ * honest end of the body and the client does not have to guess. */
+static int build_get(uint8_t *out)
+{
+    static const char head[] = "GET ";
+    static const char tail[] = " HTTP/1.0\r\nHost: windclone\r\n\r\n";
+    unsigned n = 0;
+
+    for (unsigned i = 0; i + 1 < sizeof head; i++)
+        out[n++] = (uint8_t)head[i];
+    for (unsigned i = 0; url[i] != '\0' && n < RESP_MAX; i++)
+        out[n++] = (uint8_t)url[i];
+    for (unsigned i = 0; i + 1 < sizeof tail; i++)
+        out[n++] = (uint8_t)tail[i];
+    return (int)n;
+}
+
+void tcp_start(const uint8_t *ip, const uint8_t *mac,
+               const char *u, const char *d)
 {
     for (int i = 0; i < 4; i++) our_ip[i] = ip[i];
     for (int i = 0; i < 6; i++) gw_mac[i] = mac[i];
     e1000_mac(our_mac);
-    iss = 0x13572468u;               /* a fixed ISS; the wire only needs it consistent */
+    set_request(u, d);
+    /* One port and one ISS per navigation. Reusing both across two connections
+     * would let a leftover segment of the first arrive looking like an answer to
+     * the second, and a machine that cannot tell its connections apart has not
+     * really opened one. */
+    fetch_no++;
+    srv_port = (uint16_t)(FIRST_PORT + fetch_no - 1);
+    iss = 0x13572468u + fetch_no * 1024u;
     snd_nxt = iss;
     rcv_nxt = 0;
     tries = 0;
@@ -165,7 +246,12 @@ void tcp_init(const uint8_t *ip, const uint8_t *mac)
     server_fin = 0;
     settled = 0;
     tcp_state = TCPC_SYN_SENT;
-    klog("tcp: connecting to 10.0.2.2:8080 from the leased address");
+    klog("tcp: connecting to 10.0.2.2:8080%s from the leased address", addr + 13);
+}
+
+const char *tcp_last_addr(void)
+{
+    return addr[0] != '\0' ? addr : (const char *)0;
 }
 
 /* Send the single packet this state expects, retransmitting on the cadence. */
@@ -190,9 +276,10 @@ static void pump_send(uint8_t *f)
          * second GET would ask a server that is already closing for more. */
         if (resp_len != 0 || server_fin)
             return;
-        static const char req[] = "GET / HTTP/1.0\r\nHost: windclone\r\n\r\n";
+        uint8_t req[96];
+        int rlen = build_get(req);
         int len = build(f, 0x18 /* PSH|ACK */, snd_nxt, rcv_nxt,
-                        (const uint8_t *)req, (int)sizeof(req) - 1);
+                        req, rlen);
         if (e1000_tx(f, len) < 0) { tcp_state = TCPC_FAILED; return; }
     } else {
         return;                       /* ESTABLISHED sends its GET inline      */
@@ -241,17 +328,17 @@ static void store_body(int body_start)
     if (blen < 0)
         blen = 0;
 
-    int idx = tmpfs_lookup(FETCH_NAME);
+    int idx = tmpfs_lookup(dest);
     if (idx < 0)
-        idx = tmpfs_create(FETCH_NAME);
+        idx = tmpfs_create(dest);
     if (idx < 0) {
-        serial_write("http: store refused /net/fetched - no slot for the page\n");
+        serial_write("http: store refused the page - no slot for it\n");
         return;
     }
     tmpfs_truncate(idx);
     int64_t wrote = tmpfs_write(idx, 0, resp + body_start, (uint64_t)blen);
-    klog("http: stored %d body bytes into /net/fetched - a page installed from http",
-         (int)(wrote < 0 ? 0 : wrote));
+    klog("http: stored %d body bytes into /%s - a page installed from http",
+         (int)(wrote < 0 ? 0 : wrote), dest);
 }
 
 int tcp_visit(void)
@@ -301,16 +388,16 @@ int tcp_visit(void)
 
     if (tcp_state == TCPC_ESTABLISHED && !get_sent) {
         /* send the ACK+GET, then wait for the response */
-        uint8_t f[128];
-        static const char req[] = "GET / HTTP/1.0\r\nHost: windclone\r\n\r\n";
-        int len = build(f, 0x18, snd_nxt, rcv_nxt, (const uint8_t *)req,
-                        (int)sizeof(req) - 1);
+        uint8_t f[256];
+        uint8_t req[96];
+        int rlen = build_get(req);
+        int len = build(f, 0x18, snd_nxt, rcv_nxt, req, rlen);
         if (e1000_tx(f, len) < 0) { tcp_state = TCPC_FAILED; return 1; }
         get_sent = 1;
         tries = 0;
         last_send = timer_ticks();
         tcp_state = TCPC_SENT_GET;
-        klog("http: GET sent, awaiting response");
+        klog("http: GET %s sent, awaiting response", url);
         return 0;
     }
 
@@ -326,8 +413,8 @@ int tcp_visit(void)
         int body = resp_body_start();
         if (status >= 100 && status < 600 && body >= 0
             && (server_fin || (unsigned)settled >= SETTLE_LIMIT)) {
-            klog("http: status %d, %d bytes read - first web fetch over tcp",
-                 status, resp_len);
+            klog("http: status %d, %d bytes read - first web fetch over tcp: %s",
+                 status, resp_len, url);
             store_body(body);
             uint8_t f[84];
             int fl = build(f, 0x01 /* FIN */, snd_nxt, rcv_nxt, 0, 0);

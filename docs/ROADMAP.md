@@ -1008,7 +1008,17 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       match — the count is the kernel's, the identity of the bytes is the proof. The
       honest scope: one fixed page fetched at boot into one buffer, not a repo, a
       resolver, or a download-on-demand tool — the primitive, wired end to end.
-- [ ] Show the fetched page in a browser-style window with a real address bar (v0.1.31)
+- [x] **Browser-style window with a real address bar** (v0.1.31). `fetch <path>` at
+      the prompt queues a navigation to the idle-loop pump; the same TCP client re-arms
+      on the boot's lease — new ephemeral port, new ISS, `GET <path> HTTP/1.0` — and the
+      body lands in the store over the old page. `/bin/browser` paints the markup in four
+      inks under a bar that shows the kernel's own record of the address, read over the
+      fourteenth syscall (`net_addr`), so a ring-3 program reports a request that went on
+      the wire instead of echoing one that was typed. The scenario serves a second page
+      with different bytes and requires the rendered digest, the tag count and the bar
+      text to all name *it*. Honest scope: plain text, one connection, no DOM — the half
+      of a browser that is fetchable, not the rendering engine.
+- [ ] Images in the browser window: decode and blit a bitmap the fetched page refers to
 - [ ] USB (xHCI) pointing devices, once there is a PCIe driver stack
 - [ ] A settings app that looks embarrassingly familiar
 - [ ] A block device driver (ATA or NVMe), so `tmpfs` can stop being the only
