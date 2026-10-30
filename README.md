@@ -607,6 +607,23 @@ On boot the kernel:
    values shared with the batch reader, and `type` shows the store's first 512
    bytes of a file rather than paging the whole thing.
 
+42. **`%VAR%` now expands in a command you type at the prompt, too (v0.1.39)**.
+   The last rung of the environment arc: after `set pz=bonjour`, typing
+   `echo %pz%` runs `echo bonjour`, the way `cmd` expands a line before it ever
+   reaches the command. The kernel writes its own proof row —
+   `shell: prompt exec 'echo bonjour'` — only when a *defined* name actually
+   substituted, then launches the program with `shell: running 'echo' from the
+   prompt`. The deliberate difference from the batch reader is the safety that
+   made this turn-on possible: a batch line drops an *undefined* `%NAME%` to
+   nothing, but the prompt leaves it **literal**, so a typed line that merely
+   carries a percent — the `save script a ... echo %x%` that writes a script —
+   still writes `%x%` to the file instead of an empty hole. `promptvar` proves
+   both halves: the defined substitution and, with a count check, that an
+   undefined `echo %nope%` produces no exec row at all. The honest scope: still
+   no caret (`^`) escape, so a literal percent that must survive a *defined*
+   expansion is not expressible yet; `IF`/`FOR`/`ERRORLEVEL`, redirection and
+   `CD`/`MKDIR`/`MOVE` remain future rungs.
+
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
 triple-faulting.

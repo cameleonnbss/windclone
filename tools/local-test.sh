@@ -739,6 +739,15 @@ echo '==> prompt SET / TYPE (the cmd verbs a person types, not a script)'
 python3 tools/qemu-desktop.py windclone.iso promptset \
     || fail 'SET and TYPE did not behave at the prompt the way they do in cmd'
 
+# v0.1.39: %VAR% expansion on a typed line, the way cmd expands before running.
+# After `set pz=bonjour`, a typed `echo %pz%` resolves to `echo bonjour` - the
+# kernel writes `shell: prompt exec 'echo bonjour'` then launches the program. An
+# undefined `echo %nope%` stays literal and writes NO exec row (a count check),
+# which is exactly what keeps batch2's typed `save ... echo %x%` intact.
+echo '==> prompt %VAR% expansion (defined substitutes, undefined stays literal)'
+python3 tools/qemu-desktop.py windclone.iso promptvar \
+    || fail 'the prompt did not expand %VAR% the way cmd expands a typed line'
+
 # v0.1.20: the keyboard has a second customer. The scenario types a command that
 # launches /bin/keys, waits for the kernel to say the program is *asleep* in
 # read(0), types a word, and requires the program - not the prompt - to print it

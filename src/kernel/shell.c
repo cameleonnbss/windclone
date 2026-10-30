@@ -1311,6 +1311,49 @@ static int bat_expand(const char *in, char *out, int cap)
     return n;
 }
 
+/* Prompt-time %NAME% expansion, the sibling of bat_expand a person typing at
+ * the keyboard deserves. One deliberate difference keeps it safe: a DEFINED
+ * name folds to upper case and substitutes its value, but an UNDEFINED name is
+ * left LITERAL (`%NOPE%` survives unchanged), where the batch reader's
+ * bat_expand drops it to nothing. That choice is what makes this usable on the
+ * prompt without corrupting a typed line that merely happens to carry a
+ * percent - the `save script a ... echo %x%` that builds a script must write
+ * `%x%` to the file, not an empty hole, because x is defined inside the script,
+ * not yet at the prompt. A lone or unclosed '%' is copied verbatim, exactly as
+ * in the batch reader. Returns the length written. */
+static int prompt_expand(const char *in, char *out, int cap)
+{
+    int n = 0;
+    for (int i = 0; in[i] != '\0'; ) {
+        if (in[i] == '%') {
+            int j = i + 1, start = j;
+            while (in[j] != '\0' && in[j] != '%')
+                j++;
+            if (in[j] == '%' && j > start) {
+                char folded[BAT_ENV_NAME];
+                upper_word(folded, sizeof folded, in + start, j - start);
+                const char *val = env_get(folded);
+                if (val != NULL) {           /* defined: substitute the value  */
+                    for (int k = 0; val[k] != '\0' && n < cap - 1; k++)
+                        out[n++] = val[k];
+                    i = j + 1;
+                    continue;
+                }
+                /* undefined: keep the literal %NAME% for the whole run  */
+                for (int k = i; k <= j && n < cap - 1; k++)
+                    out[n++] = in[k];
+                i = j + 1;
+                continue;
+            }
+        }
+        if (n < cap - 1)
+            out[n++] = in[i];
+        i++;
+    }
+    out[n] = '\0';
+    return n;
+}
+
 /* Is the line the word `kw` (case-insensitive) followed by a space or end? So
  * "set" and "SET X=1" match, "setup" does not. */
 static int is_word(const char *line, const char *kw)
@@ -1641,16 +1684,34 @@ static void execute(void)
     put_line(echo);
 
     if (input_len != 0) {
+        /* Expand %VAR% on the typed line first, so what the built-ins see and
+         * what run_line dispatches is the resolved form - cmd expands a typed
+         * `echo %x%` before it ever reaches ECHO. Only DEFINED names change; an
+         * undefined one stays literal so a line that merely carries a percent
+         * (like the `save ... echo %x%` that builds a script) is untouched. The
+         * `shell: prompt exec '<resolved>'` row is written ONLY when something
+         * actually expanded, so a plain command adds no noise to the transcript
+         * the other scenarios read. `resolved` is a local copy: run_line will
+         * NUL its spaces in place, and the caller's `input` stays pristine for
+         * the scrollback echo that already happened above. */
+        char resolved[SHELL_COLS * 2 + 1];
+        int rl = prompt_expand(input, resolved, sizeof resolved);
+        const char *line = resolved;
+        if (strcmp(resolved, input) != 0) {
+            serial_write("shell: prompt exec '");
+            serial_write(resolved);
+            serial_write("'\n");
+        }
         /* The two cmd built-ins a person reaches for at the keyboard, checked
-         * on the raw line before the tokeniser cuts values in half: `set`
+         * on the resolved line before the tokeniser cuts values in half: `set`
          * defines or lists a session variable, `type` prints a file. Neither
          * is a /bin program, so they live on the prompt path only — a typed
          * `echo` is still /bin/echo, and the batch reader keeps its own copy
          * of `set` via do_set(work, "batch"). The origin tag on anything that
          * still runs ("from the prompt") is what keeps a typed launch
          * distinguishable from a scripted one in the transcript. */
-        if (!do_set(input, "prompt") && !do_type(input))
-            run_line(input, input_len, "from the prompt");
+        if (!do_set(line, "prompt") && !do_type(line))
+            run_line(resolved, rl, "from the prompt");
     }
 
     input_len = 0;

@@ -580,6 +580,28 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         rather than paging a large file, and the 61-keystroke line-editor cap is
         untouched.
 
+- [x] **Prompt-time `%VAR%` expansion — a typed line expands before it runs
+      (v0.1.39).** The last rung of the environment arc. `prompt_expand()` —
+      the prompt's sibling of the batch reader's `bat_expand()` — runs on the
+      typed line at the top of `execute()`, before `do_set`/`do_type`/`run_line`,
+      so `echo %pz%` after `set pz=bonjour` dispatches `echo bonjour` exactly as
+      `cmd` expands a line before running it. The one deliberate difference is
+      the safety that made it turn-on-able: a batch line drops an *undefined*
+      `%NAME%` to nothing, but the prompt leaves it **literal**, so a typed line
+      that merely carries a percent — the `save script a … echo %x%` that writes
+      a script — still writes `%x%` into the file, not an empty hole (batch2
+      stays green untouched). The kernel writes `shell: prompt exec
+      '<resolved>'` only when a defined name actually substituted, so a plain
+      command adds no noise; the resolved line then launches the program
+      (`shell: running 'echo' from the prompt`). The `promptvar` scenario proves
+      the defined substitution and, with a `count_serial` check, that an
+      undefined `echo %nope%` writes no exec row at all.
+      - The cost, written down: still no caret (`^`) escape, so a literal
+        percent that must survive a *defined* expansion is not yet expressible;
+        `IF`, `FOR`, `GOTO`, `CALL`, `ERRORLEVEL`, redirection/pipes and
+        `CD`/`MKDIR`/`MOVE` remain each their own rung; the 8-name × 48-byte
+        environment and the 61-keystroke line-editor cap are unchanged.
+
 
 ## Phase 6 — Language expansion ⏳
 *Goal: use the right tool per layer (the "asm/C/C++/Rust" promise).*

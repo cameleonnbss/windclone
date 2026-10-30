@@ -82,6 +82,15 @@ Scenarios (each one asserts the serial markers the kernel prints):
                exact bytes landing on the transcript, and a missing name saying
                so. Each claim is a kernel-written line the screen echo cannot
                fake (`shell: prompt set ...`, `shell: type ... (N bytes)`).
+    promptvar  prove %VAR% expansion on a *typed* line, the way cmd expands a
+               command before it runs: after `set pz=bonjour`, a typed
+               `echo %pz%` resolves to `echo bonjour` - the kernel writes
+               `shell: prompt exec 'echo bonjour'` (the resolved form, only
+               because %pz% substituted) and then launches the program with
+               `shell: running 'echo' from the prompt`. An undefined name stays
+               LITERAL, so a typed `echo %nope%` writes NO exec row (a count
+               check proves it) - the exact choice that keeps batch2's typed
+               `save ... echo %x%` intact.
     typing     prove the keyboard reaches a *program*: type `keys` so /bin/keys
                launches and blocks in read(0) (the kernel says it is asleep until
                a keystroke wakes it), then type a word and require the program to
@@ -1267,6 +1276,45 @@ def scenario_actions(sc, mon, W, H):
         mark = len(read_log())
         mon.type_text("type /tmp/nope.bat\n")
         wait_serial_after(mark, r"shell: type no such file /tmp/nope\.bat")
+    elif sc == "promptvar":
+        # v0.1.39: %VAR% expansion on a *typed* line. cmd expands a command
+        # before it runs, and now so does the prompt: `echo %pz%` after
+        # `set pz=bonjour` becomes `echo bonjour`. The claim sits on the
+        # kernel's own row `shell: prompt exec '<resolved>'` - written only
+        # when a defined name actually substituted - then the launch row
+        # `shell: running 'echo' from the prompt`. The undefined case is the
+        # safety property: `echo %nope%` must produce NO exec row (a literal
+        # %nope% is dispatched untouched), which is precisely what keeps the
+        # batch2 scenario's typed `save ... echo %x%` from losing content.
+        # Content stays lowercase; the QMP qcode alphabet has no capitals, and
+        # the folder matches case-insensitively (`set pz=...` logs `PZ`).
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+
+        # Define the variable the expansion will use.
+        mark = len(read_log())
+        mon.type_text("set pz=bonjour\n")
+        wait_serial_after(mark, r"shell: prompt set PZ=bonjour")
+
+        # A defined name substitutes: the exec row reads the resolved line,
+        # and the dispatcher then launches /bin/echo from the prompt.
+        mark = len(read_log())
+        mon.type_text("echo %pz%\n")
+        m, _ = wait_serial_after(mark, r"shell: prompt exec 'echo bonjour'")
+        wait_serial_after(m, r"shell: running 'echo' from the prompt")
+
+        # An undefined name stays literal: no exec row is written at all, so
+        # the raw `echo %nope%` reaches the dispatcher unchanged. Proving the
+        # count is zero is what distinguishes "left literal" from "stripped to
+        # nothing" (the batch reader's behaviour) - the difference that makes
+        # prompt expansion safe to turn on without breaking a typed script line.
+        mark = len(read_log())
+        mon.type_text("echo %nope%\n")
+        _, m = wait_serial_after(mark, r"shell: running 'echo' from the prompt")
+        if count_serial(r"shell: prompt exec 'echo %nope%'") != 0:
+            raise SystemExit("an undefined %nope% produced a prompt exec row; "
+                             "undefined names must stay literal, not expand")
     elif sc == "typing":
         # v0.1.20: the keyboard reaches a *program*. Everything the earlier
         # scenarios type goes to the prompt; this one hands the same PS/2 bytes
@@ -2398,6 +2446,12 @@ MARKERS = {
                   "shell: prompt set refused - want NAME=VALUE",
                   "save: wrote", "shell: type /tmp/hi.bat (17 bytes)",
                   "bonjour le monde", "shell: type no such file /tmp/nope.bat"],
+    # v0.1.39: %VAR% expansion on a typed line. The exec row is written only
+    # when a defined name actually substituted, so its presence proves the
+    # expansion ran; the launch row proves the resolved line still dispatched.
+    "promptvar": ["shell: prompt set PZ=bonjour",
+                  "shell: prompt exec 'echo bonjour'",
+                  "shell: running 'echo' from the prompt"],
     # the line's text, the byte total across reads and the absence of any leak to
     # the prompt are all asserted in the scenario; these are the lines the claim
     # turns on - a program that asked for the keyboard, slept until a key landed,
