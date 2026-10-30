@@ -328,6 +328,8 @@ static void cmd_help(void)
     put_line("  ABOUT          VERSION ET UPTIME");
     put_line("  CLEAR          EFFACE L'ECRAN");
     put_line("  BAT <NOM>      EXECUTE /TMP/<NOM>.BAT");
+    put_line("  SET [N=V]      DEFINIT OU LISTE UNE VARIABLE DE SESSION");
+    put_line("  TYPE <CHEMIN>  AFFICHE UN FICHIER DU STOCKAGE OU DE L'ARCHIVE");
     put_line("  FETCH <CHEMIN> NAVIGUE : GET <CHEMIN> -> /NET/FETCHED");
     put_line("  DIR            LISTE LE STOCKAGE PUIS L'ARCHIVE");
     put_line("  DEL <CHEMIN>   SUPPRIME UN FICHIER ECRIVABLE");
@@ -1330,6 +1332,119 @@ static int ci_equal(const char *a, const char *b)
     }
 }
 
+/* SET NAME=VALUE and bare SET (list the environment). `work` is the whole
+ * line, so a value with spaces stays one value; the shell tokeniser would
+ * have cut it. `who` names the origin in the transcript ("batch" or
+ * "prompt") so the two paths are distinguishable byte for byte in the log.
+ * Returns 1 when the line was a SET (handled), 0 to let the caller keep
+ * going. Names fold to upper case the way cmd folds them; the value is
+ * stored verbatim. BAT_ENV_MAX caps the environment honestly: when full,
+ * the line says so instead of silently dropping it. */
+static int do_set(const char *work, const char *who)
+{
+    if (!is_word(work, "set"))
+        return 0;
+    const char *arg = work + 3;
+    while (*arg == ' ')
+        arg++;
+    if (*arg == '\0') {             /* bare SET: list the environment        */
+        serial_write("shell: ");
+        serial_write(who);
+        serial_write(" env ");
+        serial_write_dec((uint64_t)env_count);
+        serial_write(" variables\n");
+        for (int i = 0; i < env_count; i++) {
+            put_line(env_name[i]);
+            serial_write("shell: ");
+            serial_write(who);
+            serial_write(" env ");
+            serial_write(env_name[i]);
+            serial_write("=");
+            serial_write(env_val[i]);
+            serial_write("\n");
+        }
+        return 1;
+    }
+    const char *eq = NULL;
+    for (const char *q = arg; *q != '\0'; q++)
+        if (*q == '=') { eq = q; break; }
+    if (eq == NULL || eq == arg) {  /* SET with no name or no '=': refuse     */
+        put_line("SET ATTEND NOM=VALEUR");
+        serial_write("shell: ");
+        serial_write(who);
+        serial_write(" set refused - want NAME=VALUE\n");
+        return 1;
+    }
+    if (env_set(arg, (int)(eq - arg), eq + 1)) {
+        char folded[BAT_ENV_NAME];
+        upper_word(folded, sizeof folded, arg, (int)(eq - arg));
+        serial_write("shell: ");
+        serial_write(who);
+        serial_write(" set ");
+        serial_write(folded);
+        serial_write("=");
+        serial_write(eq + 1);
+        serial_write("\n");
+    } else {
+        put_line("SET IMPOSSIBLE: ENVIRONNEMENT PLEIN OU NOM VIDE");
+        serial_write("shell: ");
+        serial_write(who);
+        serial_write(" set refused - environment full or empty name\n");
+    }
+    return 1;
+}
+
+/* TYPE <path> — cmd's file viewer, kept short and in-kernel so the bytes
+ * land on the serial transcript a test can read byte for byte. The name is
+ * passed straight to vfs_open, which searches the read-only archive first
+ * and the writable store second (the same order `type notes.txt` resolves
+ * in on a real cmd: current directory then PATH). A missing file refuses;
+ * a directory or an unreadable archive member is a "no such file" too.
+ * The body is dumped raw; a file not ending in \n gets a trailing newline
+ * so the next transcript line starts clean. TYPE shares the batch reader's
+ * BAT_MAX buffer because both are bounded by the same 512-byte store cap,
+ * and a larger file is honestly truncated rather than looped. */
+static int do_type(const char *line)
+{
+    if (!is_word(line, "type"))
+        return 0;
+    const char *arg = line + 4;
+    while (*arg == ' ')
+        arg++;
+    if (*arg == '\0') {
+        put_line("TYPE ATTEND UN CHEMIN");
+        serial_write("shell: type refused - want a path\n");
+        return 1;
+    }
+    int64_t fd = vfs_open(arg);
+    if (fd < 0) {
+        put_line("TYPE INTROUVABLE");
+        serial_write("shell: type no such file ");
+        serial_write(arg);
+        serial_write("\n");
+        return 1;
+    }
+    int have = 0;
+    while (have < BAT_MAX - 1) {
+        int64_t got = vfs_read((int)fd, bat_text + have,
+                               (uint64_t)(BAT_MAX - 1 - have));
+        if (got <= 0)
+            break;
+        have += (int)got;
+    }
+    vfs_close((int)fd);
+
+    serial_write("shell: type ");
+    serial_write(arg);
+    serial_write(" (");
+    serial_write_dec((uint64_t)have);
+    serial_write(" bytes)\n");
+    serial_write_len(bat_text, (size_t)have);
+    if (have > 0 && bat_text[have - 1] != '\n')
+        serial_write("\n");
+    return 1;
+}
+
 /* Handle a batch line that is one of the three built-ins. `work` is the line
  * after '@' and after %expansion%. Returns 1 when the line was a built-in (and
  * so must not be dispatched to a program), 0 to let it run normally. Only
@@ -1362,46 +1477,8 @@ static int batch_builtin(const char *work)
         return 0;                       /* ECHO <text>: a message, run normally */
     }
 
-    if (is_word(work, "set")) {
-        const char *arg = work + 3;
-        while (*arg == ' ')
-            arg++;
-        if (*arg == '\0') {             /* bare SET: list the environment        */
-            serial_write("shell: batch env ");
-            serial_write_dec((uint64_t)env_count);
-            serial_write(" variables\n");
-            for (int i = 0; i < env_count; i++) {
-                put_line(env_name[i]);
-                serial_write("shell: batch env ");
-                serial_write(env_name[i]);
-                serial_write("=");
-                serial_write(env_val[i]);
-                serial_write("\n");
-            }
-            return 1;
-        }
-        const char *eq = NULL;
-        for (const char *q = arg; *q != '\0'; q++)
-            if (*q == '=') { eq = q; break; }
-        if (eq == NULL || eq == arg) {  /* SET with no name or no '=': refuse     */
-            put_line("SET ATTEND NOM=VALEUR");
-            serial_write("shell: batch set refused - want NAME=VALUE\n");
-            return 1;
-        }
-        if (env_set(arg, (int)(eq - arg), eq + 1)) {
-            char folded[BAT_ENV_NAME];
-            upper_word(folded, sizeof folded, arg, (int)(eq - arg));
-            serial_write("shell: batch set ");
-            serial_write(folded);
-            serial_write("=");
-            serial_write(eq + 1);
-            serial_write("\n");
-        } else {
-            put_line("SET IMPOSSIBLE: ENVIRONNEMENT PLEIN OU NOM VIDE");
-            serial_write("shell: batch set refused - environment full or empty name\n");
-        }
+    if (do_set(work, "batch"))
         return 1;
-    }
 
     if (is_word(work, "rem")) {         /* cmd's comment word, alongside ';'      */
         serial_write("shell: batch remark skipped\n");
@@ -1563,8 +1640,18 @@ static void execute(void)
     echo[n] = '\0';
     put_line(echo);
 
-    if (input_len != 0)
-        run_line(input, input_len, "from the prompt");
+    if (input_len != 0) {
+        /* The two cmd built-ins a person reaches for at the keyboard, checked
+         * on the raw line before the tokeniser cuts values in half: `set`
+         * defines or lists a session variable, `type` prints a file. Neither
+         * is a /bin program, so they live on the prompt path only — a typed
+         * `echo` is still /bin/echo, and the batch reader keeps its own copy
+         * of `set` via do_set(work, "batch"). The origin tag on anything that
+         * still runs ("from the prompt") is what keeps a typed launch
+         * distinguishable from a scripted one in the transcript. */
+        if (!do_set(input, "prompt") && !do_type(input))
+            run_line(input, input_len, "from the prompt");
+    }
 
     input_len = 0;
     input[0] = '\0';

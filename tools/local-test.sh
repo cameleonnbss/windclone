@@ -730,6 +730,15 @@ echo '==> batch semantics (@, ECHO OFF/ON, SET, %VAR%, rem - the cmd.exe half)'
 python3 tools/qemu-desktop.py windclone.iso batch2 \
     || fail 'a .bat could not use @ / ECHO ON-OFF / SET / %VAR% like cmd does'
 
+# v0.1.38: the cmd built-ins a person types at the keyboard, not in a script.
+# SET NAME=VALUE defines a session variable the kernel folds to upper case, a
+# bare SET lists the environment, `set wrong` (no '=') refuses with a line, and
+# TYPE <path> prints a file /bin/save wrote to the store - every claim a kernel-
+# written serial row the screen echo cannot fake.
+echo '==> prompt SET / TYPE (the cmd verbs a person types, not a script)'
+python3 tools/qemu-desktop.py windclone.iso promptset \
+    || fail 'SET and TYPE did not behave at the prompt the way they do in cmd'
+
 # v0.1.20: the keyboard has a second customer. The scenario types a command that
 # launches /bin/keys, waits for the kernel to say the program is *asleep* in
 # read(0), types a word, and requires the program - not the prompt - to print it

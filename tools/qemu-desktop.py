@@ -74,6 +74,14 @@ Scenarios (each one asserts the serial markers the kernel prints):
                environment, and `rem` is a comment like `;`. Every proof line is
                `shell: batch exec '<resolved line>'` - the serial transcript the
                echo setting cannot hide.
+    promptset  prove the cmd built-ins a person types at the keyboard, not in a
+               script: `set pz=hi` defines a session variable the kernel folds to
+               `PZ`, a bare `set` lists the environment back, `set wrong` (no
+               `=`) is refused with a line rather than guessed, and `type
+               /tmp/hi.bat` prints a file /bin/save wrote to the store - the
+               exact bytes landing on the transcript, and a missing name saying
+               so. Each claim is a kernel-written line the screen echo cannot
+               fake (`shell: prompt set ...`, `shell: type ... (N bytes)`).
     typing     prove the keyboard reaches a *program*: type `keys` so /bin/keys
                launches and blocks in read(0) (the kernel says it is asleep until
                a keystroke wakes it), then type a word and require the program to
@@ -1196,6 +1204,69 @@ def scenario_actions(sc, mon, W, H):
         m, _ = wait_serial_after(m, r"shell: batch exec 'set'")
         m, _ = wait_serial_after(m, r"shell: batch env 1 variables")
         wait_serial_after(m, r"shell: batch env X=hi")
+    elif sc == "promptset":
+        # v0.1.38: the two cmd built-ins a person types at the keyboard, on
+        # the *prompt* path rather than inside a script. `set NAME=VALUE`
+        # defines a session variable, a bare `set` lists them, `set wrong`
+        # (no '=') refuses honestly, and `type <path>` prints a file back out
+        # of the store. Every claim is a line the kernel wrote itself on the
+        # serial port, so the transcript is a byte-for-byte record of what
+        # the built-in did, not what the screen echoed. Names fold to upper
+        # case the way cmd folds them, so `set pz=bonjour` shows up as
+        # `prompt set PZ=bonjour` - the two spellings in one log line that
+        # prove the matcher ran and the folder ran. Content typed here stays
+        # lowercase because the QMP qcode alphabet has no capitals.
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+
+        # A variable defined at the prompt, then listed back. The env lives
+        # in the kernel across every path (the batch reader already shares
+        # it), so the bare `set` after the definition sees exactly one
+        # entry - the one this scenario just made.
+        mark = len(read_log())
+        mon.type_text("set pz=bonjour\n")
+        m, _ = wait_serial_after(mark, r"shell: prompt set PZ=bonjour")
+        mark = len(read_log())
+        mon.type_text("set\n")
+        m, _ = wait_serial_after(mark, r"shell: prompt env 1 variables")
+        m, _ = wait_serial_after(m, r"shell: prompt env PZ=bonjour")
+
+        # A `set` with no '=' is refused, not guessed: cmd says nothing
+        # useful either, and a line the log can read beats a silent half
+        # command. The count check proves this refusal was a fresh event,
+        # not an earlier one still sitting in the buffer.
+        mark = len(read_log())
+        mon.type_text("set wrong\n")
+        wait_serial_after(mark,
+                          r"shell: prompt set refused - want NAME=VALUE")
+
+        # `type` prints a file the /bin/save *program* wrote to the store,
+        # so the bytes cross the store boundary twice: once as a routed
+        # program stdout ("save: wrote 17 bytes"), once as a kernel-dumped
+        # transcript line. The 17 is exactly "bonjour le monde\n" - the 16
+        # joined bytes plus the `nl` terminator, and no trailing newline on
+        # top of it because build_content refuses to add a second one. The
+        # content itself then lands on the serial port as raw bytes from
+        # serial_write_len, and the wait asserts the file was printed and
+        # not merely named.
+        mark = len(read_log())
+        mon.type_text("save script hi bonjour le monde nl\n")
+        _, m = wait_serial_after(mark, r"save: wrote (\d+) bytes /tmp/hi\.bat")
+        if int(m.group(1)) != 17:
+            raise SystemExit("the note landed as %s bytes, want 17"
+                             % m.group(1))
+        mark = len(read_log())
+        mon.type_text("type /tmp/hi.bat\n")
+        m, _ = wait_serial_after(mark,
+                                 r"shell: type /tmp/hi\.bat \(17 bytes\)")
+        wait_serial_after(m, r"bonjour le monde")
+
+        # A name that is not there says so on the transcript instead of
+        # printing an empty window and calling that a success.
+        mark = len(read_log())
+        mon.type_text("type /tmp/nope.bat\n")
+        wait_serial_after(mark, r"shell: type no such file /tmp/nope\.bat")
     elif sc == "typing":
         # v0.1.20: the keyboard reaches a *program*. Everything the earlier
         # scenarios type goes to the prompt; this one hands the same PS/2 bytes
@@ -2316,6 +2387,17 @@ MARKERS = {
                   "shell: batch comment skipped",
                   "shell: batch echo state off", "shell: batch echo state on",
                   "shell: batch env 1 variables", "shell: batch env X=hi"],
+    # v0.1.38: prompt-time SET and TYPE. The definition, the environment
+    # listing, the malformed refusal, the file dump and the missing-file
+    # refusal are all asserted in the scenario; these are the lines the claim
+    # turns on - a variable folded to upper case at the keyboard, a bare SET
+    # that lists it back, a `type` whose 17-byte body the kernel wrote itself
+    # out of the store /bin/save had filled
+    "promptset": ["shell: prompt set PZ=bonjour",
+                  "shell: prompt env 1 variables", "shell: prompt env PZ=bonjour",
+                  "shell: prompt set refused - want NAME=VALUE",
+                  "save: wrote", "shell: type /tmp/hi.bat (17 bytes)",
+                  "bonjour le monde", "shell: type no such file /tmp/nope.bat"],
     # the line's text, the byte total across reads and the absence of any leak to
     # the prompt are all asserted in the scenario; these are the lines the claim
     # turns on - a program that asked for the keyboard, slept until a key landed,

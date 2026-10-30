@@ -582,9 +582,30 @@ On boot the kernel:
    header dependencies (`-MMD -MP`) so a header edit like this one can no longer
    leave a stale object compiled against the old value. The honest scope: 8
    variables per session, values up to 48 bytes, expansion on script lines only
-   (prompt-time variables, `IF`, `FOR`, `GOTO`, `CALL`, `ERRORLEVEL`, redirection
-   and pipes are each their own rung), and the line editor still caps a *typed*
-   command at 61 keystrokes — widening that is deliberately a release of its own.
+   (`IF`, `FOR`, `GOTO`, `CALL`, `ERRORLEVEL`, redirection and pipes are each
+   their own rung), and the line editor still caps a *typed* command at 61
+   keystrokes — widening that is deliberately a release of its own.
+
+41. **`SET` and `%VAR%` now work at the keyboard, not just inside a script
+   (v0.1.38)**. v0.1.37 gave the batch reader its environment; this brings the
+   two cmd verbs a person actually types to the prompt. `set name=value` defines
+   a session variable whose name folds to upper case exactly as `cmd` folds it
+   (so `set pz=bonjour` reports `shell: prompt set PZ=bonjour` — the two
+   spellings in one line are the proof the matcher ran *and* the folder ran), and
+   a bare `set` lists the whole environment back. A `set` with no `=` is refused
+   with its own line rather than guessed at. `type <path>` is now a built-in too:
+   it opens the file through the same `vfs_open` that `cat` and `dir` use —
+   read-only archive first, writable store second — and writes the bytes straight
+   to the serial transcript, so `type /tmp/hi.bat` on a note `/bin/save` wrote
+   dumps its exact 17 bytes back out; a name that is not there says so on the log
+   instead of painting an empty window and calling that success. Both live on the
+   prompt path in `execute()` and are checked on the *raw* line before the
+   tokeniser would cut `set a=b c` in half. The honest scope: `%VAR%` still
+   expands only on batch lines, not in a command you type at the prompt (that
+   needs a caret escape first so a `save script` writing a literal `%` is not
+   mangled, which is the next rung), the environment caps at 8 names and 48-byte
+   values shared with the batch reader, and `type` shows the store's first 512
+   bytes of a file rather than paging the whole thing.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

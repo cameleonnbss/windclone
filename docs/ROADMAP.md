@@ -554,6 +554,32 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         `ERRORLEVEL`, redirection or pipes; the 61-keystroke line-editor cap is
         untouched, so a longer *typed* command is still truncated at the prompt
         (what changed is only that the tokens that do fit are no longer folded).
+- [x] **Prompt-time `SET` and `TYPE` — the cmd verbs at the keyboard (v0.1.38).**
+      v0.1.37 built the environment for the batch reader; this lifts the two
+      verbs a person actually types onto the prompt path. `do_set(work, who)`
+      is now shared: the batch loop calls it with `"batch"` and `execute()`
+      calls it with `"prompt"` before `run_line`, so `set name=value` defines a
+      session variable and a bare `set` lists them, each origin tagged in its
+      own transcript line (`shell: prompt set PZ=bonjour` — a lowercase typed
+      name folded to upper case is the two-spelling proof, and it stays on the
+      serial port whatever the echo does). `do_type` is a new prompt built-in:
+      it opens through `vfs_open` (archive first, store second — the same order
+      `dir` and `cat` resolve in) and dumps the bytes with `serial_write_len`,
+      so a `type /tmp/hi.bat` on a file `/bin/save` wrote prints the exact 17
+      bytes back and a missing name refuses on the log rather than painting an
+      empty window. Both are checked on the *raw* line before the tokeniser
+      would split `set a=b c`. The `promptset` scenario asserts the definition,
+      the listing, the malformed refusal, the byte-for-byte dump, and the
+      missing-file refusal.
+      - The cost, written down: still no `%VAR%` expansion at the prompt (that
+        needs a caret escape first so `save script … %x%` writing a literal
+        percent into a file is not mangled before `save` runs — the next rung);
+        `IF`, `FOR`, `GOTO`, `CALL`, `ERRORLEVEL`, redirection and pipes are
+        still each their own; the environment stays 8 names × 48-byte values
+        shared with the batch reader; `type` prints the store's first 512 bytes
+        rather than paging a large file, and the 61-keystroke line-editor cap is
+        untouched.
+
 
 ## Phase 6 — Language expansion ⏳
 *Goal: use the right tool per layer (the "asm/C/C++/Rust" promise).*
