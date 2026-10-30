@@ -721,6 +721,15 @@ echo '==> batch files (a script a program wrote, the shell obeys)'
 python3 tools/qemu-desktop.py windclone.iso batchfile \
     || fail 'the shell could not run a batch file out of the writable store'
 
+# v0.1.37: the cmd.exe semantics a copied .bat leans on. `@` suppresses one line's
+# echo without hiding it from the serial transcript, ECHO OFF/ON flip the script's
+# echo and a bare ECHO reports the state, SET X=hi defines a session variable that
+# a later `echo %X%` expands - the /bin/echo program must print "hi", not the
+# literal - a bare SET lists the environment, and `rem` is a comment like `;`.
+echo '==> batch semantics (@, ECHO OFF/ON, SET, %VAR%, rem - the cmd.exe half)'
+python3 tools/qemu-desktop.py windclone.iso batch2 \
+    || fail 'a .bat could not use @ / ECHO ON-OFF / SET / %VAR% like cmd does'
+
 # v0.1.20: the keyboard has a second customer. The scenario types a command that
 # launches /bin/keys, waits for the kernel to say the program is *asleep* in
 # read(0), types a word, and requires the program - not the prompt - to print it

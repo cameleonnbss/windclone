@@ -44,7 +44,8 @@ CFLAGS  := -std=gnu11 -O2 -Wall -Wextra -Werror \
            -mno-sse -mno-sse2 -mno-avx -mno-mmx -mno-80387 -msoft-float \
            -fno-stack-protector -fno-asynchronous-unwind-tables \
            -fno-omit-frame-pointer \
-           -fno-builtin -Ivendor -Isrc/kernel
+           -fno-builtin -Ivendor -Isrc/kernel \
+           -MMD -MP
 LDFLAGS := -T linkers/kernel.ld -nostdlib -static -no-pie \
            -z max-page-size=0x1000 -Wl,--build-id=none
 
@@ -58,7 +59,8 @@ UCFLAGS := -std=gnu11 -O2 -Wall -Wextra -Werror \
            -mno-red-zone \
            -mno-sse -mno-sse2 -mno-avx -mno-mmx -mno-80387 -msoft-float \
            -fno-stack-protector -fno-asynchronous-unwind-tables -fno-builtin \
-           -Isrc/kernel -Isrc/user
+           -Isrc/kernel -Isrc/user \
+           -MMD -MP
 # noexecstack is spelled without a hyphen: `noexec-stack` is silently
 # "ignored", which is how a build can look tidy and still emit an executable
 # stack segment.
@@ -177,3 +179,12 @@ run: windclone.iso
 
 clean:
 	rm -rf build isodir windclone.iso
+
+# Automatic header dependencies. Every .o carries the .d that gcc wrote beside it
+# (-MMD -MP), so editing any kernel or userland header - version.h, usermode.h,
+# wcabi.h, net.h - rebuilds exactly the translation units that include it. Before
+# this the kernel object rule listed no headers, so a header change silently kept
+# the stale .o: USER_ARG_MAX was raised in usermode.h while proc.o still refused
+# a wider command line, and the mismatch only showed up at run time. -include
+# tolerates the first build, when no .d exists yet.
+-include $(wildcard build/*.d)

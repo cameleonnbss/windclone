@@ -1118,6 +1118,14 @@ static void run_line(char *line, int len, const char *origin)
             i++;
     }
 
+    /* The cap can fill while more words are still pending. Each argument is
+     * only NUL-terminated when the next iteration turns its following space
+     * into '\0', so the last kept argument would otherwise run on through the
+     * un-null'd spaces and swallow the rest of the line as one folded string.
+     * `i` sits on the delimiter we stopped at; cut the argument there. */
+    if (argc == USER_ARG_MAX && i < len)
+        line[i] = '\0';
+
     if (argc == 0)
         return;                       /* nothing but spaces */
     if (strcmp(argv[0], "help") == 0)
@@ -1166,6 +1174,7 @@ static void run_line(char *line, int len, const char *origin)
 
 static char bat_text[BAT_MAX];
 static char bat_line[BAT_LINE_MAX];
+static char bat_work[BAT_LINE_MAX];   /* after '@' and after %VAR% expansion */
 
 /* Compose "/tmp/<name>.bat" into `out`. Returns the length, or 0 when the name
  * is not a word — letters, digits or underscore — because nothing that reaches
@@ -1194,6 +1203,212 @@ static int bat_path(const char *name, char *out, int cap)
         out[n++] = *p;
     out[n] = '\0';
     return n;
+}
+
+/* --- batch built-ins: ECHO ON/OFF, SET, %VAR% -----------------------------
+ * The half of cmd.exe a real .bat leans on and v0.1.36 did not have. Nearly
+ * every Windows script opens with `@echo off` and carries its values in
+ * `SET NAME=value` referenced as `%NAME%`; without those three, a script copied
+ * from Windows echoed its own commands and ran a literal "%GREET%" where it
+ * meant "hello". This adds exactly those, and nothing else: no `if`, no `for`,
+ * no redirection, no labels — each is its own rung and its own release.
+ *
+ * They live here, in the batch reader, not in run_line. A line typed at the
+ * prompt is dispatched the way it always was (an `echo` there still runs the
+ * /bin/echo program); the ON/OFF/SET/% behaviour is what a *script* gets. That
+ * keeps v0.1.19's prompt path untouched and states the scope honestly. */
+#define BAT_ENV_MAX   8                 /* variables held for the session      */
+#define BAT_ENV_NAME  16
+#define BAT_ENV_VAL   48                /* a value with spaces in it still fits */
+
+static char env_name[BAT_ENV_MAX][BAT_ENV_NAME];
+static char env_val[BAT_ENV_MAX][BAT_ENV_VAL];
+static int  env_count;
+static int  bat_echo_on;                /* the per-script echo state           */
+
+/* Fold a whole word to upper case into dst, NUL-terminated, bounded by cap.
+ * cmd variables are case-insensitive, so names are canonicalised on the way in
+ * and on the way to lookup; `hello world` is preserved in the value because
+ * only names are folded. */
+static void upper_word(char *dst, int cap, const char *src, int srclen)
+{
+    int n = 0;
+    for (int i = 0; i < srclen && n < cap - 1; i++)
+        dst[n++] = upper(src[i]);
+    dst[n] = '\0';
+}
+
+/* Look up a folded name; returns the value or NULL. */
+static const char *env_get(const char *folded)
+{
+    for (int i = 0; i < env_count; i++)
+        if (strcmp(env_name[i], folded) == 0)
+            return env_val[i];
+    return NULL;
+}
+
+/* Define NAME=value, overwriting an existing name rather than shadowing it, the
+ * way SET does. Truncates honestly to the caps. Returns 1 when stored. */
+static int env_set(const char *name, int nlen, const char *val)
+{
+    char folded[BAT_ENV_NAME];
+    upper_word(folded, sizeof folded, name, nlen);
+    if (folded[0] == '\0')
+        return 0;
+
+    int slot = -1;
+    for (int i = 0; i < env_count; i++)
+        if (strcmp(env_name[i], folded) == 0) { slot = i; break; }
+    if (slot < 0) {
+        if (env_count >= BAT_ENV_MAX)
+            return 0;                   /* environment full: refuse, do not drop */
+        slot = env_count++;
+    }
+
+    int n = 0;
+    for (; folded[n] != '\0'; n++)
+        env_name[slot][n] = folded[n];
+    env_name[slot][n] = '\0';
+
+    int m = 0;
+    for (int i = 0; val[i] != '\0' && m < BAT_ENV_VAL - 1; i++)
+        env_val[slot][m++] = val[i];
+    env_val[slot][m] = '\0';
+    return 1;
+}
+
+/* Copy `in` to `out`, replacing every %NAME% with the value of the (folded)
+ * name. An undefined name expands to nothing, which is exactly what cmd.exe
+ * does and what makes the difference between "the name was never set" and "the
+ * value was empty" show up on the transcript rather than hide. A '%' with no
+ * closing '%' is copied literally, so a stray percent does not eat the line. */
+static int bat_expand(const char *in, char *out, int cap)
+{
+    int n = 0;
+    for (int i = 0; in[i] != '\0'; ) {
+        if (in[i] == '%') {
+            int j = i + 1, start = j;
+            while (in[j] != '\0' && in[j] != '%')
+                j++;
+            if (in[j] == '%' && j > start) {
+                char folded[BAT_ENV_NAME];
+                upper_word(folded, sizeof folded, in + start, j - start);
+                const char *val = env_get(folded);
+                if (val != NULL)
+                    for (int k = 0; val[k] != '\0' && n < cap - 1; k++)
+                        out[n++] = val[k];
+                i = j + 1;
+                continue;
+            }
+        }
+        if (n < cap - 1)
+            out[n++] = in[i];
+        i++;
+    }
+    out[n] = '\0';
+    return n;
+}
+
+/* Is the line the word `kw` (case-insensitive) followed by a space or end? So
+ * "set" and "SET X=1" match, "setup" does not. */
+static int is_word(const char *line, const char *kw)
+{
+    int i = 0;
+    for (; kw[i] != '\0'; i++)
+        if (upper(line[i]) != upper(kw[i]))
+            return 0;
+    return line[i] == '\0' || line[i] == ' ';
+}
+
+static int ci_equal(const char *a, const char *b)
+{
+    for (int i = 0; ; i++) {
+        if (upper(a[i]) != upper(b[i]))
+            return 0;
+        if (a[i] == '\0')
+            return 1;
+    }
+}
+
+/* Handle a batch line that is one of the three built-ins. `work` is the line
+ * after '@' and after %expansion%. Returns 1 when the line was a built-in (and
+ * so must not be dispatched to a program), 0 to let it run normally. Only
+ * ECHO-with-no-argument / ECHO ON / ECHO OFF and SET are intercepted; a plain
+ * `echo some text` still falls through to /bin/echo, which is what a person
+ * copying a working script and typing it both expect. */
+static int batch_builtin(const char *work)
+{
+    if (is_word(work, "echo")) {
+        const char *arg = work + 4;
+        while (*arg == ' ')
+            arg++;
+        if (*arg == '\0') {
+            put_line(bat_echo_on ? "L'ECHO EST ACTIVE" : "L'ECHO EST INACTIF");
+            serial_write("shell: batch echo state ");
+            serial_write(bat_echo_on ? "on" : "off");
+            serial_write("\n");
+            return 1;
+        }
+        if (ci_equal(arg, "on")) {
+            bat_echo_on = 1;
+            serial_write("shell: batch echo on\n");
+            return 1;
+        }
+        if (ci_equal(arg, "off")) {
+            bat_echo_on = 0;
+            serial_write("shell: batch echo off\n");
+            return 1;
+        }
+        return 0;                       /* ECHO <text>: a message, run normally */
+    }
+
+    if (is_word(work, "set")) {
+        const char *arg = work + 3;
+        while (*arg == ' ')
+            arg++;
+        if (*arg == '\0') {             /* bare SET: list the environment        */
+            serial_write("shell: batch env ");
+            serial_write_dec((uint64_t)env_count);
+            serial_write(" variables\n");
+            for (int i = 0; i < env_count; i++) {
+                put_line(env_name[i]);
+                serial_write("shell: batch env ");
+                serial_write(env_name[i]);
+                serial_write("=");
+                serial_write(env_val[i]);
+                serial_write("\n");
+            }
+            return 1;
+        }
+        const char *eq = NULL;
+        for (const char *q = arg; *q != '\0'; q++)
+            if (*q == '=') { eq = q; break; }
+        if (eq == NULL || eq == arg) {  /* SET with no name or no '=': refuse     */
+            put_line("SET ATTEND NOM=VALEUR");
+            serial_write("shell: batch set refused - want NAME=VALUE\n");
+            return 1;
+        }
+        if (env_set(arg, (int)(eq - arg), eq + 1)) {
+            char folded[BAT_ENV_NAME];
+            upper_word(folded, sizeof folded, arg, (int)(eq - arg));
+            serial_write("shell: batch set ");
+            serial_write(folded);
+            serial_write("=");
+            serial_write(eq + 1);
+            serial_write("\n");
+        } else {
+            put_line("SET IMPOSSIBLE: ENVIRONNEMENT PLEIN OU NOM VIDE");
+            serial_write("shell: batch set refused - environment full or empty name\n");
+        }
+        return 1;
+    }
+
+    if (is_word(work, "rem")) {         /* cmd's comment word, alongside ';'      */
+        serial_write("shell: batch remark skipped\n");
+        return 1;
+    }
+
+    return 0;
 }
 
 static void cmd_bat(int argc, const char *const *argv)
@@ -1241,6 +1456,7 @@ static void cmd_bat(int argc, const char *const *argv)
     int ran = 0;
     int lines = 0;
     char *p = bat_text;
+    bat_echo_on = 1;                 /* each script starts echoing, like cmd */
 
     while (*p != '\0') {
         int l = 0;
@@ -1275,27 +1491,53 @@ static void cmd_bat(int argc, const char *const *argv)
             continue;
         }
 
-        char echo[BAT_LINE_MAX + 3];
-        int e = 0;
-        echo[e++] = '>';
-        echo[e++] = ' ';
-        for (int k = 0; k < l && e < BAT_LINE_MAX; k++)
-            echo[e++] = bat_line[k];
-        echo[e] = '\0';
-        put_line(echo);
+        /* '@' suppresses the echo of this one line; strip it before anything
+         * else so the built-in test and the program both see the real command. */
+        const char *body = bat_line;
+        int suppress = 0;
+        if (bat_line[0] == '@') {
+            suppress = 1;
+            body++;
+        }
 
-        /* No nesting. Checked on the raw line, before run_line() turns its
+        /* Expand %NAME% now, so both what a person sees echoed and what the
+         * dispatcher runs are the resolved line - cmd echoes the expanded
+         * command too. The serial line below always carries this resolved form,
+         * whether or not the screen echo is on, so the transcript can prove an
+         * expansion the (possibly off) screen echo would hide. */
+        int wl = bat_expand(body, bat_work, sizeof bat_work);
+
+        serial_write("shell: batch exec '");
+        serial_write(bat_work);
+        serial_write("'\n");
+
+        if (bat_echo_on && !suppress) {
+            char echo[BAT_LINE_MAX + 3];
+            int e = 0;
+            echo[e++] = '>';
+            echo[e++] = ' ';
+            for (int k = 0; bat_work[k] != '\0' && e < BAT_LINE_MAX; k++)
+                echo[e++] = bat_work[k];
+            echo[e] = '\0';
+            put_line(echo);
+        }
+
+        /* The three batch built-ins (ECHO ON/OFF, SET, REM) never reach a
+         * program; everything else falls through to run_line as before. */
+        if (batch_builtin(bat_work))
+            continue;
+
+        /* No nesting. Checked on the resolved line, before run_line() turns its
          * spaces into NULs, so this is a prefix test and not a token one. */
-        if (strncmp(bat_line, "bat", 3) == 0 &&
-            (bat_line[3] == '\0' || bat_line[3] == ' ')) {
+        if (is_word(bat_work, "bat")) {
             serial_write("shell: batch refused nested script\n");
             put_line("PAS DE SCRIPT DANS UN SCRIPT.");
             continue;
         }
 
-        /* Spaces become NULs inside bat_line here, which is fine: this buffer
+        /* Spaces become NULs inside bat_work here, which is fine: this buffer
          * is rewritten from bat_text on the next iteration. */
-        run_line(bat_line, l, "from a batch file");
+        run_line(bat_work, wl, "from a batch file");
         ran++;
     }
 

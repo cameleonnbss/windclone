@@ -4,7 +4,7 @@
 Windows does, with `pip install rich` working, on a desktop that behaves like a
 daily driver.
 
-**Where WindClone is today (v0.1.36):** a from-scratch x86-64 kernel on Limine,
+**Where WindClone is today (v0.1.37):** a from-scratch x86-64 kernel on Limine,
 its own ELF64 loader, its own int `0x80` ABI of fourteen numbered syscalls, a
 libc-less userland of 25 freestanding C programs, a tmpfs store, an e1000 driver
 with an ICMP/UDP/DHCP/TCP/HTTP stack on top of it, a compositor with per-cell
@@ -27,10 +27,10 @@ because it is the biggest single fact in this file:
 
 ## What already works, exactly
 
-| Requested | Reality in v0.1.36 |
+| Requested | Reality in v0.1.37 |
 |---|---|
-| `.bat` files run | Yes, narrowly: `bat <NAME>` executes `/tmp/<NAME>.BAT`, echoing each line as `> <line>`, skipping `;` comments, refusing a nested `bat`. **No** `@echo off`, no `%VAR%`, no `if`/`for`/`goto`/`errorlevel`, no redirection or pipes. |
-| Windows-like shell verbs | `DIR`, `DEL`, `REN` are built-ins with `cmd`'s error classes (`EPERM` read-only, `ENOENT`, `EEXIST`, `EBUSY`) — v0.1.32. Missing: `CD`, `TYPE`, `COPY` (a `/bin` program, not a verb), `MOVE`, `MKDIR`, `SET`. |
+| `.bat` files run | Yes, and since v0.1.37 with the cmd semantics a copied script actually leans on: `bat <NAME>` executes `/tmp/<NAME>.BAT` with `@` suppressing a line's echo, `ECHO OFF`/`ECHO ON`/bare `ECHO` as the script's echo state, `SET NAME=value` + `%NAME%` expansion (session environment, case-insensitive names), `rem` alongside `;` as a comment, and a nested `bat` refused. Every script line also logs its resolved form to the serial transcript, so an `ECHO OFF` run is still fully provable. **No** `if`/`for`/`goto`/`call`/`errorlevel`, no redirection or pipes, no arguments passed to a script. |
+| Windows-like shell verbs | `DIR`, `DEL`, `REN` are built-ins with `cmd`'s error classes (`EPERM` read-only, `ENOENT`, `EEXIST`, `EBUSY`) — v0.1.32. `SET` and `%VAR%` exist inside scripts (v0.1.37) but not at the prompt, where cmd keeps an environment too. Missing: `CD`, `TYPE`, `COPY` (a `/bin` program, not a verb), `MOVE`, `MKDIR`. |
 | ZIP extraction "like Windows" | `/bin/unzip` extracts **STORED** (v0.1.33) *and* **DEFLATE** (v0.1.35, `src/user/inflate.h`) members, and since v0.1.36 under **relative directory names** (`demo/__init__.py`) into the store, with a per-entry digest the test recomputes from what the format says the file is — so a real `.whl` unpacks in place. Still refused, by rule and not by accident: a name carrying a `..` component or a leading `/` (the zip-slip that would write outside the destination), and bzip2/LZMA entries, which are not this decoder's format. A folder record (a name ending in `/`) is skipped because this store has no directories. What a `.whl` still needs is an interpreter, not an extractor. |
 | Internet access to download things | Yes over the e1000: DHCP lease, ARP, ICMP, UDP, a TCP handshake and an HTTP `GET` whose body lands in the store (`fetch <path>`, `/bin/pkg`, `/bin/browser`) — v0.1.25→31. |
 | Images on screen | `/bin/imgview` decodes a 24-bit BI_RGB BMP and the kernel blits it — v0.1.34. |
@@ -74,9 +74,14 @@ So the honest ladder, in the order each rung becomes testable:
       or leading `/` is still refused by name. Getting there fixed a real input
       bug (`keyboard.c` swallowed the LeftShift release, so a typed underscore
       stuck Shift on and uppercased everything after it).
-- [ ] **`.cmd`-shaped batch semantics**: `@echo off`, `%VAR%` and `SET`,
-      `IF`/`FOR`, `ERRORLEVEL`, `>`/`|`. Proven by typing a script at the prompt
-      and comparing the serial transcript byte for byte.
+- [x] **the `@`/echo/environment half of batch semantics**: `@echo off`,
+      `%VAR%` and `SET`, `rem`. Landed in v0.1.37 inside the batch reader (the
+      prompt keeps its v0.1.19 behaviour), proven by typing three scripts at
+      the prompt and reading the resolved lines back off the serial transcript —
+      including `/bin/echo` printing the *expanded* value of `%X%`.
+- [ ] **the control-flow half of batch semantics**: `IF`/`FOR`, `ERRORLEVEL`,
+      `>`/`|`, and arguments passed to a script. Each is its own rung, each
+      proven the same typed-script-against-transcript way.
 - [ ] **`TYPE`, `CD`, `MKDIR`, `MOVE`** as built-ins, so the prompt behaves like
       `cmd` for the verbs a person actually types.
 - [ ] **a small Python-language interpreter** (`/bin/python`) for pure-Python

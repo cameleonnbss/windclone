@@ -34,8 +34,17 @@
 /* A command line, as far as the stack builder is concerned: at most this many
  * words, and at most this many bytes of text between them. Both are bounded so
  * the copy below can say "this will not fit" instead of running off the bottom
- * of a 16 KiB stack. */
-#define USER_ARG_MAX     8
+ * of a 16 KiB stack.
+ *
+ * USER_ARG_MAX was 8. Eight is enough for a human command but not for the way
+ * /bin/save builds a script: `save script NAME w1 nl w2 nl w3` spends three of
+ * the slots on `save script NAME` before a single content word appears, so a
+ * copied four-line .bat (`@echo off`, `set X=...`, `rem`, `echo %X%`) blew past
+ * eight and the shell folded the whole tail into the last argument instead of
+ * erroring. Sixteen clears a realistic script line — the prompt itself only
+ * buffers SHELL_COLS-1 characters anyway, so this is the practical ceiling, not
+ * an unbounded one. */
+#define USER_ARG_MAX     16
 #define USER_ARGV_BYTES  224
 
 /* Returns 0 when the program ran to exit(), negative on a load failure.

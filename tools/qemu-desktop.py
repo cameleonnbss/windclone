@@ -66,6 +66,14 @@ Scenarios (each one asserts the serial markers the kernel prints):
                a batch file` - a typed line says "from the prompt"). Then the
                three refusals: a missing script, a name that looks like a path
                traversal, and a script that calls another script.
+    batch2     prove the cmd.exe semantics a copied script leans on: `@` hides
+               one line's echo, `ECHO OFF`/`ECHO ON` flip the script's echo and
+               a bare `ECHO` reports the state, `set x=hi` defines a session
+               variable a later `echo %x%` expands to (the resolved exec row must
+               read `echo hi` and never a literal `echo %x%`), a bare `SET` lists the
+               environment, and `rem` is a comment like `;`. Every proof line is
+               `shell: batch exec '<resolved line>'` - the serial transcript the
+               echo setting cannot hide.
     typing     prove the keyboard reaches a *program*: type `keys` so /bin/keys
                launches and blocks in read(0) (the kernel says it is asleep until
                a keystroke wakes it), then type a word and require the program to
@@ -183,8 +191,19 @@ RESIZE_EDGE, MIN_W, MIN_H = 5, 200, 120
 # docstring on type_text warns about. So '_' is spelled as the chord the kernel
 # actually decodes, and (having a dash) it goes through QMP like every other
 # chord: press shift, press minus, release both.
+#
+# '=' and '%' follow the same rule, because the batch-semantics scenario types
+# SET X=hi and echo %X% at the prompt. The kernel already decodes both:
+# map_plain[0x0D] = '=' and map_shift[0x06] = '%'. QEMU's own names ("equal" and
+# the shift-5 chord) are proven QMP qcodes, so both bypass HMP: "equal" is not
+# in HMP_OK, and "shift-5" carries a dash. '@' (map_shift[0x03], the `@echo off`
+# of the same scenario) joins them, and ';' maps to QEMU's own qcode name: the
+# raw character is not a qcode ('QEMU refused the semicolon as ";"'), "semicolon"
+# is, and it is not in HMP_OK either way, so it goes through the channel that
+# answers. map_plain[0x27] = ';' decodes it on the kernel side.
 KEYMAP = {" ": "spc", "\n": "ret", "/": "slash", ".": "dot", "-": "minus",
-          "_": "shift-minus"}
+          "_": "shift-minus", "=": "equal", "%": "shift-5", "@": "shift-2",
+          ";": "semicolon"}
 # Key names the *human* monitor has been proved to deliver: the letters and
 # digits every scenario has always typed, plus the unshifted spellings KEYMAP
 # maps to. Anything else goes through QMP, because `sendkey` accepts an unknown
@@ -1076,6 +1095,107 @@ def scenario_actions(sc, mon, W, H):
                              % m.group(1))
         if count_serial(r"shell: running 'echo' from a batch file") != 2:
             raise SystemExit("the line after a refused nested script did not run")
+    elif sc == "batch2":
+        # v0.1.37: the half of cmd.exe a copied script leans on. `@echo off` is
+        # the first line of nearly every Windows .bat, and SET / %VAR% carry its
+        # values; without them a script echoed its own commands and ran a literal
+        # "%x%" where it meant "hi". Every claim sits on the kernel's own line
+        # `shell: batch exec '<resolved line>'`: it is written for every script
+        # line whatever the screen echo does, so even ECHO OFF leaves a transcript
+        # the test can read. The three scripts stay short on purpose - the shell's
+        # line editor holds SHELL_COLS-1 (61) keystrokes, and a longer typed
+        # command is silently truncated at the prompt, so each `save script` here
+        # is counted to fit. Everything is typed lowercase because the QMP qcode
+        # alphabet has no capitals; the built-ins match case-insensitively and the
+        # log folds the name, so `set x=hi` still reports `X=hi` - two spellings
+        # in one transcript that prove the matcher and the folder both ran.
+        script_a = "@echo off\nset x=hi\nrem note\necho %x%\n"
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+        mon.type_text("save script a @echo off nl set x=hi nl rem note nl echo %x%\n")
+        m = wait_serial(r"save: wrote (\d+) bytes /tmp/a\.bat")
+        if int(m.group(1)) != len(script_a):
+            raise SystemExit("the script landed as %s bytes, want %d (%r)"
+                             % (m.group(1), len(script_a), script_a))
+
+        # One run of the script, and every line is asserted to come after the
+        # previous: mark is the log length before `bat a`, so nothing earlier can
+        # satisfy a wait. The '@' is stripped (the line still runs, only its
+        # screen echo hides); SET folds its name; REM is a comment; and `echo %x%`
+        # resolves to `echo hi`, launches the program, and the program's own stdout
+        # row - a bare "hi" - lands between the launch and the count.
+        mark = len(read_log())
+        mon.type_text("bat a\n")
+        m, _ = wait_serial_after(mark, r"shell: batch file /tmp/a\.bat \(%d bytes\)"
+                                 % len(script_a))
+        m, _ = wait_serial_after(m, r"shell: batch exec 'echo off'")
+        m, _ = wait_serial_after(m, r"shell: batch echo off")
+        m, _ = wait_serial_after(m, r"shell: batch exec 'set x=hi'")
+        m, _ = wait_serial_after(m, r"shell: batch set X=hi")
+        m, _ = wait_serial_after(m, r"shell: batch exec 'rem note'")
+        m, _ = wait_serial_after(m, r"shell: batch remark skipped")
+        # The expansion proof, in order: the resolved exec row says `echo hi`,
+        # then the origin row says the launch came from a batch file. That exec
+        # row is written from bat_work AFTER %expansion, so it reads `echo hi`
+        # only because %x% resolved to the value `set` stored; a script that
+        # skipped expansion would log `exec 'echo %x%'`, and the negative count
+        # below proves no such unexpanded line was ever dispatched. (The /bin/echo
+        # program's own bytes also land on the port, but they are routed without a
+        # trailing serial newline, so the resolved exec row - not the raw stdout -
+        # is the reliable byte-for-byte claim.)
+        m, _ = wait_serial_after(m, r"shell: batch exec 'echo hi'")
+        m, _ = wait_serial_after(m, r"shell: running 'echo' from a batch file")
+        if count_serial(r"shell: batch exec 'echo %x%'") != 0:
+            raise SystemExit("an unexpanded `echo %x%` reached the dispatcher; "
+                             "the %VAR% expansion did not happen")
+        _, ran = wait_serial_after(m, r"shell: batch ran (\d+) commands from /tmp/a\.bat")
+        if int(ran.group(1)) != 1:
+            raise SystemExit("the script ran %s commands; echo off, set and rem "
+                             "are built-ins, only the expanded echo line may be "
+                             "dispatched" % ran.group(1))
+
+        # The echo state machine, one line per report. Each script resets to echo
+        # ON (like cmd), so this script's first `echo off` is genuinely a change,
+        # and the bare `echo` after it must answer "off" and the one after
+        # `echo on` must answer "on". Screen echo being off does not hide these:
+        # the exec row is written before the echo decision.
+        script_b = "echo off\necho\necho on\necho\n"
+        mon.type_text("save script b echo off nl echo nl echo on nl echo\n")
+        m = wait_serial(r"save: wrote (\d+) bytes /tmp/b\.bat")
+        if int(m.group(1)) != len(script_b):
+            raise SystemExit("the state script landed as %s bytes, want %d"
+                             % (m.group(1), len(script_b)))
+        mark = len(read_log())
+        mon.type_text("bat b\n")
+        m, _ = wait_serial_after(mark, r"shell: batch exec 'echo off'")
+        m, _ = wait_serial_after(m, r"shell: batch echo off")
+        m, _ = wait_serial_after(m, r"shell: batch exec 'echo'")
+        m, _ = wait_serial_after(m, r"shell: batch echo state off")
+        m, _ = wait_serial_after(m, r"shell: batch exec 'echo on'")
+        m, _ = wait_serial_after(m, r"shell: batch echo on")
+        m, _ = wait_serial_after(m, r"shell: batch exec 'echo'")
+        m, _ = wait_serial_after(m, r"shell: batch echo state on")
+
+        # A ';' comment and a bare SET, in the shortest script that carries both.
+        # The environment was filled by script a and is *not* reset by script b,
+        # so listing it here proves the session persisted across two other scripts
+        # - exactly the cmd behaviour a multi-file build relies on.
+        script_c = "; x\nset\n"
+        mon.type_text("save script c ; x nl set\n")
+        m = wait_serial(r"save: wrote (\d+) bytes /tmp/c\.bat")
+        if int(m.group(1)) != len(script_c):
+            raise SystemExit("the listing script landed as %s bytes, want %d"
+                             % (m.group(1), len(script_c)))
+        mark = len(read_log())
+        mon.type_text("bat c\n")
+        # the ';' line is a comment answered on the transcript (not a silent hole,
+        # and not dispatched); the bare `set` line then lists the one variable a
+        # previous script left behind.
+        m, _ = wait_serial_after(mark, r"shell: batch comment skipped")
+        m, _ = wait_serial_after(m, r"shell: batch exec 'set'")
+        m, _ = wait_serial_after(m, r"shell: batch env 1 variables")
+        wait_serial_after(m, r"shell: batch env X=hi")
     elif sc == "typing":
         # v0.1.20: the keyboard reaches a *program*. Everything the earlier
         # scenarios type goes to the prompt; this one hands the same PS/2 bytes
@@ -2186,6 +2306,16 @@ MARKERS = {
     "batchfile": ["tmpfs: writable store live", "save: wrote",
                   "shell: batch file", "shell: running 'echo' from a batch file",
                   "shell: batch ran", "shell: batch refused nested script"],
+    # the byte counts, the expansion proof, the echo-state machine and the
+    # environment list are all asserted in the scenario; these are the lines the
+    # claim turns on - a resolved `%X%`, an `@`-stripped `echo off`, a SET that
+    # folded its name, `rem` answered as a comment, and ECHO reporting its state
+    "batch2":    ["save: wrote", "shell: batch exec 'echo hi'",
+                  "shell: batch exec 'echo off'", "shell: batch echo off",
+                  "shell: batch set X=hi", "shell: batch remark skipped",
+                  "shell: batch comment skipped",
+                  "shell: batch echo state off", "shell: batch echo state on",
+                  "shell: batch env 1 variables", "shell: batch env X=hi"],
     # the line's text, the byte total across reads and the absence of any leak to
     # the prompt are all asserted in the scenario; these are the lines the claim
     # turns on - a program that asked for the keyboard, slept until a key landed,

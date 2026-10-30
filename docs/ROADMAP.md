@@ -498,6 +498,62 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         per file, 8 files per boot — and still RAM, so a script written this release
         is gone at the next reboot. `command.com` this is not; it is the smallest
         thing that makes "run that file" true.
+- [x] **Batch semantics: the `@`, the echo, the environment (v0.1.37).** Three of
+      the words v0.1.19 wrote into its own cost list — `@echo off`, `SET`, `%VAR%`
+      — plus `rem`. They live in the batch reader, not in `run_line`: a line typed
+      at the prompt is dispatched exactly as it always was (an `echo` there is
+      still `/bin/echo`), and the script path alone gains the cmd behaviour, so
+      the v0.1.19 prompt semantics are untouched and the scope is stated honestly.
+      - **`@` strips one line's echo, `ECHO OFF` strips the rest's, and neither
+        strips the transcript.** Every script line first logs
+        `shell: batch exec '<resolved line>'` to the serial port — the channel CI
+        reads and the echo setting cannot hide — and only then decides whether the
+        terminal also shows `> <line>`. A bare `ECHO` reports the state
+        (`shell: batch echo state on|off`); `ECHO ON`/`ECHO OFF` flip it. An echo
+        that is off changes what a person sees, never what the log can prove.
+      - **`ECHO <text>` is still not a built-in.** The real cmd treats it as one;
+        here it still dispatches to `/bin/echo`, because the v0.1.19 scenario —
+        and every script copied into the store so far — types lowercase `echo`
+        with a message and expects the program. Intercepting bare/`ON`/`OFF` only
+        adds the state machine without breaking a single existing claim.
+      - **`SET X=hi` defines a session variable; `echo %X%` runs as `echo hi`.**
+        Expansion happens before the echo and before the dispatch — cmd echoes the
+        *resolved* line too — and names are case-insensitive and folded to upper
+        case in the log, like cmd's. A bare `SET` lists the environment; a `SET`
+        with no `=` refuses itself; an undefined `%NAME%` expands to nothing,
+        which is what cmd does and what makes "never set" distinguishable from
+        "set empty". `rem` joins `;` as a comment, answered by a transcript line
+        instead of vanishing.
+      - **The evidence is typed** (`qemu-desktop.py batch2`): three scripts written
+        at the prompt, byte counts checked against the writer, and the resolved
+        `shell: batch exec '<line>'` rows read back in order. The expansion claim
+        rests on those rows, not on `/bin/echo`'s raw stdout: a script that skipped
+        `%x%` expansion would log `exec 'echo %x%'`, and the scenario requires that
+        line to appear **zero** times while `exec 'echo hi'` appears once — the
+        resolved row is written by the kernel from `bat_work` after expansion, so it
+        cannot be forged by any other line. (The program's own bytes also reach the
+        port, but routed program output carries no trailing serial newline, so the
+        exec row is the byte-for-byte claim and the stdout row is not.)
+      - **`USER_ARG_MAX` went 8 → 16, and the Makefile learned header deps.** A
+        four-line `save script a @echo off nl set x=hi nl rem note nl echo %x%` is
+        fourteen space-separated words. The old eight-token cap stopped counting
+        mid-line and — because each argument is only NUL-terminated by the *next*
+        token's leading-space pass — the eighth argument silently swallowed the rest
+        of the line as one folded string, so `save` wrote a mangled file. Eighteen
+        months of scenarios never crossed eight words, so nothing noticed. Raised to
+        sixteen, plus `run_line` now cuts the last argument at its delimiter when the
+        cap does fill, so overflow truncates honestly instead of folding. The build
+        had its own half of the bug: the kernel object rule listed no headers, so a
+        `usermode.h` edit left `proc.o` compiled with the old eight while `shell.o`
+        used sixteen — the mismatch only surfaced at run time. `-MMD -MP` plus an
+        `-include build/*.d` now rebuilds exactly the translation units a header
+        touches.
+      - The cost, written down: 8 variables per session, 48-byte values, 16-byte
+        names; expansion on script lines only (no prompt-time variables — cmd has
+        them, and that is another rung); still no `if`, `for`, `goto`, `call`,
+        `ERRORLEVEL`, redirection or pipes; the 61-keystroke line-editor cap is
+        untouched, so a longer *typed* command is still truncated at the prompt
+        (what changed is only that the tokens that do fit are no longer folded).
 
 ## Phase 6 — Language expansion ⏳
 *Goal: use the right tool per layer (the "asm/C/C++/Rust" promise).*

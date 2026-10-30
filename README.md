@@ -557,6 +557,35 @@ On boot the kernel:
    member and 8 KiB per archive; a `..` name is refused, not sanitised; bzip2/LZMA
    and a true directory tree (this store has no folders) are still out of scope.
 
+40. **runs a `.bat` the way cmd does, not just the way this shell did (v0.1.37)**.
+   Nearly every Windows script opens with `@echo off` and carries its values in
+   `SET NAME=value` referenced as `%NAME%`; until now a copied script echoed its
+   own commands and ran a literal `"%X%"` where it meant `hi`. The batch reader
+   now has that half of cmd: `@` suppresses one line's screen echo, `ECHO OFF`
+   and `ECHO ON` flip the script's echo state and a bare `ECHO` reports it,
+   `SET X=hi` defines a session variable (names case-insensitive and folded, the
+   way cmd folds them), a bare `SET` lists the environment, an undefined `%NAME%`
+   expands to nothing — cmd's rule, and the one that keeps "never set" visible as
+   different from "set empty" — and `rem` is a comment alongside `;`. Expansion
+   happens before the line is echoed *or* run, so `echo %X%` dispatches as
+   `echo hi` and the terminal shows the resolved line, exactly what cmd's transcript
+   looks like. Every script line also writes `shell: batch exec '<resolved line>'`
+   to the serial port whatever the echo setting does, so an `ECHO OFF` script still
+   leaves a transcript the tests — and you — can read. None of this touches the
+   prompt: a typed `echo` is still `/bin/echo`; the semantics live in the batch
+   reader only, and lowercase `ECHO <text>` in a script still runs the program so
+   every script written since v0.1.19 behaves unchanged. Building a four-line
+   script also exposed a real limit: the shell tokenised a command line into at
+   most 8 arguments and, past the eighth, folded the whole remaining line into one
+   argument — so a long `save script` wrote a mangled file. That cap is now 16 and
+   overflow is cut cleanly rather than folded, and the kernel build grew automatic
+   header dependencies (`-MMD -MP`) so a header edit like this one can no longer
+   leave a stale object compiled against the old value. The honest scope: 8
+   variables per session, values up to 48 bytes, expansion on script lines only
+   (prompt-time variables, `IF`, `FOR`, `GOTO`, `CALL`, `ERRORLEVEL`, redirection
+   and pipes are each their own rung), and the line editor still caps a *typed*
+   command at 61 keystrokes — widening that is deliberately a release of its own.
+
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
 triple-faulting.
