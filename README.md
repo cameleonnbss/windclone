@@ -619,9 +619,21 @@ On boot the kernel:
    carries a percent — the `save script a ... echo %x%` that writes a script —
    still writes `%x%` to the file instead of an empty hole. `promptvar` proves
    both halves: the defined substitution and, with a count check, that an
-   undefined `echo %nope%` produces no exec row at all. The honest scope: still
-   no caret (`^`) escape, so a literal percent that must survive a *defined*
-   expansion is not expressible yet; `IF`/`FOR`/`ERRORLEVEL`, redirection and
+   undefined `echo %nope%` produces no exec row at all.
+
+43. **cmd's caret escape now works on typed and scripted lines (v0.1.40)**.
+   The tool that makes `%VAR%` complete: `^` consumes itself and emits the next
+   character literally, and a `^%` cannot start a variable reference. So after
+   `set pz=bonjour`, a typed `echo ^%pz%` dispatches `echo %pz%` — the kernel's
+   `shell: prompt exec 'echo %pz%'` row shows the caret gone and the percent
+   kept, proving the escape blocked an expansion that would otherwise fire — and
+   the simpler `echo a^b` resolves to `echo ab`. The same rule landed in the
+   batch reader's `bat_expand`, so a script writes a real percent with `^%` too.
+   Typing `^` rides the QMP `shift-6` chord (the kernel maps scancode `0x07` +
+   shift to `^`), the identical proven path that delivers `%` via `shift-5`.
+   The honest scope: this is the single-caret rule only — cmd's doubled caret
+   inside batch files, and its interaction with the quoting rules, are not
+   reproduced; `IF`/`FOR`/`GOTO`/`CALL`/`ERRORLEVEL`, redirection/pipes and
    `CD`/`MKDIR`/`MOVE` remain future rungs.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)

@@ -602,6 +602,24 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         `CD`/`MKDIR`/`MOVE` remain each their own rung; the 8-name × 48-byte
         environment and the 61-keystroke line-editor cap are unchanged.
 
+- [x] **cmd's caret escape — `^` on typed and scripted lines (v0.1.40).** The
+      tool that makes the `%VAR%` story complete. In both `prompt_expand()` and
+      `bat_expand()` a `^` consumes itself and emits the next character
+      literally, and because the escape is handled before the `%` scanner a
+      `^%` can never start a variable reference. So `echo ^%pz%` after
+      `set pz=bonjour` dispatches the literal `echo %pz%` — the kernel's own
+      `shell: prompt exec 'echo %pz%'` row is the proof the caret blocked an
+      expansion that would otherwise have fired — and `echo a^b` resolves to
+      `echo ab`. The kernel already mapped scancode `0x07` + shift to `^`; the
+      harness gained `"^": "shift-6"` in `KEYMAP`, the same QMP chord path that
+      delivers `%` via `shift-5`, so the escape is typed and byte-verified end
+      to end. The `caret` scenario asserts both the blocked-expansion row and
+      the consumed-caret row, then the program launch.
+      - The cost, written down: only the single-caret rule — cmd's doubled caret
+        inside batch files and its interaction with quoting are not reproduced;
+        `IF`, `FOR`, `GOTO`, `CALL`, `ERRORLEVEL`, redirection/pipes and
+        `CD`/`MKDIR`/`MOVE` remain each their own rung.
+
 
 ## Phase 6 — Language expansion ⏳
 *Goal: use the right tool per layer (the "asm/C/C++/Rust" promise).*

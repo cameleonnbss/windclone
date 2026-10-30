@@ -91,6 +91,12 @@ Scenarios (each one asserts the serial markers the kernel prints):
                LITERAL, so a typed `echo %nope%` writes NO exec row (a count
                check proves it) - the exact choice that keeps batch2's typed
                `save ... echo %x%` intact.
+    caret      prove cmd's caret escape: `^` consumes itself and emits the next
+               character literally, and a `^%` cannot start a %VAR% reference.
+               After `set pz=bonjour`, a typed `echo ^%pz%` resolves to
+               `echo %pz%` (caret gone, percent literal, no expansion) and
+               `echo a^b` resolves to `echo ab`; each is the kernel's own
+               `shell: prompt exec '<resolved>'` row, then the program launch.
     typing     prove the keyboard reaches a *program*: type `keys` so /bin/keys
                launches and blocks in read(0) (the kernel says it is asleep until
                a keystroke wakes it), then type a word and require the program to
@@ -219,8 +225,8 @@ RESIZE_EDGE, MIN_W, MIN_H = 5, 200, 120
 # is, and it is not in HMP_OK either way, so it goes through the channel that
 # answers. map_plain[0x27] = ';' decodes it on the kernel side.
 KEYMAP = {" ": "spc", "\n": "ret", "/": "slash", ".": "dot", "-": "minus",
-          "_": "shift-minus", "=": "equal", "%": "shift-5", "@": "shift-2",
-          ";": "semicolon"}
+          "_": "shift-minus", "=": "equal", "%": "shift-5", "^": "shift-6",
+          "@": "shift-2", ";": "semicolon"}
 # Key names the *human* monitor has been proved to deliver: the letters and
 # digits every scenario has always typed, plus the unshifted spellings KEYMAP
 # maps to. Anything else goes through QMP, because `sendkey` accepts an unknown
@@ -1315,6 +1321,41 @@ def scenario_actions(sc, mon, W, H):
         if count_serial(r"shell: prompt exec 'echo %nope%'") != 0:
             raise SystemExit("an undefined %nope% produced a prompt exec row; "
                              "undefined names must stay literal, not expand")
+    elif sc == "caret":
+        # v0.1.40: cmd's caret escape. `^` consumes itself and emits the next
+        # character literally, and crucially a `^%` cannot start a %VAR%
+        # reference - so `echo ^%pz%` prints `%pz%` even after pz is defined,
+        # the exact tool that lets a real percent survive a line that also
+        # expands variables. The claim is the kernel's own resolved row: the
+        # caret is GONE and the percent is LITERAL in what got dispatched.
+        # Typing `^` goes through the QMP shift-6 chord (the kernel maps
+        # scancode 0x07 + shift to '^'), the same proven path as shift-5 for %.
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+
+        # Define pz so the escape is meaningful: without the caret this line
+        # would expand to `echo bonjour`, so a resolved row that still reads
+        # `%pz%` proves the caret blocked the expansion.
+        mark = len(read_log())
+        mon.type_text("set pz=bonjour\n")
+        wait_serial_after(mark, r"shell: prompt set PZ=bonjour")
+
+        # `echo ^%pz%`: the caret escapes the first percent, the dispatch sees
+        # `echo %pz%` (caret consumed, no expansion), and the launch row proves
+        # it still reached the dispatcher from the prompt.
+        mark = len(read_log())
+        mon.type_text("echo ^%pz%\n")
+        m, _ = wait_serial_after(mark, r"shell: prompt exec 'echo %pz%'")
+        wait_serial_after(m, r"shell: running 'echo' from the prompt")
+
+        # The caret's other half: it vanishes and the next char is literal, so
+        # `echo a^b` resolves to `echo ab` - a plain consumed-caret proof that
+        # needs no variable at all.
+        mark = len(read_log())
+        mon.type_text("echo a^b\n")
+        m, _ = wait_serial_after(mark, r"shell: prompt exec 'echo ab'")
+        wait_serial_after(m, r"shell: running 'echo' from the prompt")
     elif sc == "typing":
         # v0.1.20: the keyboard reaches a *program*. Everything the earlier
         # scenarios type goes to the prompt; this one hands the same PS/2 bytes
@@ -2451,6 +2492,12 @@ MARKERS = {
     # expansion ran; the launch row proves the resolved line still dispatched.
     "promptvar": ["shell: prompt set PZ=bonjour",
                   "shell: prompt exec 'echo bonjour'",
+                  "shell: running 'echo' from the prompt"],
+    # v0.1.40: caret escape. `^%` blocks expansion (the resolved row keeps a
+    # literal %pz% even though pz is set) and a bare `^` vanishes (a^b -> ab).
+    "caret":     ["shell: prompt set PZ=bonjour",
+                  "shell: prompt exec 'echo %pz%'",
+                  "shell: prompt exec 'echo ab'",
                   "shell: running 'echo' from the prompt"],
     # the line's text, the byte total across reads and the absence of any leak to
     # the prompt are all asserted in the scenario; these are the lines the claim

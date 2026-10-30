@@ -4,7 +4,7 @@
 Windows does, with `pip install rich` working, on a desktop that behaves like a
 daily driver.
 
-**Where WindClone is today (v0.1.39):** a from-scratch x86-64 kernel on Limine,
+**Where WindClone is today (v0.1.40):** a from-scratch x86-64 kernel on Limine,
 its own ELF64 loader, its own int `0x80` ABI of fourteen numbered syscalls, a
 libc-less userland of 25 freestanding C programs, a tmpfs store, an e1000 driver
 with an ICMP/UDP/DHCP/TCP/HTTP stack on top of it, a compositor with per-cell
@@ -27,10 +27,10 @@ because it is the biggest single fact in this file:
 
 ## What already works, exactly
 
-| Requested | Reality in v0.1.39 |
+| Requested | Reality in v0.1.40 |
 |---|---|
 | `.bat` files run | Yes, and since v0.1.37 with the cmd semantics a copied script actually leans on: `bat <NAME>` executes `/tmp/<NAME>.BAT` with `@` suppressing a line's echo, `ECHO OFF`/`ECHO ON`/bare `ECHO` as the script's echo state, `SET NAME=value` + `%NAME%` expansion (session environment, case-insensitive names), `rem` alongside `;` as a comment, and a nested `bat` refused. Every script line also logs its resolved form to the serial transcript, so an `ECHO OFF` run is still fully provable. **No** `if`/`for`/`goto`/`call`/`errorlevel`, no redirection or pipes, no arguments passed to a script. |
-| Windows-like shell verbs | `DIR`, `DEL`, `REN` are built-ins with `cmd`'s error classes (`EPERM` read-only, `ENOENT`, `EEXIST`, `EBUSY`) — v0.1.32. `SET` and `%VAR%` live inside scripts (v0.1.37), and since v0.1.38 `SET NAME=value` / bare `SET` and `TYPE <path>` are prompt built-ins too (`set` folds the name to upper case like cmd, lists the environment back, and `type` prints a store/archive file's bytes to the transcript). Since v0.1.39 `%VAR%` expands on a *typed* line too — a defined name substitutes before the command runs, an undefined one stays literal so a `save script` writing a `%` survives. Still missing: a caret (`^`) escape (so a literal percent survives a *defined* expansion), `CD`, `COPY` as a verb (it is a `/bin` program), `MOVE`, `MKDIR`. |
+| Windows-like shell verbs | `DIR`, `DEL`, `REN` are built-ins with `cmd`'s error classes (`EPERM` read-only, `ENOENT`, `EEXIST`, `EBUSY`) — v0.1.32. `SET` and `%VAR%` live inside scripts (v0.1.37), and since v0.1.38 `SET NAME=value` / bare `SET` and `TYPE <path>` are prompt built-ins too (`set` folds the name to upper case like cmd, lists the environment back, and `type` prints a store/archive file's bytes to the transcript). Since v0.1.39 `%VAR%` expands on a *typed* line too — a defined name substitutes before the command runs, an undefined one stays literal so a `save script` writing a `%` survives. Since v0.1.40 cmd's caret escape works on both typed and scripted lines: `^` consumes itself and emits the next character literally, and `^%` cannot start a reference, so a real percent survives a line that also expands variables. Still missing: cmd's doubled-caret-inside-a-batch-file and its quoting interaction, `CD`, `COPY` as a verb (it is a `/bin` program), `MOVE`, `MKDIR`. |
 | ZIP extraction "like Windows" | `/bin/unzip` extracts **STORED** (v0.1.33) *and* **DEFLATE** (v0.1.35, `src/user/inflate.h`) members, and since v0.1.36 under **relative directory names** (`demo/__init__.py`) into the store, with a per-entry digest the test recomputes from what the format says the file is — so a real `.whl` unpacks in place. Still refused, by rule and not by accident: a name carrying a `..` component or a leading `/` (the zip-slip that would write outside the destination), and bzip2/LZMA entries, which are not this decoder's format. A folder record (a name ending in `/`) is skipped because this store has no directories. What a `.whl` still needs is an interpreter, not an extractor. |
 | Internet access to download things | Yes over the e1000: DHCP lease, ARP, ICMP, UDP, a TCP handshake and an HTTP `GET` whose body lands in the store (`fetch <path>`, `/bin/pkg`, `/bin/browser`) — v0.1.25→31. |
 | Images on screen | `/bin/imgview` decodes a 24-bit BI_RGB BMP and the kernel blits it — v0.1.34. |
@@ -102,6 +102,16 @@ So the honest ladder, in the order each rung becomes testable:
       count check, that `echo %nope%` writes no exec row. Still not done: the
       caret (`^`) escape that lets a literal percent survive a *defined*
       expansion — and `CD`/`MKDIR`/`MOVE`.
+- [x] **cmd's caret escape** on typed and scripted lines. Landed in v0.1.40:
+      `^` consumes itself and emits the next character literally, and because it
+      is handled before the `%` scanner a `^%` can never start a reference — so
+      `echo ^%pz%` prints `%pz%` even with `pz` set, and `echo a^b` becomes
+      `echo ab`. Added to both `prompt_expand()` and the batch reader's
+      `bat_expand()`. The kernel already mapped scancode `0x07` + shift to `^`;
+      the harness `KEYMAP` gained `"^": "shift-6"`, the same QMP chord path that
+      delivers `%`. Proven by the `caret` scenario. Still not done: cmd's
+      doubled caret inside a batch file and its quoting interaction — and
+      `CD`/`MKDIR`/`MOVE`.
 - [ ] **`CD`, `MKDIR`, `MOVE`** as built-ins, so the prompt behaves like
       `cmd` for the remaining verbs a person actually types.
 - [ ] **a small Python-language interpreter** (`/bin/python`) for pure-Python

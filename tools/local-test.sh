@@ -748,6 +748,14 @@ echo '==> prompt %VAR% expansion (defined substitutes, undefined stays literal)'
 python3 tools/qemu-desktop.py windclone.iso promptvar \
     || fail 'the prompt did not expand %VAR% the way cmd expands a typed line'
 
+# v0.1.40: cmd's caret escape. `^` consumes itself and emits the next character
+# literally, and `^%` cannot start a %VAR% reference, so `echo ^%pz%` stays
+# `echo %pz%` even after pz is defined and `echo a^b` becomes `echo ab` - each
+# proven on the kernel's own `shell: prompt exec '<resolved>'` row.
+echo '==> prompt caret escape (^ consumes itself, ^% blocks expansion)'
+python3 tools/qemu-desktop.py windclone.iso caret \
+    || fail 'the caret escape did not behave the way cmd handles ^ at the prompt'
+
 # v0.1.20: the keyboard has a second customer. The scenario types a command that
 # launches /bin/keys, waits for the kernel to say the program is *asleep* in
 # read(0), types a word, and requires the program - not the prompt - to print it

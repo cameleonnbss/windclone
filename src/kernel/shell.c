@@ -1283,11 +1283,19 @@ static int env_set(const char *name, int nlen, const char *val)
  * name. An undefined name expands to nothing, which is exactly what cmd.exe
  * does and what makes the difference between "the name was never set" and "the
  * value was empty" show up on the transcript rather than hide. A '%' with no
- * closing '%' is copied literally, so a stray percent does not eat the line. */
+ * closing '%' is copied literally, so a stray percent does not eat the line.
+ * cmd's caret escape applies here too: `^` consumes itself and emits the next
+ * character literally, so a script can write a real percent with `^%`. */
 static int bat_expand(const char *in, char *out, int cap)
 {
     int n = 0;
     for (int i = 0; in[i] != '\0'; ) {
+        if (in[i] == '^' && in[i + 1] != '\0') {
+            if (n < cap - 1)
+                out[n++] = in[i + 1];   /* caret consumed, next char literal  */
+            i += 2;
+            continue;
+        }
         if (in[i] == '%') {
             int j = i + 1, start = j;
             while (in[j] != '\0' && in[j] != '%')
@@ -1320,11 +1328,20 @@ static int bat_expand(const char *in, char *out, int cap)
  * percent - the `save script a ... echo %x%` that builds a script must write
  * `%x%` to the file, not an empty hole, because x is defined inside the script,
  * not yet at the prompt. A lone or unclosed '%' is copied verbatim, exactly as
- * in the batch reader. Returns the length written. */
+ * in the batch reader. cmd's caret escape lands here too: `^` consumes itself
+ * and emits the next character literally, so `^%` is a percent that cannot
+ * start a reference - `echo ^%pz%` prints `%pz%` even when pz is set. Returns
+ * the length written. */
 static int prompt_expand(const char *in, char *out, int cap)
 {
     int n = 0;
     for (int i = 0; in[i] != '\0'; ) {
+        if (in[i] == '^' && in[i + 1] != '\0') {
+            if (n < cap - 1)
+                out[n++] = in[i + 1];   /* caret consumed, next char literal  */
+            i += 2;
+            continue;
+        }
         if (in[i] == '%') {
             int j = i + 1, start = j;
             while (in[j] != '\0' && in[j] != '%')
