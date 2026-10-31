@@ -947,6 +947,18 @@ echo '==> move over the store (plain, replacing, /Y, refusals)'
 python3 tools/qemu-desktop.py windclone.iso move \
     || fail 'move did not overwrite an existing name, or /Y was mis-parsed, or a refusal was wrong'
 
+# v0.1.43: /bin/fc — cmd's File Compare over both halves of the file layer.
+# Identical files (the archive against the store copy of it) come back with no
+# differences and exit 0; a single-byte change is located by offset AND line,
+# computed by the test from the file layout rather than trusted from the
+# program; unequal sizes report the count and the byte where the shorter file
+# stopped. The digests on the report line are checked against Python's own
+# FNV-1a over the specimen and over the exact bytes /bin/save wrote — so a
+# verdict can never rest on a count alone.
+echo '==> file compare (identical, located difference, size mismatch, refusals)'
+python3 tools/qemu-desktop.py windclone.iso fc \
+    || fail 'fc did not compare archive and store, or mis-located a difference, or its exit code lied'
+
 # v0.1.36: a real ZIP archive unpacked, folder names included.
 # /bin/unzip reads the committed specimen whole and extracts every safe entry
 # byte for byte - flat and nested, stored and deflated (the deflate path runs

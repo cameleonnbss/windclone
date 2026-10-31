@@ -2300,6 +2300,205 @@ def scenario_actions(sc, mon, W, H):
         mon.type_text("move /bin/hello /tmp/x\n")
         base, _ = wait_serial_after(
             base, r"shell: move refused /bin/hello - the archive is read-only\n")
+    elif sc == "fc":
+        # v0.1.43: /bin/fc, cmd's File Compare over both halves of the file
+        # layer. The claim is the *verdict*, so the test brings its own truth:
+        # Python computes FNV-1a over the specimen's bytes and over the exact
+        # content /bin/save writes, and the guest's two digests have to answer
+        # to it - equal for identical files, different when one byte moves. The
+        # equal-length single-byte case pins the first difference at byte 16,
+        # line 2, computed here from the file layout rather than trusted from
+        # the program's arithmetic.
+        data = spec("rootfs/src/hello.c")
+        want = fnv1a(data)
+        if len(data) >= 4096:
+            raise SystemExit("the specimen is %d bytes: past what fc holds, so "
+                             "the identical run would report a refusal"
+                             % len(data))
+
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+
+        base = len(read_log())
+        mon.type_text("copy /src/hello.c /tmp/fca\n")
+        base, m = wait_serial_after(base,
+                                    r"copy: digest 0x([0-9a-f]{8}) pid")
+        if m.group(1) != want:
+            raise SystemExit("the copy digests to %s and hello.c to %s - the "
+                             "copier itself broke before fc was even asked"
+                             % (m.group(1), want))
+        base, _ = wait_serial_after(base, r"copy: wrote \d+ bytes to /tmp/fca")
+        base, _ = wait_serial_after(base, r"shell: copy exited with 0")
+
+        # Archive versus store: the question a person asks after a copy, and
+        # both sides of it read through the same open().
+        base = len(read_log())
+        mon.type_text("fc /src/hello.c /tmp/fca\n")
+        base, m = wait_serial_after(
+            base, r"fc: a=(\d+)b=(\d+) bytes 0x([0-9a-f]{8})/0x([0-9a-f]{8})")
+        if int(m.group(1)) != len(data) or int(m.group(2)) != len(data):
+            raise SystemExit("fc read %s/%s bytes, the file is %d"
+                             % (m.group(1), m.group(2), len(data)))
+        if m.group(3) != want or m.group(4) != want:
+            raise SystemExit("fc digests %s/%s, hello.c digests to %s - one "
+                             "side was not read from the bytes it claims"
+                             % (m.group(3), m.group(4), want))
+        base, _ = wait_serial_after(base, r"fc: no differences encountered")
+        base, _ = wait_serial_after(base, r"shell: fc exited with 0")
+
+        # Same file under one name: identical by construction, and the answer
+        # must not depend on opening a path twice.
+        base = len(read_log())
+        mon.type_text("fc /tmp/fca /tmp/fca\n")
+        base, _ = wait_serial_after(base, r"fc: no differences encountered")
+        base, _ = wait_serial_after(base, r"shell: fc exited with 0")
+
+        # Two store files of equal length, one letter apart in the last word:
+        # The shell's input buffer holds SHELL_COLS-1 (61) characters; the
+        # command "save write fc1 hello world alpha beta gam" is 41 chars and
+        # 8 tokens (both within the caps). Content = "hello world alpha beta gam\n"
+        # (27 bytes). The twin ends "gan": they agree for 25 bytes and disagree
+        # at index 25 ('m' vs 'n'). No newline before byte 25, so it is line 1.
+        fc1_content = "hello world alpha beta gam\n"
+        fc2_content = "hello world alpha beta gan\n"
+        if len(fc1_content) != len(fc2_content):
+            raise SystemExit("the equal-length pair changed size, the byte/line "
+                             "assertion below would test the wrong branch")
+        diff_i = next(i for i in range(len(fc1_content))
+                      if fc1_content[i] != fc2_content[i])
+        diff_line = fc1_content[:diff_i].count("\n") + 1
+        if diff_i != 25 or diff_line != 1:
+            raise SystemExit("the pair no longer first differs at "
+                             "byte 25 line 1 (got %d/%d)"
+                             % (diff_i, diff_line))
+        base = len(read_log())
+        mon.type_text("save write fc1 hello world alpha beta gam\n")
+        base, m = wait_serial_after(
+            base, r"save: wrote (\d+) bytes /tmp/fc1\.txt")
+        if int(m.group(1)) != len(fc1_content):
+            raise SystemExit("save wrote %s bytes for fc1, the command carries "
+                             "%d - the input buffer or arg cap truncated it"
+                             % (m.group(1), len(fc1_content)))
+        base, _ = wait_serial_after(base, r"shell: save exited with 0")
+        base = len(read_log())
+        mon.type_text("save write fc2 hello world alpha beta gan\n")
+        base, m = wait_serial_after(
+            base, r"save: wrote (\d+) bytes /tmp/fc2\.txt")
+        if int(m.group(1)) != len(fc2_content):
+            raise SystemExit("save wrote %s bytes for fc2, the command carries "
+                             "%d - the input buffer or arg cap truncated it"
+                             % (m.group(1), len(fc2_content)))
+        base, _ = wait_serial_after(base, r"shell: save exited with 0")
+        base = len(read_log())
+        mon.type_text("fc /tmp/fc1.txt /tmp/fc1.txt\n")
+        base, _ = wait_serial_after(base, r"fc: no differences encountered")
+        base, _ = wait_serial_after(base, r"shell: fc exited with 0")
+        base = len(read_log())
+        mon.type_text("fc /tmp/fc1.txt /tmp/fc2.txt\n")
+        base, m = wait_serial_after(
+            base, r"fc: a=(\d+)b=(\d+) bytes 0x([0-9a-f]{8})/0x([0-9a-f]{8})")
+        if m.group(3) == m.group(4):
+            raise SystemExit("fc1 and fc2 digest alike (%s) even though they "
+                             "differ at byte %d - the two files are the same "
+                             "text, so the differing word never reached save"
+                             % (m.group(3), diff_i))
+        base, _ = wait_serial_after(
+            base, r"fc: first difference at byte %d line %d"
+                  % (diff_i, diff_line))
+        base, _ = wait_serial_after(base, r"fc: comparison failed")
+        base, _ = wait_serial_after(base, r"shell: fc exited with 1")
+
+        # A difference on the second line: two scripts whose first line is the
+        # same words and whose second differs by one letter, so the sizes match
+        # and the location claim - byte 16, line 2 - is checkable.
+        # p1 = "@echo one\n@echo two\n" vs p2 = "@echo one\n@echo rwo\n"
+        # First difference: byte 16, 't' vs 'r'. Both are 20 bytes.
+        p1 = "@echo one\n@echo two\n"
+        p2 = "@echo one\n@echo rwo\n"
+        if len(p1) != len(p2):
+            raise SystemExit("the two scripts changed size, the byte/line "
+                             "assertion below would test the wrong branch")
+        if p1[:16] != p2[:16] or p1[16] == p2[16]:
+            raise SystemExit("the scripts no longer first differ at byte 16")
+        base = len(read_log())
+        mon.type_text("save script p1 @echo one nl @echo two\n")
+        base, _ = wait_serial_after(base, r"save: wrote \d+ bytes /tmp/p1\.bat")
+        base, _ = wait_serial_after(base, r"shell: save exited with 0")
+        base = len(read_log())
+        mon.type_text("save script p2 @echo one nl @echo rwo\n")
+        base, _ = wait_serial_after(base, r"save: wrote \d+ bytes /tmp/p2\.bat")
+        base, _ = wait_serial_after(base, r"shell: save exited with 0")
+        base = len(read_log())
+        mon.type_text("fc /tmp/p1.bat /tmp/p2.bat\n")
+        base, m = wait_serial_after(
+            base, r"fc: a=(\d+)b=(\d+) bytes 0x([0-9a-f]{8})/0x([0-9a-f]{8})")
+        if int(m.group(1)) != len(p1) or int(m.group(2)) != len(p2):
+            raise SystemExit("fc read %s/%s bytes, the scripts are %d/%d"
+                             % (m.group(1), m.group(2), len(p1), len(p2)))
+        if m.group(3) != fnv1a(p1.encode()) or \
+           m.group(4) != fnv1a(p2.encode()):
+            raise SystemExit("fc's digests %s/%s do not answer to Python over "
+                             "the exact bytes save wrote (%s/%s)"
+                             % (m.group(3), m.group(4),
+                                fnv1a(p1.encode()), fnv1a(p2.encode())))
+        if m.group(3) == m.group(4):
+            raise SystemExit("two files differing at byte 16 digest alike - "
+                             "one side is not being read")
+        base, _ = wait_serial_after(base,
+                                    r"fc: first difference at byte 16 line 2")
+        base, _ = wait_serial_after(base, r"fc: comparison failed")
+        base, _ = wait_serial_after(base, r"shell: fc exited with 1")
+
+        # Unequal sizes: one file is a proper prefix of the other, so the
+        # first "difference" is actually the end of the shorter file.
+        # save write sm one → content "one\n" (4 bytes)
+        # save script bg one nl two → content "one\ntwo\n" (8 bytes, nl becomes newline)
+        # They share the first 4 bytes ("one\n"), so diff_at = min = 4.
+        # Bytes[0..3] of the longer file = "one\n" → 1 newline → line 2.
+        base = len(read_log())
+        mon.type_text("save write sm one\n")
+        base, _ = wait_serial_after(base, r"save: wrote \d+ bytes /tmp/sm\.txt")
+        base, _ = wait_serial_after(base, r"shell: save exited with 0")
+        base = len(read_log())
+        mon.type_text("save script bg one nl two\n")
+        base, _ = wait_serial_after(base, r"save: wrote \d+ bytes /tmp/bg\.bat")
+        base, _ = wait_serial_after(base, r"shell: save exited with 0")
+        sm_len = 4   # len("one\n")
+        bg_len = 8   # len("one\ntwo\n")
+        base = len(read_log())
+        mon.type_text("fc /tmp/bg.bat /tmp/sm.txt\n")
+        base, m = wait_serial_after(
+            base, r"fc: sizes differ by (\d+) bytes")
+        if int(m.group(1)) != bg_len - sm_len:
+            raise SystemExit("fc says the sizes are %s apart, %d - %d = %d"
+                             % (m.group(1), bg_len, sm_len,
+                                bg_len - sm_len))
+        base, _ = wait_serial_after(
+            base, r"fc: first difference at byte 4 line 2")
+        base, _ = wait_serial_after(base, r"fc: comparison failed")
+        base, _ = wait_serial_after(base, r"shell: fc exited with 1")
+
+        # The refusals, in their own words: a name nobody wrote, one word
+        # where two belong, and a file past what this program holds. The last
+        # one matters most for an archive: /bin/hello is an 8.4 KiB ELF, and a
+        # compare that quietly stopped at 4096 could call the truncated halves
+        # "identical" - so the size is said in full and the answer is a refusal,
+        # never a verdict. fc is the first program whose exit code *is* the
+        # answer.
+        base = len(read_log())
+        mon.type_text("fc /bin/hello /tmp/fca\n")
+        base, _ = wait_serial_after(
+            base, r"fc: too big, \d{4,} bytes at /bin/hello")
+        base, _ = wait_serial_after(base, r"shell: fc exited with 2")
+        base = len(read_log())
+        mon.type_text("fc /tmp/nofc /tmp/fca\n")
+        base, _ = wait_serial_after(base, r"fc: cannot open /tmp/nofc")
+        base, _ = wait_serial_after(base, r"shell: fc exited with 2")
+        base = len(read_log())
+        mon.type_text("fc /tmp/fca\n")
+        base, _ = wait_serial_after(base, r"fc: usage fc")
+        base, _ = wait_serial_after(base, r"shell: fc exited with 2")
     elif sc == "unzip":
         # v0.1.36: /bin/unzip unpacks a real archive the way Windows does, folder
         # names included. The archive is the single source of truth: the test
@@ -2680,6 +2879,21 @@ MARKERS = {
                   "shell: moved /tmp/mv3 -> /tmp/mv4",
                   "shell: move refused /tmp/ghost - no such file",
                   "shell: move refused /bin/hello - the archive is read-only"],
+    # v0.1.43: /bin/fc, cmd's File Compare. The digest equality against Python's
+    # own FNV-1a and the byte/line arithmetic are asserted inside the scenario;
+    # these are the verdict lines the claim turns on - identical (archive vs its
+    # store copy, and a file against itself), the single-byte difference located
+    # on the second line, the size difference with its shared prefix, and the
+    # two refusals, each ending in the exit code that IS the answer.
+    "fc":        ["copy: digest", "fc: a=", "bytes 0x",
+                  "fc: no differences encountered", "shell: fc exited with 0",
+                  "fc: first difference at byte 25 line 1",
+                  "fc: first difference at byte 16 line 2",
+                  "fc: sizes differ by", "fc: first difference at byte 4 line 2",
+                  "fc: comparison failed",
+                  "shell: fc exited with 1",
+                  "fc: cannot open /tmp/nofc", "fc: usage fc",
+                  "fc: too big", "shell: fc exited with 2"],
     # v0.1.36: a real ZIP unpacked, folder names included. The strict byte/digest
     # comparisons are in the scenario; these are the lines the claim turns on -
     # the archive read whole, each safe member out byte for byte (flat and nested,

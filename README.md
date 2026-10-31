@@ -672,6 +672,24 @@ On boot the kernel:
    contract. The honest scope: this is single-file move over the writable store
    only — no wildcards, no directory trees (this store has flat names), no `/-`
    or `/|` prompt variants, and `CD`/`MKDIR` remain future rungs.
+46. **`FC <A> <B>` — cmd's File Compare as a real program (v0.1.43)**. `fc`
+   completes the family of file-layer verbs: like `copy` it reaches both halves
+   (the read-only initrd archive and the writable store), but its output is a
+   *verdict* — the exit code itself answers whether the files are identical (0),
+   different (1), or unreadable / too big (2). The test's Python harness computes
+   FNV-1a over the known bytes and asserts the program's digest matches, then
+   checks the precise byte offset and line number where two equal-length files
+   first disagree. The single-letter test ("gam" vs "gan" at byte 25 line 1) and
+   the two-line script test ("two" vs "rwo" at byte 16 line 2) pin the location
+   logic against the shell's 61-character input buffer and the kernel's
+   `USER_ARG_MAX = 16` cap, both of which silently truncate a longer command and
+   make files identical when the differing word falls past the cut. The size
+   mismatch test wraps a proper-prefix pair: a one-line "save write" file against
+   a two-line "save script" file whose first line is identical, so the first
+   difference is reported at the byte where the shorter file simply stopped.
+   Refusal branches: a path nobody wrote, a file past `FC_MAX` (4096 bytes), and
+   a one-argument command line. Each prints its reason in one line and exits 2 —
+   `fc` is the first userland program whose exit code *is* the answer.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

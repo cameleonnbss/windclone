@@ -4,9 +4,9 @@
 Windows does, with `pip install rich` working, on a desktop that behaves like a
 daily driver.
 
-**Where WindClone is today (v0.1.42):** a from-scratch x86-64 kernel on Limine, 
+**Where WindClone is today (v0.1.43):** a from-scratch x86-64 kernel on Limine,
 its own ELF64 loader, its own int `0x80` ABI of fourteen numbered syscalls, a
-libc-less userland of 25 freestanding C programs, a tmpfs store, an e1000 driver
+libc-less userland of 26 freestanding C programs, a tmpfs store, an e1000 driver
 with an ICMP/UDP/DHCP/TCP/HTTP stack on top of it, a compositor with per-cell
 colour and a pixel channel, an inflate decoder, and headless QEMU tests that
 compare bytes rather than impressions.
@@ -136,6 +136,19 @@ So the honest ladder, in the order each rung becomes testable:
       onto the taken name drops it by exactly one — the overwritten file is gone,
       not shadowed — plus both refusals (`no such file`, `the archive is
       read-only`).
+- [x] **`/bin/fc` — File Compare with the exit code as the verdict** (v0.1.43).
+      `fc` reads two files through the VFS, compares them byte-for-byte, reports
+      sizes and FNV-1a digests, and exits 0 (identical), 1 (different, with the
+      first-difference byte and line), or 2 (refused: unreadable, past FC_MAX,
+      or wrong argument count). The `fc` scenario tests archive-vs-store copy
+      equality, a single-letter equal-length difference (byte 25 line 1), a
+      two-line script difference (byte 16 line 2), a proper-prefix size mismatch
+      (byte 4 line 2), and all three refusal paths. Two harness limits shaped the
+      test: the shell's 61-char input buffer and `USER_ARG_MAX = 16` both truncate
+      a long command silently, making "differing" files identical when the
+      discriminating word falls past the cut. The `count_lines` helper in fc.c
+      included a trailing partial line, which double-counted the +1 used for
+      1-based line numbering — replaced by a direct newline count.
 - [ ] **`CD`, `MKDIR`** as built-ins, so the prompt behaves like
       `cmd` for the remaining verbs a person actually types.
 - [ ] **a small Python-language interpreter** (`/bin/python`) for pure-Python

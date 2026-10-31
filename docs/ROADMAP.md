@@ -620,6 +620,26 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         `IF`, `FOR`, `GOTO`, `CALL`, `ERRORLEVEL`, redirection/pipes and
         `CD`/`MKDIR`/`MOVE` remain each their own rung.
 
+- [x] **`/bin/fc` — cmd's File Compare, exit code as the answer (v0.1.43).**
+      `fc` completes the file-verb family: it reads two paths through the same
+      VFS `open` that `copy` and `cat` use, covering both the initrd archive and
+      the writable store. Its exit code *is* the verdict — 0 identical, 1 different,
+      2 refused. The program slurps both files whole, computes FNV-1a for each,
+      then walks byte-for-byte to locate the first difference and the line it sits
+      on (newline bytes strictly before the offset + 1). The `fc` scenario pins
+      three comparisons (archive vs store copy, single-letter diff at byte 25 on
+      line 1, two-line script diff at byte 16 on line 2, and a proper-prefix size
+      mismatch at byte 4 line 2) plus three refusal branches (no such file, past
+      `FC_MAX = 4096`, wrong argument count). Two harness lessons shaped the test:
+      the shell's input buffer is `SHELL_COLS - 1 = 61` characters and silently
+      drops anything longer, and `USER_ARG_MAX = 16` truncates the token count —
+      the first draft of the test hit both limits and got identical content where
+      a difference was expected. The line-number formula was corrected in fc.c:
+      the original `count_lines` helper included a trailing partial line, so using
+      it plus `+ 1` double-counted and the reported line was one too high.
+      - Scope: `FC_MAX = 4096` is the ceiling per file; a bigger ELF (like
+        /bin/hello at 8608 bytes) produces a refusal, never a partial compare.
+
 - [x] **cmd's `move` — the file verb that overwrites (v0.1.42).** `ren` and
       `move` differ in exactly one case, and it is the interesting one: when the
       destination name is already taken `ren` answers `WC_EEXIST` and leaves

@@ -16,6 +16,6 @@
 #ifndef WINDCLONE_VERSION_H
 #define WINDCLONE_VERSION_H
 
-#define WC_VERSION "0.1.42"
+#define WC_VERSION "0.1.43"
 
 #endif
