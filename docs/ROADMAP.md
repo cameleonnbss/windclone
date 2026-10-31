@@ -639,6 +639,23 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       fc, the flag grammar is `/` + one letter exactly, so a path is never
       mistaken for a switch.
 
+- [x] **`/bin/sort` — cmd's File Sort, the order cross-checked (v0.1.45).**
+      `sort` arranges what `fc` compares and `find` searches: read a file through
+      the same VFS open(), split into lines, print them in order, and let `/r`
+      read the same result backwards. Because the claim is an *order*, the
+      harness never trusts the program — it sorts the exact lines in Python and
+      chains the assertions so the guest must print them in that sequence. Two
+      comparator branches are pinned: lines differing early, and the prefix rule
+      (a shorter line that is a prefix of a longer one sorts first, so `ab`
+      precedes `abc`). A second ceiling `SORT_LINES` (32) bounds the reorder
+      independently of the byte cap, since the O(n²) insertion sort needs one
+      index slot per line — the 55-line specimen source is refused with its count,
+      never half-sorted. Refusals all exit 2: too many lines, a `SORT_MAX`-
+      exceeding ELF, an unopenable name, a command line with no file. The compare
+      is a plain byte order, not cmd's locale collation (which a libc-less kernel
+      cannot honour honestly); the harness applies the same rule, so the agreement
+      is arithmetic.
+
 - [x] **`/bin/fc` — cmd's File Compare, exit code as the answer (v0.1.43).**
       `fc` completes the file-verb family: it reads two paths through the same
       VFS `open` that `copy` and `cat` use, covering both the initrd archive and

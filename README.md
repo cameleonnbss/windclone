@@ -707,6 +707,23 @@ On boot the kernel:
    whole run with exit 2 rather than skipping a file, because "not found" over a
    file that was never read would be a lie. Like `fc`, a flag is exactly `/` plus
    one letter, so a path is never mistaken for a switch and dropped.
+48. **`SORT [/R] <F>` — cmd's File Sort as a real program (v0.1.45)**. `sort`
+   completes the read-only file verbs: `fc` compares, `find` searches, `sort`
+   arranges. It reads a file through the same VFS open() the copier, comparator
+   and searcher use, splits it into lines, and prints them in byte order — with
+   `/R` reading the same result backwards. The claim is an *order*, so the test
+   never trusts the program: the harness sorts the exact lines in Python and
+   chains the assertions so the guest must print them in that sequence (apple,
+   banana, cherry, date — and the reverse). Two comparator branches are pinned:
+   differing early, and the prefix rule (when one line is a prefix of another the
+   shorter comes first, so `ab` precedes `abc`). A second ceiling, `SORT_LINES`
+   (32), bounds the reorder independently of the byte cap, because the O(n²) sort
+   needs one index slot per line — the 55-line specimen source is refused with its
+   line count, never half-sorted. Refusals all exit 2: too many lines, a
+   `SORT_MAX`-exceeding ELF, an unopenable name, and a command line with no file.
+   The ordering is a plain byte compare rather than cmd's locale collation, which
+   a libc-less kernel cannot honour honestly for every byte; the harness applies
+   the same rule, so the agreement is arithmetic and not a sentence.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

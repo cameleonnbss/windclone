@@ -4,9 +4,9 @@
 Windows does, with `pip install rich` working, on a desktop that behaves like a
 daily driver.
 
-**Where WindClone is today (v0.1.44):** a from-scratch x86-64 kernel on Limine,
+**Where WindClone is today (v0.1.45):** a from-scratch x86-64 kernel on Limine,
 its own ELF64 loader, its own int `0x80` ABI of fourteen numbered syscalls, a
-libc-less userland of 27 freestanding C programs, a tmpfs store, an e1000 driver
+libc-less userland of 28 freestanding C programs, a tmpfs store, an e1000 driver
 with an ICMP/UDP/DHCP/TCP/HTTP stack on top of it, a compositor with per-cell
 colour and a pixel channel, an inflate decoder, and headless QEMU tests that
 compare bytes rather than impressions.
@@ -162,6 +162,18 @@ So the honest ladder, in the order each rung becomes testable:
       /v two (lines 1 and 3 lack it). The three refusals — no file, unopenable
       name, too-big ELF — exit 2 and stop the run; they never silently skip a
       file. The flag grammar is `/` + one letter exactly, same rule as fc.
+- [x] **`/bin/sort` — cmd's File Sort, the order cross-checked** (v0.1.45).
+      `sort` reads a file through the same VFS open(), splits it into lines, and
+      prints them in byte order; `/r` reads the same result backwards. The claim
+      is an order, so the harness sorts the exact lines in Python and chains the
+      assertions to prove the sequence, pinning two comparator branches (lines
+      differing early, and the prefix rule where `ab` precedes `abc`). A second
+      ceiling `SORT_LINES` (32) bounds the O(n²) reorder independently of the byte
+      cap — the 55-line specimen source is refused with its count, never
+      half-sorted. Refusals all exit 2: too many lines, a too-big ELF, an
+      unopenable name, a command line with no file. A plain byte compare, not
+      cmd's locale collation (a libc-less kernel cannot honour that honestly);
+      the harness applies the same rule so the agreement is arithmetic.
 - [ ] **`CD`, `MKDIR`** as built-ins, so the prompt behaves like
       `cmd` for the remaining verbs a person actually types.
 - [ ] **a small Python-language interpreter** (`/bin/python`) for pure-Python

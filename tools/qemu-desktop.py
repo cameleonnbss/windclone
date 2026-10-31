@@ -2611,6 +2611,87 @@ def scenario_actions(sc, mon, W, H):
         base, _ = wait_serial_after(
             base, r"find: too big, \d{4,} bytes at /bin/hello")
         base, _ = wait_serial_after(base, r"shell: find exited with 2")
+    elif sc == "sort":
+        # v0.1.45: /bin/sort, cmd's SORT over the same file layer. The claim is
+        # an *order*, so the harness computes it: Python sorts the exact lines
+        # save will write, and every printed line has to appear in that order —
+        # chaining wait_serial_after forces the sequence, not just the presence.
+        srt_lines = ["banana", "apple", "cherry", "date"]
+        srt_content = "\n".join(srt_lines) + "\n"        # 25 bytes
+        asc = sorted(srt_lines)                          # byte order
+        if asc != ["apple", "banana", "cherry", "date"]:
+            raise SystemExit("python's byte sort changed, the assertion below "
+                             "would prove the wrong order")
+
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)  # raise the terminal
+
+        base = len(read_log())
+        mon.type_text("save script srt banana nl apple nl cherry nl date\n")
+        base, m = wait_serial_after(
+            base, r"save: wrote (\d+) bytes /tmp/srt\.bat")
+        if int(m.group(1)) != len(srt_content):
+            raise SystemExit("save wrote %s bytes for srt, the command carries "
+                             "%d - truncated by a cap"
+                             % (m.group(1), len(srt_content)))
+        base, _ = wait_serial_after(base, r"shell: save exited with 0")
+
+        # Ascending: header, then each line in the harness's own sorted order,
+        # then the count and exit 0.
+        base = len(read_log())
+        mon.type_text("sort /tmp/srt.bat\n")
+        base, _ = wait_serial_after(base, r"sort: /tmp/srt\.bat\n")
+        for w in asc:
+            base, _ = wait_serial_after(base, r"sort: %s\n" % re.escape(w))
+        base, m = wait_serial_after(base, r"sort: (\d+) lines sorted")
+        if int(m.group(1)) != len(asc):
+            raise SystemExit("sort counted %s lines, the file has %d"
+                             % (m.group(1), len(asc)))
+        base, _ = wait_serial_after(base, r"shell: sort exited with 0")
+
+        # /r reads the same sort backwards: assert the exact reverse sequence.
+        base = len(read_log())
+        mon.type_text("sort /r /tmp/srt.bat\n")
+        base, _ = wait_serial_after(base, r"sort: /tmp/srt\.bat \(reverse\)")
+        for w in reversed(asc):
+            base, _ = wait_serial_after(base, r"sort: %s\n" % re.escape(w))
+        base, _ = wait_serial_after(base, r"shell: sort exited with 0")
+
+        # The prefix rule: when one line is a prefix of another the shorter one
+        # comes first (ab before abc) — the other branch of the comparator.
+        base = len(read_log())
+        mon.type_text("save script srt2 abc nl ab\n")
+        base, _ = wait_serial_after(base, r"save: wrote \d+ bytes /tmp/srt2\.bat")
+        base, _ = wait_serial_after(base, r"shell: save exited with 0")
+        base = len(read_log())
+        mon.type_text("sort /tmp/srt2.bat\n")
+        base, _ = wait_serial_after(base, r"sort: ab\n")
+        base, _ = wait_serial_after(base, r"sort: abc\n")
+        base, _ = wait_serial_after(base, r"sort: 2 lines sorted")
+        base, _ = wait_serial_after(base, r"shell: sort exited with 0")
+
+        # The refusals, each exit 2: too many lines (the specimen source is 55,
+        # past SORT_LINES), too big (the 8.4 KiB ELF), an unreadable name, and a
+        # command line with no file. A partial sort is never reported as an answer.
+        base = len(read_log())
+        mon.type_text("sort /src/hello.c\n")
+        base, _ = wait_serial_after(
+            base, r"sort: too many lines, \d+ at /src/hello\.c")
+        base, _ = wait_serial_after(base, r"shell: sort exited with 2")
+        base = len(read_log())
+        mon.type_text("sort /bin/hello\n")
+        base, _ = wait_serial_after(
+            base, r"sort: too big, \d{4,} bytes at /bin/hello")
+        base, _ = wait_serial_after(base, r"shell: sort exited with 2")
+        base = len(read_log())
+        mon.type_text("sort /tmp/ghost\n")
+        base, _ = wait_serial_after(base, r"sort: cannot open /tmp/ghost")
+        base, _ = wait_serial_after(base, r"shell: sort exited with 2")
+        base = len(read_log())
+        mon.type_text("sort\n")
+        base, _ = wait_serial_after(base, r"sort: usage sort")
+        base, _ = wait_serial_after(base, r"shell: sort exited with 2")
     elif sc == "unzip":
         # v0.1.36: /bin/unzip unpacks a real archive the way Windows does, folder
         # names included. The archive is the single source of truth: the test
@@ -3019,6 +3100,18 @@ MARKERS = {
                   "find: 4: two", "find: one", "find: three",
                   "find: usage find", "find: cannot open /tmp/nofind",
                   "find: too big", "shell: find exited with 2"],
+    # v0.1.45: /bin/sort, cmd's SORT. The scenario asserts the exact ordering
+    # chain (Python's own byte sort) rather than mere presence; these are the
+    # lines the claim turns on - the header, each sorted line, the reverse
+    # header and its reversed sequence, the prefix-rule pair, the count, and
+    # the four exit-2 refusals (too many lines, too big, unopenable, no file).
+    "sort":      ["sort: /tmp/srt.bat", "sort: apple", "sort: banana",
+                  "sort: cherry", "sort: date", "sort: 4 lines sorted",
+                  "sort: /tmp/srt.bat (reverse)", "sort: /tmp/srt2.bat",
+                  "sort: ab", "sort: abc", "sort: 2 lines sorted",
+                  "shell: sort exited with 0", "sort: too many lines",
+                  "sort: too big", "sort: cannot open /tmp/ghost",
+                  "sort: usage sort", "shell: sort exited with 2"],
     # v0.1.36: a real ZIP unpacked, folder names included. The strict byte/digest
     # comparisons are in the scenario; these are the lines the claim turns on -
     # the archive read whole, each safe member out byte for byte (flat and nested,

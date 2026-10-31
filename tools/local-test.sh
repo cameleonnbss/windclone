@@ -969,6 +969,16 @@ echo '==> string search (/i fold, /n line, /v invert, not-found, refusals)'
 python3 tools/qemu-desktop.py windclone.iso find \
     || fail 'find mis-counted matches, ignored a switch, or its exit code lied'
 
+# v0.1.45: /bin/sort — cmd's SORT over the same file layer. The claim is an
+# order, so the harness computes it in Python and requires the guest to print
+# the lines in exactly that sequence: ascending (apple/banana/cherry/date), /r
+# reversed, the prefix rule (ab before abc), and the four exit-2 refusals (a
+# source past the line cap, an ELF past the byte cap, an unreadable name, and
+# a command line with no file).
+echo '==> file sort (ascending, /r reverse, prefix rule, refusals)'
+python3 tools/qemu-desktop.py windclone.iso sort \
+    || fail 'sort mis-ordered lines, ignored /r, or its exit code lied'
+
 # v0.1.36: a real ZIP archive unpacked, folder names included.
 # /bin/unzip reads the committed specimen whole and extracts every safe entry
 # byte for byte - flat and nested, stored and deflated (the deflate path runs
