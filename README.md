@@ -690,6 +690,23 @@ On boot the kernel:
    Refusal branches: a path nobody wrote, a file past `FC_MAX` (4096 bytes), and
    a one-argument command line. Each prints its reason in one line and exits 2 —
    `fc` is the first userland program whose exit code *is* the answer.
+47. **`FIND [/I] [/N] [/V] <CH> <F>` — cmd's string search (v0.1.44)**. `find`
+   is the quieter half of the file-layer family: `fc` asks whether two files
+   agree, `find` asks whether a line is in there at all. It reads each named
+   file through the same VFS open() — archive (`find int /src/hello.c`) and
+   store (`find two /tmp/fnd.bat`) alike — prints every line that carries the
+   text, and its exit code says whether any line did (0 found, 1 none, 2
+   refused). The cmd switches are honoured: `/I` folds ASCII case (the
+   specimen's lowercase `answer` on one line becomes two once `#define ANSWER`
+   joins the set), `/N` prefixes each hit with its line number, and `/V` prints
+   the lines that *lack* the text. The count is never trusted from the program:
+   the harness splits the specimen's own bytes in Python and asserts the guest's
+   `find: N matches` answers to that number, and the `/N` line number is
+   computed the same way. A refusal — a file nobody wrote, one past `FIND_MAX`
+   (the 8.4 KiB `/bin/hello` ELF), a command line without a file — stops the
+   whole run with exit 2 rather than skipping a file, because "not found" over a
+   file that was never read would be a lie. Like `fc`, a flag is exactly `/` plus
+   one letter, so a path is never mistaken for a switch and dropped.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

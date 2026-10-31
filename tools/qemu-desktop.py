@@ -2499,6 +2499,118 @@ def scenario_actions(sc, mon, W, H):
         mon.type_text("fc /tmp/fca\n")
         base, _ = wait_serial_after(base, r"fc: usage fc")
         base, _ = wait_serial_after(base, r"shell: fc exited with 2")
+    elif sc == "find":
+        # v0.1.44: /bin/find, cmd's string search over the file layer fc
+        # already reads. The test brings its own truth: Python splits the
+        # specimen's bytes into lines and counts which carry the pattern,
+        # case-sensitive and case-folded, so the guest's "N matches" answers
+        # to the harness — not a count trusted from the program.
+        data = spec("rootfs/src/hello.c")
+        file_lines = data.split(b"\n")
+        # A trailing newline leaves an empty element that cmd does not count.
+        if file_lines and file_lines[-1] == b"":
+            file_lines = file_lines[:-1]
+
+        def match_lines(needle, ci):
+            hits = []
+            for idx, ln in enumerate(file_lines):
+                s = ln.decode("ascii", "replace")
+                n = needle
+                if ci:
+                    s = s.lower()
+                    n = n.lower()
+                if n in s:
+                    hits.append(idx + 1)  # 1-based line number
+            return hits
+
+        cs = match_lines("answer", False)   # lowercase 'answer'
+        ci = match_lines("answer", True)    # folds ANSWER too
+        if len(cs) != 1 or len(ci) != 2:
+            raise SystemExit(
+                "the specimen no longer has 1 case-sensitive and 2 case-"
+                "insensitive 'answer' lines (got %d/%d), so the counts "
+                "asserted below would be wrong" % (len(cs), len(ci)))
+
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)  # raise the terminal
+
+        # Plain search: exit 0, count == cs.
+        base = len(read_log())
+        mon.type_text("find answer /src/hello.c\n")
+        base, _ = wait_serial_after(base, r"find: /src/hello\.c")
+        base, m = wait_serial_after(base, r"find: (\d+) matches")
+        if int(m.group(1)) != len(cs):
+            raise SystemExit("find counted %s matches, the bytes give %d"
+                             % (m.group(1), len(cs)))
+        base, _ = wait_serial_after(base, r"shell: find exited with 0")
+
+        # /i folds case: ANSWER on the #define joins the set, proving the
+        # fold ran rather than the plain search being re-reported.
+        base = len(read_log())
+        mon.type_text("find /i answer /src/hello.c\n")
+        base, m = wait_serial_after(base, r"find: (\d+) matches")
+        if int(m.group(1)) != len(ci):
+            raise SystemExit("/i counted %s, bytes give %d" % (m.group(1), len(ci)))
+        base, _ = wait_serial_after(base, r"shell: find exited with 0")
+
+        # /n prefixes each hit with its line number: the first cs hit is
+        # lines[cs[0]-1]; the output must start with "find: <n>: ".
+        base = len(read_log())
+        mon.type_text("find /n answer /src/hello.c\n")
+        base, _ = wait_serial_after(base, r"find: %d: " % cs[0])
+        base, _ = wait_serial_after(base, r"shell: find exited with 0")
+
+        # Nothing matches: count 0, exit 1 — 'not found' is the real answer.
+        base = len(read_log())
+        mon.type_text("find zzzqqx /src/hello.c\n")
+        base, m = wait_serial_after(base, r"find: (\d+) matches")
+        if int(m.group(1)) != 0:
+            raise SystemExit("found %s copies of a string not in the file"
+                             % m.group(1))
+        base, _ = wait_serial_after(base, r"shell: find exited with 1")
+
+        # A store file with hand-built known content: /n numbers matches and
+        # /v inverts.  Content: "one\ntwo\nthree\ntwo\n" (4 lines, 17 bytes).
+        fnd = "one\ntwo\nthree\ntwo\n"
+        base = len(read_log())
+        mon.type_text("save script fnd one nl two nl three nl two\n")
+        base, m = wait_serial_after(
+            base, r"save: wrote (\d+) bytes /tmp/fnd\.bat")
+        if int(m.group(1)) != len(fnd):
+            raise SystemExit("save wrote %s, command carries %d"
+                             % (m.group(1), len(fnd)))
+        base, _ = wait_serial_after(base, r"shell: save exited with 0")
+        # /n two: lines 2 and 4 carry 'two'.
+        base = len(read_log())
+        mon.type_text("find /n two /tmp/fnd.bat\n")
+        base, _ = wait_serial_after(base, r"find: /tmp/fnd\.bat")
+        base, _ = wait_serial_after(base, r"find: 2: two")
+        base, _ = wait_serial_after(base, r"find: 4: two")
+        base, _ = wait_serial_after(base, r"find: 2 matches")
+        base, _ = wait_serial_after(base, r"shell: find exited with 0")
+        # /v two: lines 1 and 3 lack it → "find: one" + "find: three".
+        base = len(read_log())
+        mon.type_text("find /v two /tmp/fnd.bat\n")
+        base, _ = wait_serial_after(base, r"find: one")
+        base, _ = wait_serial_after(base, r"find: three")
+        base, _ = wait_serial_after(base, r"find: 2 matches")
+        base, _ = wait_serial_after(base, r"shell: find exited with 0")
+
+        # The refusals: usage, unopenable, too big — each exit 2.
+        base = len(read_log())
+        mon.type_text("find /src/hello.c\n")
+        base, _ = wait_serial_after(base, r"find: usage find")
+        base, _ = wait_serial_after(base, r"shell: find exited with 2")
+        base = len(read_log())
+        mon.type_text("find answer /tmp/nofind\n")
+        base, _ = wait_serial_after(base, r"find: cannot open /tmp/nofind")
+        base, _ = wait_serial_after(base, r"shell: find exited with 2")
+        base = len(read_log())
+        mon.type_text("find answer /bin/hello\n")
+        base, _ = wait_serial_after(
+            base, r"find: too big, \d{4,} bytes at /bin/hello")
+        base, _ = wait_serial_after(base, r"shell: find exited with 2")
     elif sc == "unzip":
         # v0.1.36: /bin/unzip unpacks a real archive the way Windows does, folder
         # names included. The archive is the single source of truth: the test
@@ -2894,6 +3006,19 @@ MARKERS = {
                   "shell: fc exited with 1",
                   "fc: cannot open /tmp/nofc", "fc: usage fc",
                   "fc: too big", "shell: fc exited with 2"],
+    # v0.1.44: /bin/find, cmd's string search. The scenario cross-checks the
+    # counts against Python's own line-splitting of the specimen; these are the
+    # lines the claim turns on - header, each count, every exit code, and the
+    # three refusals that prove a bad path or a too-big ELF is never silently
+    # skipped (which would poison the verdict).
+    "find":      ["find: /src/hello.c", "find: 1 matches",
+                  "find: 2 matches", "find: 0 matches",
+                  "shell: find exited with 0",
+                  "shell: find exited with 1",
+                  "find: /tmp/fnd.bat", "find: 2: two",
+                  "find: 4: two", "find: one", "find: three",
+                  "find: usage find", "find: cannot open /tmp/nofind",
+                  "find: too big", "shell: find exited with 2"],
     # v0.1.36: a real ZIP unpacked, folder names included. The strict byte/digest
     # comparisons are in the scenario; these are the lines the claim turns on -
     # the archive read whole, each safe member out byte for byte (flat and nested,

@@ -620,6 +620,25 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         `IF`, `FOR`, `GOTO`, `CALL`, `ERRORLEVEL`, redirection/pipes and
         `CD`/`MKDIR`/`MOVE` remain each their own rung.
 
+- [x] **`/bin/find` — cmd's string search, the count cross-checked (v0.1.44).**
+      `find` is the reading verb that `fc` left out: it prints every line of a
+      file that carries a piece of text and lets the exit code say whether any
+      line did (0 found, 1 none, 2 refused). It reuses the exact slurp path fc
+      proved, so a search reaches both the read-only archive and the writable
+      store. cmd's switches are reproduced where they are cheap and honest: `/i`
+      folds ASCII case, `/n` prefixes each hit with its 1-based line number,
+      `/v` prints the non-matching lines. The harness never trusts the
+      program's arithmetic — it splits the specimen's own bytes in Python and
+      requires `find: N matches` to equal the case-sensitive count (1 for
+      `answer`) and the folded count (2, once `#define ANSWER` joins), and pins
+      the `/n` number the same way. A store file of hand-written lines proves
+      `/n two` (hits on lines 2 and 4) and `/v two` (the lines that lack it).
+      The three refusals — no file, an unopenable name, a `FIND_MAX`-exceeding
+      ELF — each stop the whole run at exit 2 rather than skipping a file, so a
+      "0 matches" can never be reported for bytes that were never read. Like
+      fc, the flag grammar is `/` + one letter exactly, so a path is never
+      mistaken for a switch.
+
 - [x] **`/bin/fc` — cmd's File Compare, exit code as the answer (v0.1.43).**
       `fc` completes the file-verb family: it reads two paths through the same
       VFS `open` that `copy` and `cat` use, covering both the initrd archive and

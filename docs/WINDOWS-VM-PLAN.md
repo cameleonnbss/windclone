@@ -4,9 +4,9 @@
 Windows does, with `pip install rich` working, on a desktop that behaves like a
 daily driver.
 
-**Where WindClone is today (v0.1.43):** a from-scratch x86-64 kernel on Limine,
+**Where WindClone is today (v0.1.44):** a from-scratch x86-64 kernel on Limine,
 its own ELF64 loader, its own int `0x80` ABI of fourteen numbered syscalls, a
-libc-less userland of 26 freestanding C programs, a tmpfs store, an e1000 driver
+libc-less userland of 27 freestanding C programs, a tmpfs store, an e1000 driver
 with an ICMP/UDP/DHCP/TCP/HTTP stack on top of it, a compositor with per-cell
 colour and a pixel channel, an inflate decoder, and headless QEMU tests that
 compare bytes rather than impressions.
@@ -149,6 +149,19 @@ So the honest ladder, in the order each rung becomes testable:
       discriminating word falls past the cut. The `count_lines` helper in fc.c
       included a trailing partial line, which double-counted the +1 used for
       1-based line numbering — replaced by a direct newline count.
+- [x] **`/bin/find` — cmd's string search, count cross-checked** (v0.1.44).
+      `find` prints every line of a file that carries a piece of text and lets
+      the exit code say whether any line did (0 found, 1 none, 2 refused). It
+      reuses the same slurp path fc proved, so a search reaches both archive and
+      store. cmd's switches are honoured where they are cheap: /i folds ASCII
+      case (the specimen has 1 lowercase `answer` line but 2 once `#define ANSWER`
+      joins), /n prefixes the 1-based line number, /v inverts to the non-matching
+      lines. The harness computes the expected counts in Python from the raw bytes
+      rather than trusting the program's own arithmetic. A store file of hand-built
+      content ("one\ntwo\nthree\ntwo\n") proves /n two (hits lines 2 and 4) and
+      /v two (lines 1 and 3 lack it). The three refusals — no file, unopenable
+      name, too-big ELF — exit 2 and stop the run; they never silently skip a
+      file. The flag grammar is `/` + one letter exactly, same rule as fc.
 - [ ] **`CD`, `MKDIR`** as built-ins, so the prompt behaves like
       `cmd` for the remaining verbs a person actually types.
 - [ ] **a small Python-language interpreter** (`/bin/python`) for pure-Python

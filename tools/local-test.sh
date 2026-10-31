@@ -959,6 +959,16 @@ echo '==> file compare (identical, located difference, size mismatch, refusals)'
 python3 tools/qemu-desktop.py windclone.iso fc \
     || fail 'fc did not compare archive and store, or mis-located a difference, or its exit code lied'
 
+# v0.1.44: /bin/find — cmd's string search over the same file layer fc reads.
+# The harness computes the match counts from the specimen's own bytes, so the
+# guest's "N matches" answers to Python rather than to itself: one case-
+# sensitive 'answer' line, two once /i folds in the #define ANSWER, the /n line
+# number, /v inverting onto the lines that lack the text, a zero count that
+# exits 1 ('not found' is a real answer), and the three refusals that exit 2.
+echo '==> string search (/i fold, /n line, /v invert, not-found, refusals)'
+python3 tools/qemu-desktop.py windclone.iso find \
+    || fail 'find mis-counted matches, ignored a switch, or its exit code lied'
+
 # v0.1.36: a real ZIP archive unpacked, folder names included.
 # /bin/unzip reads the committed specimen whole and extracts every safe entry
 # byte for byte - flat and nested, stored and deflated (the deflate path runs
