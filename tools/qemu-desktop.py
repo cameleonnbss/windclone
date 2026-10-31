@@ -2223,6 +2223,83 @@ def scenario_actions(sc, mon, W, H):
         if int(m4.group(1)) != n1 - 1:
             raise SystemExit("after the delete dir showed %s entries, want %d"
                              % (m4.group(1), n1 - 1))
+    elif sc == "move":
+        # v0.1.42: cmd's `move`, the file verb that is not a rename. Two real
+        # files are put in the store by copy (the route already proven), then
+        # move is shown doing the one thing `ren` refuses: overwriting a name
+        # that is already taken. The count is the arithmetic of the claim — a
+        # plain move keeps the total, a move that replaces drops it by one, and
+        # the file that was in the way is really gone rather than shadowed.
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+        # Names are lower case on purpose: `type_text` can only spell what the
+        # keyboard can produce, and an upper-case letter is a chord the harness
+        # would have to synthesise — a path a real user types is not the thing
+        # under test here, the store's behaviour is.
+        base = len(read_log())
+        mon.type_text("copy /src/hello.c /tmp/mv1\n")
+        base, _ = wait_serial_after(base, r"copy: wrote \d+ bytes to /tmp/mv1")
+        base, _ = wait_serial_after(base, r"shell: copy exited with 0")
+        base = len(read_log())
+        mon.type_text("copy /src/hello.c /tmp/mv2\n")
+        base, _ = wait_serial_after(base, r"copy: wrote \d+ bytes to /tmp/mv2")
+        base, _ = wait_serial_after(base, r"shell: copy exited with 0")
+
+        # Two files now sit in the way of the moves to come, and the count is
+        # read from the store rather than assumed: /bin/copy has already proven
+        # it writes, so at least the two names must be there.
+        base = len(read_log())
+        mon.type_text("dir\n")
+        base, m0 = wait_serial_after(base, r"shell: dir shows (\d+) entries,")
+        n0 = int(m0.group(1))
+        if n0 < 2:
+            raise SystemExit("move: store held %d entries after two copies, "
+                             "want at least 2" % n0)
+
+        # A plain move: the destination name is free, so nothing is replaced.
+        # Each assertion starts from the size the log had *before* the command
+        # was typed, never from the end of the previous match: `shell: moved
+        # /tmp/mv2 -> /tmp/mv3` is also the prefix of the `(replaced existing)`
+        # line, and matching a prefix that is still being written would let a
+        # later claim read a half-finished row.
+        base = len(read_log())
+        mon.type_text("move /tmp/mv1 /tmp/mv3\n")
+        base, _ = wait_serial_after(base,
+                                    r"shell: moved /tmp/mv1 -> /tmp/mv3\n")
+
+        # The move that is not a rename: mv3 already exists, and where `ren`
+        # would answer EEXIST, `move` drops it and lands the source in its place.
+        # The store goes from two files to one, and the line says "replaced".
+        base = len(read_log())
+        mon.type_text("move /tmp/mv2 /tmp/mv3\n")
+        base, _ = wait_serial_after(
+            base, r"shell: moved /tmp/mv2 -> /tmp/mv3 \(replaced existing\)\n")
+        base = len(read_log())
+        mon.type_text("dir\n")
+        base, m1 = wait_serial_after(base, r"shell: dir shows (\d+) entries,")
+        if int(m1.group(1)) != n0 - 1:
+            raise SystemExit("a move that replaced left %s entries, want %d - "
+                             "the file in the way must really be gone"
+                             % (m1.group(1), n0 - 1))
+
+        # cmd's /Y switch: parsed so the line still resolves to the source and
+        # target, not to "/y" and the source. mv3 exists, mv4 does not, so this
+        # is a plain move that proves the switch was skipped, not mistaken.
+        base = len(read_log())
+        mon.type_text("move /y /tmp/mv3 /tmp/mv4\n")
+        base, _ = wait_serial_after(base, r"shell: moved /tmp/mv3 -> /tmp/mv4\n")
+
+        # And the two refusals, each in its own words: nothing there to move,
+        # and a name that belongs to the read-only archive rather than the store.
+        base = len(read_log())
+        mon.type_text("move /tmp/ghost /tmp/x\n")
+        base, _ = wait_serial_after(
+            base, r"shell: move refused /tmp/ghost - no such file\n")
+        base = len(read_log())
+        mon.type_text("move /bin/hello /tmp/x\n")
+        base, _ = wait_serial_after(
+            base, r"shell: move refused /bin/hello - the archive is read-only\n")
     elif sc == "unzip":
         # v0.1.36: /bin/unzip unpacks a real archive the way Windows does, folder
         # names included. The archive is the single source of truth: the test
@@ -2593,6 +2670,16 @@ MARKERS = {
                   "shell: deleted /tmp/dst2", "entries left",
                   "shell: del refused /bin/hello - the archive is read-only",
                   "shell: del refused /tmp/ghost - no such file"],
+    # v0.1.42: cmd's `move`, the verb that is not a rename. The arithmetic (the
+    # entry count dropping by one when a name is overwritten) is asserted inside
+    # the scenario; these are the lines the claim turns on - a plain move, the
+    # move that replaces what was in the way and says so, the /Y switch parsed
+    # rather than mistaken for the source, and the two refusals in their own words.
+    "move":      ["copy: wrote", "shell: moved /tmp/mv1 -> /tmp/mv3",
+                  "shell: moved /tmp/mv2 -> /tmp/mv3 (replaced existing)",
+                  "shell: moved /tmp/mv3 -> /tmp/mv4",
+                  "shell: move refused /tmp/ghost - no such file",
+                  "shell: move refused /bin/hello - the archive is read-only"],
     # v0.1.36: a real ZIP unpacked, folder names included. The strict byte/digest
     # comparisons are in the scenario; these are the lines the claim turns on -
     # the archive read whole, each safe member out byte for byte (flat and nested,

@@ -620,6 +620,31 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         `IF`, `FOR`, `GOTO`, `CALL`, `ERRORLEVEL`, redirection/pipes and
         `CD`/`MKDIR`/`MOVE` remain each their own rung.
 
+- [x] **cmd's `move` — the file verb that overwrites (v0.1.42).** `ren` and
+      `move` differ in exactly one case, and it is the interesting one: when the
+      destination name is already taken `ren` answers `WC_EEXIST` and leaves
+      everything alone, while Windows `move` drops the file in the way and lands
+      the source in its place. `cmd_move` therefore attempts the rename whole
+      first — the only way to keep a *refused* move's promise that the source
+      never moved — and only once that attempt has proved the name occupied does
+      it `vfs_remove` the destination and retry onto the freed slot, reporting
+      `shell: moved A -> B (replaced existing)`. No new syscall, no ABI change:
+      the verb is composed from the two primitives v0.1.32 had already put in the
+      VFS. cmd scripts pass `/Y` to suppress the confirmation prompt and a switch
+      read as the source name breaks every one of them, so `/Y` is matched
+      case-insensitively and skipped — there is no prompt here, so the overwrite
+      is always the behaviour. The `move` scenario proves the claim the log line
+      cannot: two real files copied into the store, a move onto a free name
+      (entry count holds), then a move onto the taken name with the count
+      requiring a drop of exactly one — the overwritten file is gone, not
+      shadowed — plus `/y` parsed and both refusals in their own words
+      (`no such file`, `the archive is read-only`).
+      - The cost, written down: single-file move over the writable store only.
+        No wildcards, no directory trees (this store holds flat names, so there
+        is nothing to recurse), and none of cmd's `/-`, `/|` or `/D` prompt
+        variants; `CD`/`MKDIR`, `IF`, `FOR`, `GOTO`, `CALL`, `ERRORLEVEL` and
+        redirection/pipes remain each their own rung.
+
 - [x] **the boot test waits for the guest, not a wall clock — CI flake fix (v0.1.41).**
       Not a capability but the reliability that lets capabilities ship: the CI had
       failed twice on a marker a rerun immediately found — `UEFI log missing:

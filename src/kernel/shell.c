@@ -334,6 +334,7 @@ static void cmd_help(void)
     put_line("  DIR            LISTE LE STOCKAGE PUIS L'ARCHIVE");
     put_line("  DEL <CHEMIN>   SUPPRIME UN FICHIER ECRIVABLE");
     put_line("  REN <A> <B>    RENOMME UN FICHIER ECRIVABLE");
+    put_line("  MOVE <A> <B>   DEPLACE (ECRASE LA DESTINATION, COMME CMD)");
     put_line("  - PROGRAMMES DANS /BIN -");
     put_line("  LS             LISTE L'INITRD");
     put_line("  CAT <FICHIER>  AFFICHE UN FICHIER");
@@ -890,6 +891,7 @@ static void cmd_about(void)
 }
 
 static void cmd_bat(int argc, const char *const *argv);
+static int ci_equal(const char *a, const char *b);
 
 /* `fetch /second` — the address bar's other half, and the shell's only built-in
  * that does not finish while the call is running. The page cannot be read back
@@ -1099,6 +1101,69 @@ static void cmd_ren(int argc, const char *const *argv)
 }
 
 
+/* cmd's `move` — the file verb that is NOT just a rename. `ren` refuses when the
+ * destination name is already taken (WC_EEXIST); Windows `move` overwrites it,
+ * dropping the file that was in the way and landing the source in its place. So
+ * the whole difference is what happens on EEXIST: clear the destination, then
+ * move onto the freed name. And the invariant a refused operation must keep is
+ * the one cmd_ren already promises — if the move does not happen, the source is
+ * exactly where it was. That is why the rename is attempted whole first and the
+ * destination is only deleted once that attempt has proved it occupied: a plain
+ * ENOENT or a read-only archive source never reaches the delete at all.
+ *
+ * cmd scripts pass `/Y` to suppress the overwrite confirmation prompt. There is
+ * no interactive prompt on this shell, so the overwrite is always the behaviour
+ * and `/Y` is accepted and simply does nothing extra — the switch a real script
+ * leans on is parsed so the line still resolves to the right source and target,
+ * and cmd reads a switch in any case, so `/y` and `/Y` are the same word here. */
+static void cmd_move(int argc, const char *const *argv)
+{
+    int a = 1;
+    if (argc >= 4 && ci_equal(argv[1], "/y"))
+        a = 2;                        /* skip cmd's no-confirm switch */
+    if (argc - a < 2) {
+        put_line("USAGE: MOVE <ANCIEN> <NOUVEAU>");
+        return;
+    }
+    const char *from = argv[a];
+    const char *to   = argv[a + 1];
+
+    int64_t r = vfs_rename(from, to);
+    int replaced = 0;
+    if (r == WC_EEXIST) {
+        int64_t d = vfs_remove(to);   /* cmd's move replaces the file in the way */
+        if (d == 0) {
+            r = vfs_rename(from, to);
+            replaced = 1;
+        } else {
+            r = d;                    /* report why the way would not clear */
+        }
+    }
+
+    if (r == 0) {
+        put_line("FICHIER DEPLACE DANS LE STOCKAGE ECRIVABLE");
+        serial_write("shell: moved ");
+        serial_write(from);
+        serial_write(" -> ");
+        serial_write(to);
+        serial_write(replaced ? " (replaced existing)\n" : "\n");
+        return;
+    }
+
+    put_line("DEPLACEMENT REFUSE");
+    serial_write("shell: move refused ");
+    serial_write(from);
+    if (r == WC_EPERM)
+        serial_write(" - the archive is read-only\n");
+    else if (r == WC_ENOENT)
+        serial_write(" - no such file\n");
+    else if (r == WC_EBUSY)
+        serial_write(" - source or destination is held open\n");
+    else
+        serial_write(" - not a name the store can hold\n");
+}
+
+
 /* One command line, wherever it came from. `line` is written in place — spaces
  * become NULs so argv[] points into it and there is no second copy to keep in
  * sync — and the buffer belongs to the caller, which is what lets a typed line
@@ -1146,6 +1211,8 @@ static void run_line(char *line, int len, const char *origin)
         cmd_del(argc, argv);
     else if (strcmp(argv[0], "ren") == 0)
         cmd_ren(argc, argv);
+    else if (strcmp(argv[0], "move") == 0)
+        cmd_move(argc, argv);
     else
         cmd_program(argc, argv, origin);
 }

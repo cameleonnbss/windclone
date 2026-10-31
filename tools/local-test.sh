@@ -937,6 +937,16 @@ echo '==> file verbs on the store (copy -> dir -> ren -> del, archive refused)'
 python3 tools/qemu-desktop.py windclone.iso fileops \
     || fail 'dir/ren/del did not behave over the writable store, or the archive was not read-only'
 
+# v0.1.42: cmd's `move` — the file verb that ren is not. `ren` refuses when the
+# destination name is taken; `move` overwrites it, and the store really loses the
+# file that was in the way (the entry count drops by one, not stays level). The
+# /Y switch a real cmd script leans on is parsed so the line still resolves to
+# the source and target, and the two refusals - nothing there to move, and a name
+# the read-only archive owns - are answered in their own words.
+echo '==> move over the store (plain, replacing, /Y, refusals)'
+python3 tools/qemu-desktop.py windclone.iso move \
+    || fail 'move did not overwrite an existing name, or /Y was mis-parsed, or a refusal was wrong'
+
 # v0.1.36: a real ZIP archive unpacked, folder names included.
 # /bin/unzip reads the committed specimen whole and extracts every safe entry
 # byte for byte - flat and nested, stored and deflated (the deflate path runs

@@ -634,7 +634,7 @@ On boot the kernel:
    The honest scope: this is the single-caret rule only — cmd's doubled caret
    inside batch files, and its interaction with the quoting rules, are not
    reproduced; `IF`/`FOR`/`GOTO`/`CALL`/`ERRORLEVEL`, redirection/pipes and
-   `CD`/`MKDIR`/`MOVE` remain future rungs.
+   `CD`/`MKDIR`/`MOVE` remain future rungs (`MOVE` landed in v0.1.42).
 
 44. **the boot test now waits for the guest instead of guessing a clock (v0.1.41)**.
    Not a feature but a fix, and it had earned its place: twice the CI had failed
@@ -652,6 +652,26 @@ On boot the kernel:
    wall-clock `timeout` survives only as a generous hang guard, never the
    completion signal: a slow runner just waits longer, it cannot lose the tail —
    and on a healthy boot the check finishes in seconds instead of the full 90.
+
+45. **`MOVE` is now a shell verb, and it is not `REN` (v0.1.42)**. cmd's other
+   file verb, and the one that needed its own reasoning: `ren` refuses when the
+   destination name is already taken (`WC_EEXIST`), while Windows `move` writes
+   over it. So `cmd_move` attempts the rename whole first — that is what lets a
+   *refused* move promise the source never moved — and only when the attempt
+   proves the destination is occupied does it delete that file and retry onto the
+   freed name, saying `shell: moved A -> B (replaced existing)`. The store's own
+   arithmetic is the proof, not the log line: the `move` scenario copies two real
+   files in, moves one onto a free name (the entry count holds), then moves the
+   other onto the taken one and requires the count to drop by exactly one — the
+   file in the way is really gone, not shadowed. cmd scripts lean on `/Y` to
+   suppress the confirmation prompt, and a switch read as the source name would
+   break every script that passes it, so `/Y` (in any case) is parsed and skipped;
+   there is no prompt here, so the overwrite is simply always the behaviour. The
+   refusals stay in their own words — `no such file`, and `the archive is
+   read-only` for a `/bin/...` source, because the initrd is read-only by
+   contract. The honest scope: this is single-file move over the writable store
+   only — no wildcards, no directory trees (this store has flat names), no `/-`
+   or `/|` prompt variants, and `CD`/`MKDIR` remain future rungs.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
