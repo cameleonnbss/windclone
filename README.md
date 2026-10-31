@@ -725,6 +725,25 @@ On boot the kernel:
    a libc-less kernel cannot honour honestly for every byte; the harness applies
    the same rule, so the agreement is arithmetic and not a sentence.
 
+49. **`CERTUTIL -HASHFILE <F>` — cmd's hash tool, the digest cross-checked
+   (v0.1.46)**. `fc`, `find` and `sort` all read a file and answer a question
+   about its *contents*; the third question a person asks of a downloaded file
+   is one no line-comparison can answer honestly — *is this the exact file the
+   author published?* Windows answers it with `certutil -hashfile`, the same
+   64-hex-digit SHA-256 the release page prints, computed over the bytes on
+   disk. This is that verb, streaming: it folds a 64-byte block at a time into
+   a 32-byte chaining value, so it never holds the file and digests any size the
+   store can open. A wrong SHA-256 still prints 64 plausible digits, so the test
+   brings its own oracle — the harness runs Python's `hashlib` over the exact
+   bytes `save` wrote *and* over the archive specimen (`/src/hello.c`, 1874
+   bytes, 29 whole blocks plus a tail, which exercises the block-chaining across
+   many `read()` calls), and the guest's digest line has to match digit for
+   digit. Only `sha256` exists here; any other algorithm word is refused rather
+   than silently hashed. Refusals all exit 2: a broken switch, no file, a
+   relative path, an unopenable name, and an unsupported algorithm. It is the
+   same `certutil` you reach for to verify this project's own ISO, turned back
+   into a program the ISO ships.
+
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
 triple-faulting.

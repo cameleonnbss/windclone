@@ -2692,6 +2692,79 @@ def scenario_actions(sc, mon, W, H):
         mon.type_text("sort\n")
         base, _ = wait_serial_after(base, r"sort: usage sort")
         base, _ = wait_serial_after(base, r"shell: sort exited with 2")
+    elif sc == "certutil":
+        # v0.1.46: /bin/certutil, cmd's hash tool. A wrong SHA-256 still prints
+        # 64 plausible hex digits, so presence proves nothing — the harness
+        # brings its own oracle: hashlib over the exact bytes save wrote, and
+        # over the specimen the archive serves, and the guest's digest line has
+        # to equal them digit for digit. hello.c (1874 bytes, 29 whole blocks +
+        # 18) also exercises the streaming block-chaining, not just one block.
+        import hashlib
+
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)  # raise the terminal
+
+        cu_text = "hello world\n"                   # save write joins + newline
+        cu_hex = hashlib.sha256(cu_text.encode()).hexdigest()
+
+        base = len(read_log())
+        mon.type_text("save write cu hello world\n")
+        base, m = wait_serial_after(
+            base, r"save: wrote (\d+) bytes /tmp/cu\.txt")
+        if int(m.group(1)) != len(cu_text):
+            raise SystemExit("save wrote %s bytes for cu, the command carries "
+                             "%d - truncated by a cap"
+                             % (m.group(1), len(cu_text)))
+        base, _ = wait_serial_after(base, r"shell: save exited with 0")
+
+        # Store file: header, then the digest the harness computed itself.
+        base = len(read_log())
+        mon.type_text("certutil -hashfile /tmp/cu.txt\n")
+        base, _ = wait_serial_after(base, r"certutil: /tmp/cu\.txt")
+        base, _ = wait_serial_after(base, r"certutil: sha256 %s" % re.escape(cu_hex))
+        base, _ = wait_serial_after(base, r"shell: certutil exited with 0")
+
+        # The algorithm word is accepted and selects the same hash.
+        base = len(read_log())
+        mon.type_text("certutil -hashfile /tmp/cu.txt sha256\n")
+        base, _ = wait_serial_after(base, r"certutil: sha256 %s" % re.escape(cu_hex))
+        base, _ = wait_serial_after(base, r"shell: certutil exited with 0")
+
+        # The archive, streamed across many blocks: the digest must answer to
+        # hashlib over the very bytes rootfs/src/hello.c contributes to the
+        # initrd — the same file the guest opens as /src/hello.c.
+        arc = spec("rootfs/src/hello.c")
+        arc_hex = hashlib.sha256(arc).hexdigest()
+        base = len(read_log())
+        mon.type_text("certutil -hashfile /src/hello.c\n")
+        base, _ = wait_serial_after(base, r"certutil: /src/hello\.c")
+        base, _ = wait_serial_after(base, r"certutil: sha256 %s" % re.escape(arc_hex))
+        base, _ = wait_serial_after(base, r"shell: certutil exited with 0")
+
+        # The refusals, each exit 2: a broken switch, no file at all, a relative
+        # path, an unreadable name, and an algorithm this program does not have.
+        # An unsupported name is refused rather than silently hashed as sha256.
+        base = len(read_log())
+        mon.type_text("certutil -bogus /tmp/cu.txt\n")
+        base, _ = wait_serial_after(base, r"certutil: usage certutil")
+        base, _ = wait_serial_after(base, r"shell: certutil exited with 2")
+        base = len(read_log())
+        mon.type_text("certutil\n")
+        base, _ = wait_serial_after(base, r"certutil: usage certutil")
+        base, _ = wait_serial_after(base, r"shell: certutil exited with 2")
+        base = len(read_log())
+        mon.type_text("certutil -hashfile cu.txt\n")
+        base, _ = wait_serial_after(base, r"certutil: a path is absolute")
+        base, _ = wait_serial_after(base, r"shell: certutil exited with 2")
+        base = len(read_log())
+        mon.type_text("certutil -hashfile /tmp/nocuv\n")
+        base, _ = wait_serial_after(base, r"certutil: cannot open /tmp/nocuv")
+        base, _ = wait_serial_after(base, r"shell: certutil exited with 2")
+        base = len(read_log())
+        mon.type_text("certutil -hashfile /tmp/cu.txt md5\n")
+        base, _ = wait_serial_after(base, r"certutil: algorithm not supported")
+        base, _ = wait_serial_after(base, r"shell: certutil exited with 2")
     elif sc == "unzip":
         # v0.1.36: /bin/unzip unpacks a real archive the way Windows does, folder
         # names included. The archive is the single source of truth: the test
@@ -3112,6 +3185,17 @@ MARKERS = {
                   "shell: sort exited with 0", "sort: too many lines",
                   "sort: too big", "sort: cannot open /tmp/ghost",
                   "sort: usage sort", "shell: sort exited with 2"],
+    # v0.1.46: /bin/certutil, cmd's hash tool. The exact digest is matched in
+    # the scenario against hashlib; these are the lines the claim turns on -
+    # each header, the sha256 tag on the digest line, both exit-0 successes,
+    # and the five exit-2 refusals (broken switch, no file, relative path,
+    # unopenable name, unsupported algorithm).
+    "certutil":  ["certutil: /tmp/cu.txt", "certutil: sha256",
+                  "certutil: /src/hello.c", "shell: certutil exited with 0",
+                  "certutil: usage certutil", "certutil: a path is absolute",
+                  "certutil: cannot open /tmp/nocuv",
+                  "certutil: algorithm not supported",
+                  "shell: certutil exited with 2"],
     # v0.1.36: a real ZIP unpacked, folder names included. The strict byte/digest
     # comparisons are in the scenario; these are the lines the claim turns on -
     # the archive read whole, each safe member out byte for byte (flat and nested,

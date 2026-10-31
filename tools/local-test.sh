@@ -979,6 +979,17 @@ echo '==> file sort (ascending, /r reverse, prefix rule, refusals)'
 python3 tools/qemu-desktop.py windclone.iso sort \
     || fail 'sort mis-ordered lines, ignored /r, or its exit code lied'
 
+# v0.1.46: /bin/certutil — cmd's hash tool over the same file layer. A wrong
+# SHA-256 still prints 64 plausible hex digits, so presence proves nothing; the
+# harness computes the digest itself with hashlib over the exact bytes save
+# wrote and over the archive specimen, and requires the guest to match digit for
+# digit. hello.c (1874 bytes) also exercises streaming block-chaining, plus the
+# five exit-2 refusals (broken switch, no file, relative path, unreadable name,
+# unsupported algorithm).
+echo '==> file hash (certutil sha256 cross-check, multi-block, refusals)'
+python3 tools/qemu-desktop.py windclone.iso certutil \
+    || fail 'certutil printed a digest that does not answer to hashlib, or its exit code lied'
+
 # v0.1.36: a real ZIP archive unpacked, folder names included.
 # /bin/unzip reads the committed specimen whole and extracts every safe entry
 # byte for byte - flat and nested, stored and deflated (the deflate path runs

@@ -639,6 +639,24 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       fc, the flag grammar is `/` + one letter exactly, so a path is never
       mistaken for a switch.
 
+- [x] **`/bin/certutil` — cmd's hash tool, the digest cross-checked (v0.1.46).**
+      `fc`, `find` and `sort` answer questions about a file's contents; the
+      question a *downloaded* file raises is whether it is the exact file the
+      author published, and Windows answers it with `certutil -hashfile` — the
+      same SHA-256 the release page prints. This is that verb, streaming: a
+      64-byte block folds at a time into a 32-byte chaining value, so it never
+      holds the file and digests any size the store opens. A wrong SHA-256 still
+      prints 64 plausible digits, so the harness brings its own oracle — Python's
+      `hashlib` over the exact bytes `save` wrote *and* over the archive specimen
+      (`/src/hello.c`, 1874 bytes, 29 whole blocks plus a tail, exercising the
+      block-chaining across many `read()` calls) — and the guest must match digit
+      for digit. Only `sha256` exists; any other algorithm word is refused rather
+      than silently hashed. Refusals all exit 2: a broken switch, no file, a
+      relative path, an unopenable name, an unsupported algorithm. The table
+      itself was corrected to the FIPS 180-4 definition (verified against
+      `hashlib`) — a hand-typed constant table is exactly the kind of bug a
+      cross-check exists to catch.
+
 - [x] **`/bin/sort` — cmd's File Sort, the order cross-checked (v0.1.45).**
       `sort` arranges what `fc` compares and `find` searches: read a file through
       the same VFS open(), split into lines, print them in order, and let `/r`

@@ -4,9 +4,9 @@
 Windows does, with `pip install rich` working, on a desktop that behaves like a
 daily driver.
 
-**Where WindClone is today (v0.1.45):** a from-scratch x86-64 kernel on Limine,
+**Where WindClone is today (v0.1.46):** a from-scratch x86-64 kernel on Limine,
 its own ELF64 loader, its own int `0x80` ABI of fourteen numbered syscalls, a
-libc-less userland of 28 freestanding C programs, a tmpfs store, an e1000 driver
+libc-less userland of 29 freestanding C programs, a tmpfs store, an e1000 driver
 with an ICMP/UDP/DHCP/TCP/HTTP stack on top of it, a compositor with per-cell
 colour and a pixel channel, an inflate decoder, and headless QEMU tests that
 compare bytes rather than impressions.
@@ -174,6 +174,17 @@ So the honest ladder, in the order each rung becomes testable:
       unopenable name, a command line with no file. A plain byte compare, not
       cmd's locale collation (a libc-less kernel cannot honour that honestly);
       the harness applies the same rule so the agreement is arithmetic.
+- [x] **`/bin/certutil` — cmd's hash tool, the digest cross-checked** (v0.1.46).
+      `certutil -hashfile <f>` folds a 64-byte block at a time into a 32-byte
+      SHA-256 chaining value, so it streams any file the store opens and prints
+      the same 64 hex digits Windows prints — the exact tool used to verify this
+      project's own ISO. Because a wrong SHA-256 still looks plausible, the
+      harness recomputes the digest with Python's `hashlib` over the bytes `save`
+      wrote *and* over the 1874-byte archive specimen (29 whole blocks plus a
+      tail, proving the block-chaining across many reads) and requires a digit-for-
+      digit match. Only `sha256` is offered; another algorithm word is refused, and
+      a broken switch, a missing file, a relative path, or an unreadable name each
+      exit 2.
 - [ ] **`CD`, `MKDIR`** as built-ins, so the prompt behaves like
       `cmd` for the remaining verbs a person actually types.
 - [ ] **a small Python-language interpreter** (`/bin/python`) for pure-Python
