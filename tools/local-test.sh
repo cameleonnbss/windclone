@@ -9,20 +9,22 @@ set -e
 cd "$(git rev-parse --show-toplevel 2>/dev/null || dirname "$(dirname "$0")")"
 
 Q="qemu-system-x86_64"
-# A CI runner is slower than a laptop and the boot path is fixed work, so
-# the timeout is generous; override with e.g. TIMEOUT=10 locally.
+# A CI runner is slower than a laptop, so a fixed wall used to be the boot
+# checks' only stop signal: run QEMU under `timeout`, let it SIGTERM, grep the
+# serial file. That coupled correctness to one machine's speed. OVMF spends many
+# seconds in POST before the kernel's first instruction, the image keeps growing
+# a few KiB, and the guest simply had not printed the later demo markers
+# ("\[exit\] code 9 pid") when the wall expired — the v0.1.23 UEFI and v0.1.40
+# push flakes, both of which self-healed on a rerun.
 #
-# It is a ceiling on a *wall*, and the wall has to hold both firmwares: OVMF
-# spends seconds of its own in post before the kernel's first instruction, and
-# the two boot checks then run the whole demo sequence inside what is left. The
-# v0.1.23 tag build failed there — "UEFI log missing: \[exit\] code 9 pid", a
-# marker that had appeared on the same test on the same runner a commit before —
-# because the image is a few kilobytes bigger and the runner was a few seconds
-# slower than the day the number was picked. 25 seconds was never a fact about
-# WindClone; it was a fact about one machine. So the ceiling is now a minute and
-# a half, which no honest boot of this image reaches: when it does expire, the
-# log will be short of a marker for a reason worth reading, not because the
-# runner was having a day.
+# TIMEOUT is no longer the answer to "when do I stop"; it is the answer to "how
+# long am I willing to wait for a positive signal". poll_for()/qemu_quit() below
+# wait for the kernel's own "boot: startup demo complete" line and the last
+# interactive marker, then close the session through the monitor so the serial
+# file is flushed. A slow runner just waits longer up to this deadline; it cannot
+# lose the tail. Each QEMU launch keeps a wall-clock `timeout` only as a hang
+# guard, set to TIMEOUT*3 so it can never be the thing that cuts a healthy boot
+# short. Override the per-phase deadline with e.g. TIMEOUT=20 locally.
 TIMEOUT=${TIMEOUT:-90}
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
@@ -85,6 +87,51 @@ print('    screen says:', [r for r in rows if want in r][0][:72])
 EOF
 }
 
+# --- boot capture: wait for the guest, then quit it cleanly ------------------
+# The boot checks used to hand the whole stop decision to a fixed wall: run QEMU
+# under `timeout $TIMEOUT`, let that SIGTERM it, then grep the serial file. That
+# tied correctness to one machine's speed. On a contended CI runner OVMF spends
+# many seconds in POST before the kernel's first instruction, the image keeps
+# growing a few KiB, and the guest simply had not printed the later demo markers
+# (`\[exit\] code 9 pid`) by the time the wall expired, so the line was truncated
+# out of the log — the v0.1.23 and v0.1.40 CI flakes. A hard SIGTERM can also drop
+# the last bytes QEMU had buffered for the `-serial file:` sink.
+#
+# poll_for() replaces the guess with a positive signal: it waits until `marker`
+# really appears in `file`, up to DEADLINE seconds, so a slow runner just takes
+# longer instead of losing the tail. qemu_quit() then closes the session through
+# the monitor (`quit`) so QEMU flushes the serial file and exits on its own, with
+# a bounded SIGTERM/SIGKILL only as a last resort. The wall-clock `timeout` that
+# still wraps each launch becomes a pure hang guard, never the completion signal.
+poll_for() {
+    local file=$1 marker=$2 deadline=$3 waited=0
+    while [ "$waited" -lt "$deadline" ]; do
+        [ -f "$file" ] && grep -aqF "$marker" "$file" && return 0
+        sleep 1
+        waited=$((waited + 1))
+    done
+    grep -aqF "$marker" "$file"
+}
+
+qemu_quit() {
+    local mon=$1 pid=$2 n=0
+    if [ -S "$mon" ]; then
+        python3 - "$mon" <<'PYEOF'
+import socket, sys
+try:
+    s = socket.socket(socket.AF_UNIX); s.settimeout(3); s.connect(sys.argv[1])
+    s.recv(4096); s.sendall(b'quit\n'); s.close()
+except OSError:
+    pass
+PYEOF
+    fi
+    while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 12 ]; do
+        sleep 0.5; n=$((n + 1))
+    done
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+}
+
 echo '==> build kernel + ISO + MBR image'
 make -j"$(nproc)" >/dev/null
 make build/mbr.img >/dev/null
@@ -98,12 +145,18 @@ echo '    ok: kernel is scalar (no SSE)'
 # 2) BIOS boot: serial must show the memory + interrupt + PCI + keyboard
 #    + uptime markers; the injected `sendkey` must come back decoded.
 rm -f /tmp/wc-bios.log /tmp/wc-biosmon
-timeout "$TIMEOUT" $Q -cdrom windclone.iso -m 512 -display none -no-reboot \
+timeout "$((TIMEOUT * 3))" $Q -cdrom windclone.iso -m 512 -display none -no-reboot \
     -device e1000,netdev=n0 -netdev user,id=n0 \
     -serial file:/tmp/wc-bios.log \
     -monitor unix:/tmp/wc-biosmon,server,nowait &
 BIOPID=$!
-sleep 6
+# Do not type into a guest that is still posting. Wait until the kernel has
+# finished its synchronous startup demo — the prompt only accepts keys once the
+# keyboard is live, and the demo-complete marker is printed after that — then
+# send the keystrokes. A fixed `sleep` was the other half of the old wall-clock
+# guess: too short and the words mis-typed into a booting kernel.
+poll_for /tmp/wc-bios.log "boot: startup demo complete" "$TIMEOUT" \
+    || fail "BIOS boot never finished its startup demo (deadline ${TIMEOUT}s)"
 # a/b prove the decoder; the shell then really runs `hello` in ring 3,
 # `ls` enumerates the archive through SYS_GETDIRENT, `echo zzz` proves the
 # command line reached _start (the word comes back verbatim), and `cat
@@ -124,7 +177,12 @@ send_keys /tmp/wc-biosmon a b ret h e l l o ret \
     v a n i s h ret \
     o r p h a n ret \
     h o l d ret
-wait $BIOPID 2>/dev/null || true
+# The typed orphan/nest line is the last thing this boot must show. Wait for it,
+# then quit cleanly so the serial file is flushed — never grep a log the guest
+# was killed in the middle of writing.
+poll_for /tmp/wc-bios.log "[nest] exiting pid" "$TIMEOUT" \
+    || fail "BIOS boot never ran the typed orphan/nest command (deadline ${TIMEOUT}s)"
+qemu_quit /tmp/wc-biosmon $BIOPID
 for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "vga: text console live" "kmalloc selftest ok" "step: heap ok" \
             "boot complete" "step: interrupts armed" \
@@ -165,6 +223,7 @@ for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "shell: reaper ran and returned" \
             "proc: a parent that dies before its child does" \
             "step: adoption ok (an orphan is re-parented and its exit code comes back)" \
+            "boot: startup demo complete" \
             "adopted by pid" \
             "shell: running 'orphan'" \
             "shell: orphan ran and returned" \
@@ -582,12 +641,20 @@ if [ -z "$OVMF_CODE" ]; then
     echo '    skip: UEFI boot — no OVMF firmware found (install ovmf or set OVMF_DIR)'
     echo '          CI still runs this check on ubuntu-latest'
 else
-    rm -f /tmp/wc-uefi.log /tmp/wc-vars.fd
+    rm -f /tmp/wc-uefi.log /tmp/wc-uefimon /tmp/wc-vars.fd
     cp "$OVMF_VARS" /tmp/wc-vars.fd
-    timeout "$TIMEOUT" $Q -cdrom windclone.iso -m 512 -display none -no-reboot \
+    timeout "$((TIMEOUT * 3))" $Q -cdrom windclone.iso -m 512 -display none -no-reboot \
         -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
         -drive if=pflash,format=raw,file=/tmp/wc-vars.fd \
-        -serial file:/tmp/wc-uefi.log || true
+        -serial file:/tmp/wc-uefi.log \
+        -monitor unix:/tmp/wc-uefimon,server,nowait &
+    UEPID=$!
+    # Same rule as the BIOS boot: OVMF POST is the slow, machine-dependent part,
+    # so wait for the guest to announce its demo is done rather than guess how
+    # long the wall leaves it. Then quit cleanly so the file is flushed.
+    poll_for /tmp/wc-uefi.log "boot: startup demo complete" "$TIMEOUT" \
+        || fail "UEFI boot never finished its startup demo (deadline ${TIMEOUT}s)"
+    qemu_quit /tmp/wc-uefimon $UEPID
     for want in "step: pmm ok" "step: paging ok" "vga: text console live" \
                 "kmalloc selftest ok" "step: heap ok" "boot complete" "uptime: 1s" \
                 "boot: windclone $WC_V" \
@@ -620,6 +687,7 @@ else
                 "\\[orphan\\] leaving now, I will not wait" \
                 "\\[nest\\] exiting pid" \
                 "step: adoption ok (an orphan is re-parented and its exit code comes back)" \
+                "boot: startup demo complete" \
                 "gfx: framebuffer" "gfx: desktop composited" \
                 "wm: wallpaper cached" "rtc: hardware clock"; do
         grep -aq "$want" /tmp/wc-uefi.log || fail "UEFI log missing: $want"

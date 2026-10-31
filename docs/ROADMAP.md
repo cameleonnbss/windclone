@@ -620,6 +620,28 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
         `IF`, `FOR`, `GOTO`, `CALL`, `ERRORLEVEL`, redirection/pipes and
         `CD`/`MKDIR`/`MOVE` remain each their own rung.
 
+- [x] **the boot test waits for the guest, not a wall clock — CI flake fix (v0.1.41).**
+      Not a capability but the reliability that lets capabilities ship: the CI had
+      failed twice on a marker a rerun immediately found — `UEFI log missing:
+      [exit] code 9 pid` on the v0.1.23 tag build, the same line absent on the
+      v0.1.40 push build. Root cause was outside WindClone entirely: the boot
+      checks ran QEMU under a fixed `timeout $TIMEOUT`, let it SIGTERM the guest,
+      then grepped the serial file, so a pass depended on one machine's speed — a
+      contended runner plus OVMF POST plus an image a few KiB larger left the
+      guest mid-demo when the wall expired (and a hard SIGTERM can drop QEMU's
+      buffered `-serial file:` tail). The fix keys the stop decision on a positive
+      signal instead of a guess: the kernel now prints `boot: startup demo
+      complete` once its synchronous demo is fully written, and `local-test.sh`
+      grew `poll_for`/`qemu_quit` — wait for that line (and, for the BIOS boot,
+      the last interactive marker `[nest] exiting pid`) up to a deadline, then
+      close the session through the monitor so the file flushes. The wall-clock
+      `timeout` remains only as a `TIMEOUT*3` hang guard.
+      - The cost, written down: none to the OS — no kernel behaviour changed
+        except the added log line. A slow runner now simply waits up to TIMEOUT
+        instead of truncating; a genuinely stuck boot still fails, but with a
+        clear "never finished its startup demo" reason rather than a missing
+        marker. A healthy boot now stops in seconds instead of the full 90s.
+
 
 ## Phase 6 — Language expansion ⏳
 *Goal: use the right tool per layer (the "asm/C/C++/Rust" promise).*

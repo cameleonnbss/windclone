@@ -792,6 +792,18 @@ void kmain(void)
                     proc_run_all();
                     serial_write("step: adoption ok (an orphan is re-parented and its exit code comes back)\n");
                 }
+
+                /* The whole synchronous startup demo has now printed every line
+                 * it will ever print on its own. This is the harness's positive
+                 * "I am done" signal (v0.1.41): the boot check waits for this
+                 * exact line and then quits QEMU through the monitor, instead of
+                 * trusting a wall-clock that a slow or contended CI runner could
+                 * overrun before the demo reached its last marker — the flake
+                 * that dropped `\[exit\] code 9 pid` from the UEFI and push logs.
+                 * A line the guest chooses to say, not a clock that guesses when
+                 * to cut it off, is what makes the check depend only on WindClone,
+                 * never on the machine it happened to run on. */
+                serial_write("boot: startup demo complete\n");
             }
             if ((int)(last_second / 100) >= dump_at_second) {
                 serial_write("log ring (most recent): ");

@@ -4,7 +4,7 @@
 Windows does, with `pip install rich` working, on a desktop that behaves like a
 daily driver.
 
-**Where WindClone is today (v0.1.40):** a from-scratch x86-64 kernel on Limine,
+**Where WindClone is today (v0.1.41):** a from-scratch x86-64 kernel on Limine,
 its own ELF64 loader, its own int `0x80` ABI of fourteen numbered syscalls, a
 libc-less userland of 25 freestanding C programs, a tmpfs store, an e1000 driver
 with an ICMP/UDP/DHCP/TCP/HTTP stack on top of it, a compositor with per-cell
@@ -27,7 +27,7 @@ because it is the biggest single fact in this file:
 
 ## What already works, exactly
 
-| Requested | Reality in v0.1.40 |
+| Requested | Reality in v0.1.41 |
 |---|---|
 | `.bat` files run | Yes, and since v0.1.37 with the cmd semantics a copied script actually leans on: `bat <NAME>` executes `/tmp/<NAME>.BAT` with `@` suppressing a line's echo, `ECHO OFF`/`ECHO ON`/bare `ECHO` as the script's echo state, `SET NAME=value` + `%NAME%` expansion (session environment, case-insensitive names), `rem` alongside `;` as a comment, and a nested `bat` refused. Every script line also logs its resolved form to the serial transcript, so an `ECHO OFF` run is still fully provable. **No** `if`/`for`/`goto`/`call`/`errorlevel`, no redirection or pipes, no arguments passed to a script. |
 | Windows-like shell verbs | `DIR`, `DEL`, `REN` are built-ins with `cmd`'s error classes (`EPERM` read-only, `ENOENT`, `EEXIST`, `EBUSY`) — v0.1.32. `SET` and `%VAR%` live inside scripts (v0.1.37), and since v0.1.38 `SET NAME=value` / bare `SET` and `TYPE <path>` are prompt built-ins too (`set` folds the name to upper case like cmd, lists the environment back, and `type` prints a store/archive file's bytes to the transcript). Since v0.1.39 `%VAR%` expands on a *typed* line too — a defined name substitutes before the command runs, an undefined one stays literal so a `save script` writing a `%` survives. Since v0.1.40 cmd's caret escape works on both typed and scripted lines: `^` consumes itself and emits the next character literally, and `^%` cannot start a reference, so a real percent survives a line that also expands variables. Still missing: cmd's doubled-caret-inside-a-batch-file and its quoting interaction, `CD`, `COPY` as a verb (it is a `/bin` program), `MOVE`, `MKDIR`. |
@@ -112,6 +112,16 @@ So the honest ladder, in the order each rung becomes testable:
       delivers `%`. Proven by the `caret` scenario. Still not done: cmd's
       doubled caret inside a batch file and its quoting interaction — and
       `CD`/`MKDIR`/`MOVE`.
+- [x] **the boot test keys on the guest, not a clock** (v0.1.41). The two CI
+      flakes — `UEFI log missing: [exit] code 9 pid` at v0.1.23, the same line on
+      the v0.1.40 push — were never WindClone's: the boot checks SIGTERM-killed
+      QEMU at a fixed wall and grepped whatever had flushed by then, so a slow
+      runner truncated the tail of the demo. The kernel now prints
+      `boot: startup demo complete` when its synchronous demo is fully written,
+      and `tools/local-test.sh` waits for that (plus the last interactive marker)
+      before quitting QEMU through the monitor, which flushes the serial file.
+      This is what makes a green tag build mean the same thing on every machine —
+      the reliability the whole release train rests on.
 - [ ] **`CD`, `MKDIR`, `MOVE`** as built-ins, so the prompt behaves like
       `cmd` for the remaining verbs a person actually types.
 - [ ] **a small Python-language interpreter** (`/bin/python`) for pure-Python

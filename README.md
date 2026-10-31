@@ -636,6 +636,23 @@ On boot the kernel:
    reproduced; `IF`/`FOR`/`GOTO`/`CALL`/`ERRORLEVEL`, redirection/pipes and
    `CD`/`MKDIR`/`MOVE` remain future rungs.
 
+44. **the boot test now waits for the guest instead of guessing a clock (v0.1.41)**.
+   Not a feature but a fix, and it had earned its place: twice the CI had failed
+   on a marker that a rerun instantly found — `UEFI log missing: [exit] code 9
+   pid` on the v0.1.23 tag build, the same line gone on the v0.1.40 push. The
+   cause was never in WindClone. The boot checks ran QEMU under a fixed wall
+   (`timeout 90s`), let it SIGTERM the guest, then grepped the serial file — so
+   correctness depended on one machine's speed: a contended runner, OVMF burning
+   many seconds in POST, and an image a few KiB bigger could leave the guest
+   mid-demo when the wall expired, truncating the later lines (a hard kill can
+   also drop QEMU's buffered serial tail). Now the kernel says, in its own voice,
+   when the synchronous startup demo is finished — `boot: startup demo complete` —
+   and the harness waits for that positive line (and the last interactive marker)
+   before closing the session through the QEMU monitor so the file is flushed. The
+   wall-clock `timeout` survives only as a generous hang guard, never the
+   completion signal: a slow runner just waits longer, it cannot lose the tail —
+   and on a healthy boot the check finishes in seconds instead of the full 90.
+
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
 triple-faulting.
