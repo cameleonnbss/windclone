@@ -639,6 +639,20 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       fc, the flag grammar is `/` + one letter exactly, so a path is never
       mistaken for a switch.
 
+- [x] **`/bin/date` — cmd's clock through SYS_RTC, the 15th syscall (v0.1.48).**
+      The tray shows the time; a program asks for the date. `date /t` prints
+      cmd's exact en-US line, straight from the CMOS chip through the fifteenth
+      numbered syscall — the first new border crossing since getdirent. The
+      chip only stores two year digits and the driver refuses to guess the
+      rest, so the program declares the POSIX 00..69 → 20xx window and the test
+      pins that rule by arithmetic: the harness re-computes the weekday with
+      Python's own calendar over the seeded clock and demands the strings to be
+      equal — a wrong century moves the weekday and cannot hide. The bare form
+      is cmd's shape: prompt, empty Enter changes nothing, exit 0. Writing the
+      chip is ring-0 work, so a typed date is echoed back and refused with
+      exit 1 instead of silently dropped, and a switch that is not `/t` earns
+      the builtin answer `Invalid parameter - x`.
+
 - [x] **`/bin/where` — cmd's finder, the path proven actionable (v0.1.47).**
       The shell resolves names to /bin silently; `where` says so out loud, the
       way cmd does: full paths, printed raw, because the next command is meant

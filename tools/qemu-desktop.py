@@ -2853,6 +2853,67 @@ def scenario_actions(sc, mon, W, H):
         mon.type_text("where certutil zzznone\n")
         base, _ = wait_serial_after(base, r"/bin/certutil")
         base, _ = wait_serial_after(base, r"shell: where exited with 0")
+    elif sc == "date":
+        # v0.1.48: /bin/date, the fifteenth syscall. The CMOS is seeded to a
+        # known instant for every run (base 2026-08-21, same seed the chrome
+        # scenario pins), so the answer is exact rather than plausible - and
+        # the weekday is cross-checked twice: the guest computes it with
+        # Sakamoto's integer rule, the harness computes it with Python's own
+        # calendar over the same four-digit date, and the two strings must be
+        # equal. A wrong century would move the weekday by days, so the 00..69
+        # -> 20xx window rule is pinned by arithmetic, not by trust.
+        import datetime
+
+        seeded = datetime.date(2026, 8, 21)
+        wd = seeded.strftime("%a")
+        want = "The current date is: %s 08/21/2026" % wd
+
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)  # raise the terminal
+
+        base = len(read_log())
+        mon.type_text("date /t\n")
+        base, m = wait_serial_after(
+            base, r"The current date is: (Sun|Mon|Tue|Wed|Thu|Fri|Sat) "
+                  r"(\d\d)/(\d\d)/(\d{4})")
+        got = "The current date is: %s %s/%s/%s" % (
+            m.group(1), m.group(2), m.group(3), m.group(4))
+        if got != want:
+            raise SystemExit("date printed '%s', the seeded clock says '%s' "
+                             "(weekday cross-checked against Python's calendar)"
+                             % (got, want))
+        base, _ = wait_serial_after(base, r"shell: date exited with 0")
+
+        # The interactive form, cmd's shape: date, prompt, one empty Enter -
+        # unchanged and that is success, not a fallback.
+        base = len(read_log())
+        mon.type_text("date\n")
+        base, _ = wait_serial_after(base, re.escape(want))
+        base, _ = wait_serial_after(base, r"Enter the new date \(mm-dd-yy\)")
+        mon.type_text("\n")
+        base, _ = wait_serial_after(base, r"shell: date exited with 0")
+
+        # A typed date is where the copy stops honest: cmd would write the
+        # chip; ring 3 has no ports, so the input is echoed back and refused.
+        base = len(read_log())
+        mon.type_text("date\n")
+        base, _ = wait_serial_after(base, r"Enter the new date \(mm-dd-yy\)")
+        mon.type_text("10-11-2026\n")
+        base, _ = wait_serial_after(base, r"date: refusing to set .10-11-2026")
+        base, _ = wait_serial_after(base, r"shell: date exited with 1")
+
+        # The same refusal as a one-shot command line, and an unknown switch
+        # answered the way cmd's builtins answer one: "Invalid parameter - x".
+        base = len(read_log())
+        mon.type_text("date 01-02-03\n")
+        base, _ = wait_serial_after(
+            base, r"date: setting the date is not supported \(read-only clock\)")
+        base, _ = wait_serial_after(base, r"shell: date exited with 1")
+        base = len(read_log())
+        mon.type_text("date /x\n")
+        base, _ = wait_serial_after(base, r"Invalid parameter - x")
+        base, _ = wait_serial_after(base, r"shell: date exited with 1")
     elif sc == "unzip":
         # v0.1.36: /bin/unzip unpacks a real archive the way Windows does, folder
         # names included. The archive is the single source of truth: the test
@@ -3298,6 +3359,17 @@ MARKERS = {
                   "ERROR: Invalid pattern - bin/hello",
                   "shell: where exited with 2",
                   "certutil: sha256"],
+    # v0.1.48: /bin/date over SYS_RTC, the fifteenth syscall. The exact line
+    # (weekday and all) is cross-checked in the scenario against Python's own
+    # calendar over the seeded CMOS date; these are the lines the claim turns
+    # on - the cmd-shaped answer, the interactive prompt, the echo-back refusal
+    # of a typed date, the one-shot refusal, and the unknown switch answered
+    # the way cmd's builtins answer one.
+    "date":      ["The current date is:", "shell: date exited with 0",
+                  "Enter the new date (mm-dd-yy)",
+                  "date: refusing to set", "shell: date exited with 1",
+                  "date: setting the date is not supported",
+                  "Invalid parameter - x"],
     # v0.1.36: a real ZIP unpacked, folder names included. The strict byte/digest
     # comparisons are in the scenario; these are the lines the claim turns on -
     # the archive read whole, each safe member out byte for byte (flat and nested,

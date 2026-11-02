@@ -109,6 +109,28 @@
  * -WC_ERANGE when the buffer cannot hold the whole string plus its NUL. */
 #define SYS_NET_ADDR 14
 
+/* rtc(struct wc_rtc *out) — the fifteenth call, added with v0.1.48's /bin/date.
+ * The CMOS chip's decoded time and date lived in the kernel (rtc.c feeds the
+ * taskbar tray); a program asking "what day is it?" could only read the tray's
+ * pixels, which is not an answer, it is a screenshot of one. This copies the
+ * driver's last stable read into a caller-owned struct, checked like every
+ * other return. 0 on success; -WC_ENOENT when no chip ever answered at boot —
+ * a date program that printed 1970-01-01 on that error would be inventing a
+ * calendar, so it must say there is none instead. There is no fourth argument
+ * and no flags word: time is not something a border crossing should make
+ * configurable from ring 3.
+ *
+ * `year2` is the chip's own two-digit year. The century is not stored on every
+ * firmware (rtc.h refuses to invent one), so it is the caller's declared rule
+ * that turns 26 into 2026, and any test of that answer checks the weekday is
+ * consistent with the full date rather than trusting either. */
+#define SYS_RTC 15
+
+struct wc_rtc {
+    int32_t hour, minute, second;   /* 24-hour, decoded by the driver   */
+    int32_t day, month, year2;      /* day 1..31, month 1..12, two-digit year */
+};
+
 /* --- signals ------------------------------------------------------------ */
 /* Only SIGKILL exists so far, and only as the argument of kill(): there is no
  * delivery, no masking, no handler. It is Linux's number because Linux's

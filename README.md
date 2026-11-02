@@ -762,6 +762,22 @@ On boot the kernel:
    where.exe's answer), a hit among misses still wins (exit 0), and the refusals
    exit 2: no criteria, a switch this one-scope store refuses to fake, and a
    path handed to a tool that searches names.
+51. **`DATE` — cmd's clock, answered by the CMOS chip through the 15th syscall
+   (v0.1.48)**. The taskbar tray has shown the time since the RTC driver landed,
+   but the tray shows and a program asks. `date /t` prints cmd's own en-US
+   answer — `The current date is: Fri 08/21/2026` — straight from the hardware
+   chip through `SYS_RTC`, the fifteenth numbered syscall, the first new border
+   crossing since getdirent. The chip stores two digits and the kernel driver
+   refuses to guess the century, so this program declares the POSIX rule
+   (00..69 is 20xx) and the test pins it by arithmetic: the harness re-computes
+   the weekday with Python's own calendar over the seeded CMOS date and demands
+   digit-for-digit agreement — a wrong century is a wrong weekday and cannot
+   hide. The interactive form is cmd's shape too: bare `date` prompts
+   `Enter the new date (mm-dd-yy):`, an empty Enter changes nothing and exits 0.
+   Typing a date is where the copy stops honest — writing CMOS is ring-0 work
+   ring-3 has no ports for — so the input is echoed back and refused with exit 1
+   rather than silently dropped, and an unknown switch earns cmd's builtin
+   answer: `Invalid parameter - x`.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

@@ -130,6 +130,16 @@ static inline long wc_net_addr(char *buf, unsigned long len)
     return wc_call2(SYS_NET_ADDR, (long)buf, (long)len);
 }
 
+/* The CMOS clock, decoded by the driver rather than guessed by us. 0 fills
+ * `out`; -WC_ENOENT means no chip answered at boot, and a program that printed
+ * a plausibly-formatted date on that error would not be a clock, it would be a
+ * calendar prop. The struct is the kernel's own, so this is a struct copy
+ * across the border like getdirent, not a string parse. */
+static inline long wc_rtc(struct wc_rtc *out)
+{
+    return wc_call1(SYS_RTC, (long)out);
+}
+
 /* Give the CPU up and come back later. This is the cooperative half of the
  * scheduler: the kernel switches to the next runnable process and returns here
  * as if the call had simply finished. Returns 0. */

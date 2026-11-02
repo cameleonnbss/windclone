@@ -4,9 +4,9 @@
 Windows does, with `pip install rich` working, on a desktop that behaves like a
 daily driver.
 
-**Where WindClone is today (v0.1.47):** a from-scratch x86-64 kernel on Limine,
-its own ELF64 loader, its own int `0x80` ABI of fourteen numbered syscalls, a
-libc-less userland of 30 freestanding C programs, a tmpfs store, an e1000 driver
+**Where WindClone is today (v0.1.48):** a from-scratch x86-64 kernel on Limine,
+its own ELF64 loader, its own int `0x80` ABI of fifteen numbered syscalls, a
+libc-less userland of 31 freestanding C programs, a tmpfs store, an e1000 driver
 with an ICMP/UDP/DHCP/TCP/HTTP stack on top of it, a compositor with per-cell
 colour and a pixel channel, an inflate decoder, and headless QEMU tests that
 compare bytes rather than impressions.
@@ -196,6 +196,18 @@ So the honest ladder, in the order each rung becomes testable:
       given pattern(s).` and exit 1; a hit among misses exits 0; no criteria, a
       switch, and a path-shaped pattern each exit 2. Matching is exact and
       case-insensitive, as cmd's file matching has always been.
+- [x] **`/bin/date` — cmd's clock through SYS_RTC, the 15th syscall** (v0.1.48).
+      `date /t` prints cmd's exact en-US line — `The current date is:
+      Fri 08/21/2026` — read from the CMOS chip through the fifteenth numbered
+      syscall. The chip stores two year digits and the driver refuses to guess
+      the century, so the program declares the POSIX 00..69 → 20xx window and
+      the test pins the rule by arithmetic: the harness re-computes the weekday
+      with Python's calendar over the seeded clock and demands the exact string
+      — a wrong century is a wrong weekday. Bare `date` prompts cmd's line; an
+      empty Enter changes nothing and exits 0; a typed date is echoed back and
+      refused with exit 1, because writing CMOS is ring-0 work this border
+      denies on purpose. Anything but `/t` after a slash is answered
+      `Invalid parameter - x`, the way cmd's builtins answer one.
 - [ ] **`CD`, `MKDIR`** as built-ins, so the prompt behaves like
       `cmd` for the remaining verbs a person actually types.
 - [ ] **a small Python-language interpreter** (`/bin/python`) for pure-Python

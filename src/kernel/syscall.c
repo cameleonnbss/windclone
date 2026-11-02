@@ -39,6 +39,7 @@
 #include "serial.h"
 #include "string.h"
 #include "net.h"
+#include "rtc.h"
 
 extern void syscall_stub(void);
 
@@ -191,6 +192,27 @@ static int64_t sys_net_addr(uint64_t buf, uint64_t len)
     char *dst = (char *)(uintptr_t)buf;
     for (uint64_t i = 0; i < n; i++)
         dst[i] = a[i];
+    return 0;
+}
+
+/* rtc(struct wc_rtc *out) — the driver's answer, not the caller's guess. The
+ * kernel reads its own cached chip state (rtc.c already re-reads and stability-
+ * checks per poll for the tray), fills a kernel-side struct, and only then
+ * copies it across the border — so a program can never see a half-decoded time
+ * the way a torn register read would show one on the chip itself. */
+static int64_t sys_rtc(uint64_t up)
+{
+    struct wc_rtc r;
+
+    rtc_now(&r.hour, &r.minute, &r.second);
+    rtc_date(&r.day, &r.month, &r.year2);
+    if (r.hour < 0)
+        return WC_ENOENT;          /* no chip ever answered: no date to give */
+
+    if (!user_ptr_ok(up, sizeof r, 1))
+        return WC_EFAULT;
+
+    memcpy((void *)(uintptr_t)up, &r, sizeof r);
     return 0;
 }
 
@@ -356,6 +378,10 @@ void syscall_handler(struct syscall_frame *f)
 
     case SYS_NET_ADDR:
         f->rax = (uint64_t)sys_net_addr(f->rdi, f->rsi);
+        break;
+
+    case SYS_RTC:
+        f->rax = (uint64_t)sys_rtc(f->rdi);
         break;
 
     case SYS_SCHED_YIELD:

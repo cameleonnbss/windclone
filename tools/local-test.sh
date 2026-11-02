@@ -1000,6 +1000,16 @@ echo '==> path finder (where finds every /bin entry, refuses to guess)'
 python3 tools/qemu-desktop.py windclone.iso where \
     || fail 'where lost a program the Makefile says exists, or its exit code lied'
 
+# v0.1.48: /bin/date — the fifteenth syscall (SYS_RTC) behind cmd's clock.
+# The CMOS is seeded to a known instant, so the harness demands the exact
+# cmd-shaped line, weekday included — and it re-computes that weekday with
+# Python's own calendar instead of trusting the kernel's Sakamoto. The
+# interactive prompt, the echo-back refusal of a typed date, the one-shot
+# refusal, and cmd's "Invalid parameter - x" close the claim.
+echo '==> hardware clock date (seeded CMOS, weekday cross-check, refusals)'
+python3 tools/qemu-desktop.py windclone.iso date \
+    || fail 'date did not answer the seeded clock exactly, or its exit code lied'
+
 # v0.1.36: a real ZIP archive unpacked, folder names included.
 # /bin/unzip reads the committed specimen whole and extracts every safe entry
 # byte for byte - flat and nested, stored and deflated (the deflate path runs
