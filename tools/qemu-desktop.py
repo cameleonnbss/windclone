@@ -191,7 +191,7 @@ TASK_X, TASK_W, TASK_GAP = 132, 168, 6
 START_X, START_W = 12, 110
 ICON_X, ICON_W = 28, 52
 MENU_X, MENU_W = START_X, 236
-MENU_HEADER_H, MENU_ITEM_H, MENU_FOOTER_H, MENU_GAP = 30, 22, 26, 6
+MENU_HEADER_H, MENU_ITEM_H, MENU_FOOTER_H, MENU_GAP = 26, 20, 22, 2
 # A program window as wm_open_program() cascades it: the first one lands at
 # (150,56) and is PROG_W wide (clamped to W-40), so its close button is where
 # title_button() says for a window at that rect.
@@ -2765,6 +2765,94 @@ def scenario_actions(sc, mon, W, H):
         mon.type_text("certutil -hashfile /tmp/cu.txt md5\n")
         base, _ = wait_serial_after(base, r"certutil: algorithm not supported")
         base, _ = wait_serial_after(base, r"shell: certutil exited with 2")
+    elif sc == "where":
+        # v0.1.47: /bin/where, cmd's answer to "what file answers this name?".
+        # The claim is structural, so the oracle is the Makefile itself: every
+        # USER_BINS entry must be findable by a running guest, and the path it
+        # prints must be the archive entry with a leading slash - the form
+        # open() takes. Then the loop closes across two programs: `where` finds
+        # itself, and certutil is handed that self-same path and opens it - so
+        # the printed path is provably actionable, not decorative. Exact
+        # matching is also asserted: `where hello.c` finds nothing, because no
+        # entry answers that name and an honest tool says so instead of guessing.
+        with open(os.path.join(ROOT, "Makefile")) as _fh:
+            _mb = next(l for l in _fh if l.startswith("USER_BINS :="))
+        progs = [t.split("/")[-1] for t in _mb.split("=", 1)[1].split()]
+        if len(progs) < 25:
+            raise SystemExit("Makefile oracle lost programs: %d" % len(progs))
+
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)  # raise the terminal
+
+        for p in progs:
+            if p == "where":
+                continue          # its own search gets a chained check below
+            base = len(read_log())
+            mon.type_text("where %s\n" % p)
+            base, _ = wait_serial_after(base, r"/bin/%s" % re.escape(p))
+            base, _ = wait_serial_after(base, r"shell: where exited with 0")
+
+        # The self-check, in order: the kernel's spawn trace names /bin/where
+        # when the search starts, so both lines can only be the trace and then
+        # the program's own answer if the program really finds itself.
+        base = len(read_log())
+        mon.type_text("where where\n")
+        base, _ = wait_serial_after(base, r"proc: spawned /bin/where")
+        # The program's own answer must sit on a line of its own - the trace
+        # above contains the same path mid-line, and matching it again would
+        # prove nothing. The kernel pads each serial line with a CR, which
+        # universal newlines folds away, so a bare \n bounds the row here.
+        base, _ = wait_serial_after(base, r"\n/bin/where\n")
+        base, _ = wait_serial_after(base, r"shell: where exited with 0")
+
+        # And the trust-the-path step: hand certutil the very bytes `where`
+        # printed for itself. A wrong path is a refusal, an openable one is a
+        # digest - presence of the hex line is the proof the two tools agree
+        # on what a path means here.
+        base = len(read_log())
+        mon.type_text("certutil -hashfile /bin/where\n")
+        base, _ = wait_serial_after(base, r"certutil: sha256 [0-9a-f]{64}")
+        base, _ = wait_serial_after(base, r"shell: certutil exited with 0")
+
+        # A name the store does not have is reported, not guessed at: INFO
+        # line, exit 1 - cmd's own answer, and the extension below is the
+        # honest edge of the exact-matching rule.
+        base = len(read_log())
+        mon.type_text("where zzznone\n")
+        base, _ = wait_serial_after(
+            base, r"INFO: Could not find files for the given pattern\(s\)\.")
+        base, _ = wait_serial_after(base, r"shell: where exited with 1")
+        base = len(read_log())
+        mon.type_text("where hello.c\n")
+        base, _ = wait_serial_after(
+            base, r"INFO: Could not find files for the given pattern\(s\)\.")
+        base, _ = wait_serial_after(base, r"shell: where exited with 1")
+
+        # The refusals, each exit 2: no criteria at all (Windows answers
+        # "ERROR: Missing search criteria."), a switch this one-scope store
+        # refuses to fake, and a pattern with a slash in it - a path is not a
+        # name, and `where` on Windows searches names.
+        base = len(read_log())
+        mon.type_text("where\n")
+        base, _ = wait_serial_after(base, r"ERROR: Missing search criteria\.")
+        base, _ = wait_serial_after(base, r"shell: where exited with 2")
+        base = len(read_log())
+        mon.type_text("where /r hello\n")
+        base, _ = wait_serial_after(base, r"ERROR: Invalid switch - /r\.")
+        base, _ = wait_serial_after(base, r"shell: where exited with 2")
+        base = len(read_log())
+        mon.type_text("where bin/hello\n")
+        base, _ = wait_serial_after(base, r"ERROR: Invalid pattern - bin/hello")
+        base, _ = wait_serial_after(base, r"shell: where exited with 2")
+
+        # Mixed criteria: a hit and a miss together still print the hit, and
+        # the exit code follows where.exe - any match wins (0), only an
+        # all-miss run answers 1.
+        base = len(read_log())
+        mon.type_text("where certutil zzznone\n")
+        base, _ = wait_serial_after(base, r"/bin/certutil")
+        base, _ = wait_serial_after(base, r"shell: where exited with 0")
     elif sc == "unzip":
         # v0.1.36: /bin/unzip unpacks a real archive the way Windows does, folder
         # names included. The archive is the single source of truth: the test
@@ -3196,6 +3284,20 @@ MARKERS = {
                   "certutil: cannot open /tmp/nocuv",
                   "certutil: algorithm not supported",
                   "shell: certutil exited with 2"],
+    # v0.1.47: /bin/where, cmd's finder. The Makefile-oracle sweep (every
+    # USER_BINS entry found by name from the live guest) and the two-program
+    # handoff (where prints /bin/where, certutil then opens exactly that path)
+    # are asserted in the scenario; these are the lines the claim turns on - a
+    # printed path, the honest INFO for a name the store does not have, and
+    # the three exit-2 refusals (no criteria, a switch, a path-shaped pattern).
+    "where":     ["/bin/certutil", "shell: where exited with 0",
+                  "INFO: Could not find files for the given pattern(s).",
+                  "shell: where exited with 1",
+                  "ERROR: Missing search criteria.",
+                  "ERROR: Invalid switch - /r.",
+                  "ERROR: Invalid pattern - bin/hello",
+                  "shell: where exited with 2",
+                  "certutil: sha256"],
     # v0.1.36: a real ZIP unpacked, folder names included. The strict byte/digest
     # comparisons are in the scenario; these are the lines the claim turns on -
     # the archive read whole, each safe member out byte for byte (flat and nested,

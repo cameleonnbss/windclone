@@ -349,6 +349,7 @@ static void cmd_help(void)
     put_line("  FIND /I /N <CH> <F>  CHERCHE UN TEXTE (COMME CMD)");
     put_line("  SORT /R <F>   TRIE LES LIGNES DUN FICHIER (COMME CMD)");
     put_line("  CERTUTIL -HASHFILE <F>  EMPREINTE SHA256 DUN FICHIER (COMME CMD)");
+    put_line("  WHERE <NOM>    MONTRE LE CHEMIN DUN PROGRAMME (COMME CMD)");
     put_line("  NOTE <NOM>     EDITE /TMP/<NOM> (OU <NOM>.TXT)");
     put_line("  VIEW <FICHIER> AFFICHE UN FICHIER EN COULEUR");
     put_line("  PKG            MONTRE LA PAGE RECUPEREE /NET/FETCHED");

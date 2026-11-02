@@ -639,6 +639,22 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       fc, the flag grammar is `/` + one letter exactly, so a path is never
       mistaken for a switch.
 
+- [x] **`/bin/where` — cmd's finder, the path proven actionable (v0.1.47).**
+      The shell resolves names to /bin silently; `where` says so out loud, the
+      way cmd does: full paths, printed raw, because the next command is meant
+      to consume them. One scope exists here — /bin — so it walks the archive
+      through the same `getdirent` enumeration the start menu performs, matching
+      exactly and case-insensitively. The oracle is the build system: the
+      harness reads `USER_BINS` from the Makefile and requires the live guest to
+      find every program by name, then hands `where`'s own printed path to
+      `certutil`, which digests it — the path is actionable, not decorative.
+      Unknown names answer with Windows' own `INFO: Could not find files for
+      the given pattern(s).` and exit 1; a hit among mixed criteria exits 0;
+      exit 2 refuses no criteria, a switch (a flat store will not fake `/R`),
+      and a path-shaped pattern. Growing /bin to thirty programs also tightened
+      the menu's row metrics so every entry still paints (`hidden 0` is a CI
+      requirement, not a wish).
+
 - [x] **`/bin/certutil` — cmd's hash tool, the digest cross-checked (v0.1.46).**
       `fc`, `find` and `sort` answer questions about a file's contents; the
       question a *downloaded* file raises is whether it is the exact file the

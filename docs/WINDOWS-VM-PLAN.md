@@ -4,9 +4,9 @@
 Windows does, with `pip install rich` working, on a desktop that behaves like a
 daily driver.
 
-**Where WindClone is today (v0.1.46):** a from-scratch x86-64 kernel on Limine,
+**Where WindClone is today (v0.1.47):** a from-scratch x86-64 kernel on Limine,
 its own ELF64 loader, its own int `0x80` ABI of fourteen numbered syscalls, a
-libc-less userland of 29 freestanding C programs, a tmpfs store, an e1000 driver
+libc-less userland of 30 freestanding C programs, a tmpfs store, an e1000 driver
 with an ICMP/UDP/DHCP/TCP/HTTP stack on top of it, a compositor with per-cell
 colour and a pixel channel, an inflate decoder, and headless QEMU tests that
 compare bytes rather than impressions.
@@ -185,6 +185,17 @@ So the honest ladder, in the order each rung becomes testable:
       digit match. Only `sha256` is offered; another algorithm word is refused, and
       a broken switch, a missing file, a relative path, or an unreadable name each
       exit 2.
+- [x] **`/bin/where` — cmd's finder, the path proven actionable** (v0.1.47).
+      `where <name>` walks the archive through the same `getdirent` enumeration
+      the start menu performs and prints each match's full path raw, the form
+      `open()` takes — because a path is meant to be consumed by the next
+      command. The oracle is the build system: the harness reads `USER_BINS`
+      from the Makefile and requires the live guest to find every program by
+      name, then hands `where`'s own printed path to `certutil`, which digests
+      it. Unknown names get Windows' own `INFO: Could not find files for the
+      given pattern(s).` and exit 1; a hit among misses exits 0; no criteria, a
+      switch, and a path-shaped pattern each exit 2. Matching is exact and
+      case-insensitive, as cmd's file matching has always been.
 - [ ] **`CD`, `MKDIR`** as built-ins, so the prompt behaves like
       `cmd` for the remaining verbs a person actually types.
 - [ ] **a small Python-language interpreter** (`/bin/python`) for pure-Python

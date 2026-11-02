@@ -744,6 +744,25 @@ On boot the kernel:
    same `certutil` you reach for to verify this project's own ISO, turned back
    into a program the ISO ships.
 
+50. **`WHERE <NOM>` — cmd's finder, the path proven actionable (v0.1.47)**.
+   The shell resolves a typed word to `/bin/<name>` silently, so "what file
+   answers this name?" had never had an answer. cmd gives it with `where`: the
+   full path of every match, printed raw — those lines are meant to be fed to
+   the next command, not admired. This store has one scope, /bin, so the search
+   is honest rather than simplified: it walks the archive through the same
+   `getdirent` syscall the start menu enumerates on every click, matches the
+   name exactly and case-insensitively (as cmd's file matching has always done),
+   and prints the path in the form `open()` takes. The claim is structural, so
+   the test's oracle is the build system itself: the harness reads `USER_BINS`
+   out of the Makefile and requires the live guest to find *every* program by
+   name. Then two programs close the loop: `where` finds itself, and `certutil`
+   is handed that self-same printed path and digests it — a decorative path
+   would be refused by the hasher. An unknown name is reported, not guessed
+   (`INFO: Could not find files for the given pattern(s).`, exit 1, exactly
+   where.exe's answer), a hit among misses still wins (exit 0), and the refusals
+   exit 2: no criteria, a switch this one-scope store refuses to fake, and a
+   path handed to a tool that searches names.
+
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
 triple-faulting.

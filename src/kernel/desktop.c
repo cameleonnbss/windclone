@@ -845,23 +845,22 @@ static void draw_window(const struct window *w, int focus)
 
 #define MENU_X        START_X
 #define MENU_W        236
-#define MENU_HEADER_H 30
-#define MENU_ITEM_H   22
-#define MENU_FOOTER_H 26
-#define MENU_GAP      6          /* air between the panel and the taskbar */
+#define MENU_HEADER_H 26
+#define MENU_ITEM_H   20
+#define MENU_FOOTER_H 22
+#define MENU_GAP      2          /* air between the panel and the taskbar */
 #define MENU_MAX      32         /* rows the array can hold; menu_scan() also
                                   * caps that by what the screen has room for.
                                   * It has to stay above the number of programs
                                   * in /bin: tools/local-test.sh requires a row
                                   * for every USER_BINS entry and `hidden 0`, so
                                   * a menu that quietly drops a program is a
-                                  * failing test rather than a silent one. On a
-                                  * 1024x768 panel the screen itself fits 29 rows
-                                  * of MENU_ITEM_H, and menu_scan() will never
-                                  * draw more than the screen can reach — this
-                                  * ceiling only bounds the array, with slots
-                                  * spare so the next viewer still needs no
-                                  * desktop change. */
+                                  * failing test rather than a silent one. After
+                                  * the v0.1.47 tightening of the row metrics the
+                                  * screen itself fits 32 rows of MENU_ITEM_H, so
+                                  * ceiling and screen agree for now; menu_scan()
+                                  * still never draws more than the screen can
+                                  * reach, and this bound only sizes the array. */
 #define MENU_NAME_MAX 24
 
 /* Not a list written in this file: every row is a /bin entry of the initrd,

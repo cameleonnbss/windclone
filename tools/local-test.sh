@@ -990,6 +990,16 @@ echo '==> file hash (certutil sha256 cross-check, multi-block, refusals)'
 python3 tools/qemu-desktop.py windclone.iso certutil \
     || fail 'certutil printed a digest that does not answer to hashlib, or its exit code lied'
 
+# v0.1.47: /bin/where — cmd's answer to "what file answers this name?". The
+# oracle is the Makefile: every USER_BINS entry must be found by name from the
+# live guest, and the path printed for `where` itself must be openable by
+# certutil - so the printed paths are actionable, not decorative. Exact
+# matching, the INFO-with-exit-1 report, and the three exit-2 refusals close
+# the claim.
+echo '==> path finder (where finds every /bin entry, refuses to guess)'
+python3 tools/qemu-desktop.py windclone.iso where \
+    || fail 'where lost a program the Makefile says exists, or its exit code lied'
+
 # v0.1.36: a real ZIP archive unpacked, folder names included.
 # /bin/unzip reads the committed specimen whole and extracts every safe entry
 # byte for byte - flat and nested, stored and deflated (the deflate path runs
