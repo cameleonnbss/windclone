@@ -1010,6 +1010,17 @@ echo '==> hardware clock date (seeded CMOS, weekday cross-check, refusals)'
 python3 tools/qemu-desktop.py windclone.iso date \
     || fail 'date did not answer the seeded clock exactly, or its exit code lied'
 
+# v0.1.49: /bin/time — date's twin on the same syscall, and the claim is that
+# the answer is LIVE rather than merely well-formatted. The boot log holds the
+# chip's own decoded instant and the guest's uptime, so the scenario requires
+# the printed time to sit between the seeded instant and that instant plus the
+# seconds the machine has been up: a program replaying the boot line fails the
+# upper bound, and so would a clock running fast. The typed refusal also proves
+# a shifted ':' reaches the guest, because the program echoes it back.
+echo '==> hardware clock time (live advance bounded by uptime, refusals)'
+python3 tools/qemu-desktop.py windclone.iso time \
+    || fail 'time did not answer the live clock within the uptime window, or its exit code lied'
+
 # v0.1.36: a real ZIP archive unpacked, folder names included.
 # /bin/unzip reads the committed specimen whole and extracts every safe entry
 # byte for byte - flat and nested, stored and deflated (the deflate path runs

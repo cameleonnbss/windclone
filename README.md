@@ -778,6 +778,23 @@ On boot the kernel:
    ring-3 has no ports for — so the input is echoed back and refused with exit 1
    rather than silently dropped, and an unknown switch earns cmd's builtin
    answer: `Invalid parameter - x`.
+52. **`TIME` — cmd's clock question, and the answer proved LIVE (v0.1.49)**.
+   `date`'s twin on the same syscall, with cmd's two shapes: `time /t` answers
+   the short form and stops, bare `time` answers the long form and then prompts
+   `Enter the new time:`. The interesting claim is not the format, it is that
+   the digits are moving. The boot log already holds the chip's own decoded
+   instant (`rtc: hardware clock 05:37:16`) and the guest's uptime, so the test
+   requires the program's answer to sit inside that window — never earlier than
+   the seed, never later than the seed plus the seconds this machine has been up.
+   A program replaying the boot line fails the upper bound; a clock running fast
+   fails it too. What is deliberately *missing* is cmd's fractional hundredths:
+   a real cmd prints `23:17:18.57` because Windows keeps time far finer than the
+   CMOS chip, and this clock is the chip — so the field is absent rather than
+   padded with a fabricated `.00`. Setting the time stays ring-0 business: the
+   typed input is echoed back and refused with exit 1 (which also proves a
+   shifted `:` reaches the guest, since the colons in the log came from the
+   scancode the kernel decoded), and a switch that is not `/t` is
+   `Invalid parameter - x`.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

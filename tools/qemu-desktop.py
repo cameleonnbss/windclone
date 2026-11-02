@@ -224,9 +224,15 @@ RESIZE_EDGE, MIN_W, MIN_H = 5, 200, 120
 # raw character is not a qcode ('QEMU refused the semicolon as ";"'), "semicolon"
 # is, and it is not in HMP_OK either way, so it goes through the channel that
 # answers. map_plain[0x27] = ';' decodes it on the kernel side.
+#
+# ':' joins them for the same reason: /bin/time is typed `10:11:12`, and the
+# kernel already decodes map_shift[0x27] = ':'. QEMU spells the chord
+# "shift-semicolon" - a name with a dash, so it goes through QMP like every
+# other chord rather than trusting `sendkey` to stay silent about a key it
+# never sends.
 KEYMAP = {" ": "spc", "\n": "ret", "/": "slash", ".": "dot", "-": "minus",
           "_": "shift-minus", "=": "equal", "%": "shift-5", "^": "shift-6",
-          "@": "shift-2", ";": "semicolon"}
+          "@": "shift-2", ";": "semicolon", ":": "shift-semicolon"}
 # Key names the *human* monitor has been proved to deliver: the letters and
 # digits every scenario has always typed, plus the unshifted spellings KEYMAP
 # maps to. Anything else goes through QMP, because `sendkey` accepts an unknown
@@ -2914,6 +2920,102 @@ def scenario_actions(sc, mon, W, H):
         mon.type_text("date /x\n")
         base, _ = wait_serial_after(base, r"Invalid parameter - x")
         base, _ = wait_serial_after(base, r"shell: date exited with 1")
+    elif sc == "time":
+        # v0.1.49: /bin/time, date's twin on the same syscall. The seed makes
+        # the ANSWER checkable, but the interesting claim is that the answer is
+        # LIVE: the boot log says what the chip decoded (`rtc: hardware clock
+        # HH:MM:SS`) and the log also says how many seconds the machine has been
+        # up, so the program's time must sit between the seeded instant and that
+        # instant plus the uptime. A program replaying the boot line would fail
+        # the upper bound as soon as the guest had been up longer than the slack,
+        # and a clock running fast fails it too - so this pins the rate, not
+        # just the digits. The hour the seed guarantees is checked through the
+        # same window rather than hardcoded, which is what makes the assertion
+        # survive a seeded clock that is not 05.
+        text = read_log()
+        rm = re.search(r"rtc: hardware clock (\d\d):(\d\d):(\d\d)", text)
+        if not rm:
+            raise SystemExit("no boot-time rtc reading to anchor the clock to")
+
+        def secs_of(h, mi, s=0):
+            return int(h) * 3600 + int(mi) * 60 + int(s)
+
+        anchor = secs_of(rm.group(1), rm.group(2), rm.group(3))
+
+        def live(secs, what, gran=1):
+            """The chip's reading must have advanced, at the chip's rate.
+            `gran` is the field width the program printed: the short form is
+            HH:MM and truncates the seconds away, so comparing it to the second
+            would call 05:37 earlier than the seeded 05:37:16 - a rounding
+            artifact, not a wrong clock. Rounded to the same unit on both sides,
+            the window still pins the rate."""
+            up = 0
+            for u in re.findall(r"uptime: (\d+)s", read_log()):
+                up = max(up, int(u))
+            lo, hi, got = anchor // gran, (anchor + up + 5) // gran, secs // gran
+            if got < lo:
+                raise SystemExit("%s printed unit %d, before the clock was "
+                                 "seeded at unit %d" % (what, got, lo))
+            if got > hi:
+                raise SystemExit("%s printed unit %d, past unit %d - the seed "
+                                 "plus the %d s this guest has been up: a clock "
+                                 "that runs fast is as wrong as one that lies"
+                                 % (what, got, hi, up))
+
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)  # raise the terminal
+
+        # The short form, alone on its line: newline-anchored because
+        # wait_serial_after has no MULTILINE, so ^ and $ would only ever match
+        # the edges of the whole buffer and a bare "05:37" inside a longer line
+        # would pass for it.
+        mark = len(read_log())
+        mon.type_text("time /t\n")
+        # The spawn trace first: it bounds the search to output produced after
+        # this command started, so a bare NN:NN can only be the program's own
+        # short answer and not some older line the log happens to hold.
+        mark, _ = wait_serial_after(mark, r"proc: spawned /bin/time")
+        mark, m = wait_serial_after(mark, r"\n(\d\d):(\d\d)\n")
+        live(secs_of(m.group(1), m.group(2)), "time /t", gran=60)
+        mark, _ = wait_serial_after(mark, r"shell: time exited with 0")
+
+        # The long form and the prompt, then cmd's own exit-0 answer to an
+        # empty Enter: nothing asked, nothing changed, nothing invented - the
+        # seconds field must be there, which is the field a two-digit-only
+        # read could not supply.
+        mark = len(read_log())
+        mon.type_text("time\n")
+        mark, m = wait_serial_after(mark, r"The current time is: (\d\d):(\d\d):(\d\d)")
+        live(secs_of(m.group(1), m.group(2), m.group(3)), "time")
+        mark, _ = wait_serial_after(mark, r"Enter the new time:")
+        mon.type_text("\n")
+        mark, _ = wait_serial_after(mark, r"shell: time exited with 0")
+
+        # Typing a time is the interesting refusal, and it doubles as the proof
+        # that a shifted ':' reaches the guest at all: the program echoes the
+        # input back, so the colons in the log are the kernel's own report of
+        # the scancode the chord delivered.
+        mark = len(read_log())
+        mon.type_text("time\n")
+        mark, _ = wait_serial_after(mark, r"Enter the new time:")
+        mon.type_text("10:11:12\n")
+        mark, _ = wait_serial_after(mark, r"time: refusing to set .10:11:12.")
+        mark, _ = wait_serial_after(mark, r"shell: time exited with 1")
+
+        # The same refusal as a one-shot command line - cmd would take `25:99`
+        # as an invalid time and loop; this says the clock cannot be written at
+        # all, which is the truth of a ring-3 program - and cmd's builtin
+        # answer to a switch that is not /t.
+        mark = len(read_log())
+        mon.type_text("time 25:99\n")
+        mark, _ = wait_serial_after(
+            mark, r"time: setting the time is not supported \(read-only clock\)")
+        mark, _ = wait_serial_after(mark, r"shell: time exited with 1")
+        mark = len(read_log())
+        mon.type_text("time /x\n")
+        mark, _ = wait_serial_after(mark, r"Invalid parameter - x")
+        mark, _ = wait_serial_after(mark, r"shell: time exited with 1")
     elif sc == "unzip":
         # v0.1.36: /bin/unzip unpacks a real archive the way Windows does, folder
         # names included. The archive is the single source of truth: the test
@@ -3369,6 +3471,18 @@ MARKERS = {
                   "Enter the new date (mm-dd-yy)",
                   "date: refusing to set", "shell: date exited with 1",
                   "date: setting the date is not supported",
+                  "Invalid parameter - x"],
+    # v0.1.49: /bin/time, date's twin. The live-clock window (seeded instant <=
+    # printed instant <= seeded instant + uptime + slack) is computed in the
+    # scenario, which is what turns "plausible digits" into a rate check; these
+    # are the lines the claim turns on - the short form, the long form and its
+    # prompt, the echoed refusal of a typed time (colons included, which is the
+    # shifted-semicolon chord arriving in the guest), the one-shot refusal and
+    # cmd's answer to a switch that is not /t.
+    "time":      ["The current time is:", "shell: time exited with 0",
+                  "Enter the new time:", "time: refusing to set",
+                  "shell: time exited with 1",
+                  "time: setting the time is not supported",
                   "Invalid parameter - x"],
     # v0.1.36: a real ZIP unpacked, folder names included. The strict byte/digest
     # comparisons are in the scenario; these are the lines the claim turns on -

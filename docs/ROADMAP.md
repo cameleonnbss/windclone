@@ -639,6 +639,25 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       fc, the flag grammar is `/` + one letter exactly, so a path is never
       mistaken for a switch.
 
+- [x] **`/bin/time` — cmd's clock, proved to be advancing (v0.1.49).**
+      date's twin on the same syscall and the same two shapes: `time /t` prints
+      the short form and stops, bare `time` prints the long form and prompts
+      `Enter the new time:`. The claim worth testing is that the digits are
+      live, so the window comes from the log rather than from the test's own
+      opinion: the boot line says what the chip decoded and the uptime lines
+      say how long the guest has been running, and the program's answer must
+      fall between the seed and the seed plus that elapsed time. A program
+      replaying the boot line fails the top of the window; a clock running fast
+      fails it too. The short form is compared at minute granularity because
+      HH:MM truncates the seconds away — a rounding artifact, not a wrong clock,
+      and the test says which it is checking. cmd's fractional hundredths are
+      absent on purpose: this clock is the chip, and `.00` would be an invented
+      precision. A typed time is echoed back and refused with exit 1 (which also
+      proves the shifted-`;` chord lands, since the colons are in the log), and
+      a switch that is not `/t` is `Invalid parameter - x`. /bin now holds 32
+      programs, exactly the number of rows the start menu has room for — the
+      next one needs the metrics tightened again, and CI will say so.
+
 - [x] **`/bin/date` — cmd's clock through SYS_RTC, the 15th syscall (v0.1.48).**
       The tray shows the time; a program asks for the date. `date /t` prints
       cmd's exact en-US line, straight from the CMOS chip through the fifteenth

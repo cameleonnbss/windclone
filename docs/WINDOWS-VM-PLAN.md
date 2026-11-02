@@ -4,9 +4,9 @@
 Windows does, with `pip install rich` working, on a desktop that behaves like a
 daily driver.
 
-**Where WindClone is today (v0.1.48):** a from-scratch x86-64 kernel on Limine,
+**Where WindClone is today (v0.1.49):** a from-scratch x86-64 kernel on Limine,
 its own ELF64 loader, its own int `0x80` ABI of fifteen numbered syscalls, a
-libc-less userland of 31 freestanding C programs, a tmpfs store, an e1000 driver
+libc-less userland of 32 freestanding C programs, a tmpfs store, an e1000 driver
 with an ICMP/UDP/DHCP/TCP/HTTP stack on top of it, a compositor with per-cell
 colour and a pixel channel, an inflate decoder, and headless QEMU tests that
 compare bytes rather than impressions.
@@ -208,6 +208,20 @@ So the honest ladder, in the order each rung becomes testable:
       refused with exit 1, because writing CMOS is ring-0 work this border
       denies on purpose. Anything but `/t` after a slash is answered
       `Invalid parameter - x`, the way cmd's builtins answer one.
+- [x] **`/bin/time` — cmd's clock, proved to be advancing** (v0.1.49).
+      `time /t` answers the short form and stops; bare `time` answers the long
+      form and prompts `Enter the new time:`, exactly cmd's two shapes. The
+      claim is that the answer is *live*, and the window is built from the log
+      instead of from the test's opinion: the boot line holds the chip's own
+      decoded instant and the uptime lines hold how long the guest has run, so
+      the program must land between the seed and the seed plus that elapsed
+      time — a program replaying the boot line fails the top bound, and so does
+      a clock running fast. The short form is checked at minute granularity
+      because HH:MM truncates seconds away. cmd's fractional hundredths are
+      missing on purpose: the chip answers once a second and `.00` would be an
+      invented precision. A typed time comes back echoed and refused with exit 1
+      (writing the chip is ring-0 work), which also proves a shifted `:` reaches
+      the guest; a switch that is not `/t` is `Invalid parameter - x`.
 - [ ] **`CD`, `MKDIR`** as built-ins, so the prompt behaves like
       `cmd` for the remaining verbs a person actually types.
 - [ ] **a small Python-language interpreter** (`/bin/python`) for pure-Python
