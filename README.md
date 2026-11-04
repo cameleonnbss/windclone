@@ -795,6 +795,26 @@ On boot the kernel:
    shifted `:` reaches the guest, since the colons in the log came from the
    scancode the kernel decoded), and a switch that is not `/t` is
    `Invalid parameter - x`.
+53. **`%DATE%` and `%TIME%` — the two variables cmd's clock writes itself
+   (v0.1.50)**. Every other variable is stored and then read; these two are
+   produced at the moment the shell asks, which is why a script that prints
+   `%TIME%` twice gets two different answers. The kernel's RTC driver grew two
+   formatters (`rtc_fmt_date`, `rtc_fmt_time`) and the shell's two `%NAME%`
+   expanders — the batch reader's and the prompt's — now consult the clock before
+   the environment, so `%date%`, `%Date%` and `%DATE%` fold to one dynamic name
+   and `SET DATE=nonsense` cannot overrule the chip, exactly as on a real cmd.
+   Nothing new runs and no row is added to the Start menu: this is the shell
+   answering, on both paths a line can arrive on. The test is where the two halves
+   of the claim get pinned. The date is demanded digit-for-digit (seeded CMOS,
+   weekday recomputed with Python's calendar) and then compared to what `/bin/date`
+   prints for the same instant — a second copy of the century rule and the weekday
+   arithmetic exists in the kernel now, and requiring the two strings to agree is
+   what makes that duplication safe rather than latent. The time is only bounded
+   (seed ≤ answer ≤ seed + uptime), because a "dynamic" variable that never
+   changed would be a stored copy wearing the name of a clock. And because a typed
+   reference now always expands, cmd's caret is load-bearing: writing a script
+   that contains `%time%` means typing `^%time%`, and the byte count the writer
+   reports is the proof the escape landed.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

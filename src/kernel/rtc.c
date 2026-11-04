@@ -187,3 +187,88 @@ void rtc_date(int *dd, int *mo, int *yy)
     if (mo) *mo = rmonth;
     if (yy) *yy = ryear;
 }
+
+/* cmd's two dynamic variables, written by the clock itself rather than by
+ * whoever asks it. %DATE% and %TIME% are stored nowhere: the shell calls these
+ * each time it expands one, so a script that prints the line twice gets two
+ * different answers, which is the only honest meaning of "dynamic". Both
+ * return the length written, or 0 when no chip has ever answered — a caller
+ * that prints nothing beats one that prints 01/01/1970 for a clock that never
+ * spoke.
+ *
+ * The shapes are cmd's own en-US answers: "Fri 08/21/2026" and "05:37:16" —
+ * fourteen characters and eight, so a caller that hands a buffer shorter than
+ * the answer asked for (cap below 15, or below 9) gets a refusal rather than an
+ * overflow: the formatters would rather print nothing than write past a stack
+ * frame. The fractional hundredths a real cmd appends are absent for the reason
+ * /bin/time states: this clock is the chip, and the chip answers once a
+ * second.
+ *
+ * The century rule is the one /bin/date declares — 00..69 is 20xx, 70..99 is
+ * 19xx — written a second time on purpose. The chip stores two digits and no
+ * syscall formats text, so every consumer that wants a weekday has to pick a
+ * century; the test is what makes the duplication safe, because it requires
+ * the kernel's %DATE% and /bin/date's line to be the same string, and two
+ * copies that drift apart would fail it loudly. */
+static int weekday_of(int y, int m, int d)
+{
+    static const int t[12] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+
+    if (m < 3)
+        y -= 1;
+    return (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;
+}
+
+static void pad2(char *out, int *n, int v)
+{
+    out[(*n)++] = (char)('0' + v / 10);
+    out[(*n)++] = (char)('0' + v % 10);
+}
+
+int rtc_fmt_time(char *out, int cap)
+{
+    int h, m, s;
+    int n = 0;
+
+    rtc_now(&h, &m, &s);
+    if (h < 0 || m < 0 || s < 0 || cap < 9)
+        return 0;
+
+    pad2(out, &n, h);
+    out[n++] = ':';
+    pad2(out, &n, m);
+    out[n++] = ':';
+    pad2(out, &n, s);
+    out[n] = '\0';
+    return n;
+}
+
+int rtc_fmt_date(char *out, int cap)
+{
+    static const char *const days[7] = {
+        "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
+    };
+    int d, mo, y2, n = 0, year;
+
+    rtc_now(NULL, NULL, NULL);        /* refresh, so the date is today's */
+    rtc_date(&d, &mo, &y2);
+    if (d < 0 || mo < 0 || y2 < 0 || cap < 15)
+        return 0;
+
+    year = y2 <= 69 ? 2000 + y2 : 1900 + y2;
+    for (const char *p = days[weekday_of(year, mo, d)]; *p; p++)
+        out[n++] = *p;
+    out[n++] = ' ';
+    pad2(out, &n, mo);
+    out[n++] = '/';
+    pad2(out, &n, d);
+    out[n++] = '/';
+    out[n++] = (char)('0' + year / 1000);
+    out[n++] = (char)('0' + (year / 100) % 10);
+    out[n++] = (char)('0' + (year / 10) % 10);
+    out[n++] = (char)('0' + year % 10);
+    out[n] = '\0';
+    return n;
+}
+
+/* end of rtc.c — the two formatters above are cmd's %DATE% and %TIME%. */

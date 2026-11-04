@@ -3016,6 +3016,156 @@ def scenario_actions(sc, mon, W, H):
         mon.type_text("time /x\n")
         mark, _ = wait_serial_after(mark, r"Invalid parameter - x")
         mark, _ = wait_serial_after(mark, r"shell: time exited with 1")
+    elif sc == "dynvars":
+        # v0.1.50: cmd's two dynamic variables. %DATE% and %TIME% are stored
+        # nowhere - the clock answers each time the shell asks - so this scenario
+        # tests the expander and not a program, on both paths a line can arrive
+        # on: the keyboard and a script. The date is exact (the CMOS is seeded
+        # and the weekday is recomputed here with Python's own calendar); the
+        # time is only bounded (seed .. seed + uptime), because a dynamic
+        # variable that answered the same HH:MM:SS forever would be a stored copy
+        # wearing the name of a clock, and that is the one claim a seed cannot
+        # make. The sharp part is precedence: SET may write a variable called
+        # TIME on a real cmd and changes nothing, because the dynamic name wins,
+        # so every step below is that same test through a different door.
+        import datetime
+
+        seeded = datetime.date(2026, 8, 21)
+        want_date = "%s 08/21/2026" % seeded.strftime("%a")
+
+        text = read_log()
+        rm = re.search(r"rtc: hardware clock (\d\d):(\d\d):(\d\d)", text)
+        if not rm:
+            raise SystemExit("no boot-time rtc reading to anchor the clock to")
+
+        def secs_of(h, mi, s=0):
+            return int(h) * 3600 + int(mi) * 60 + int(s)
+
+        anchor = secs_of(rm.group(1), rm.group(2), rm.group(3))
+
+        def live(secs, what):
+            """Same window as the time scenario's check, second for second:
+            every answer here is a full HH:MM:SS, so nothing is truncated and
+            nothing needs rounding."""
+            up = 0
+            for u in re.findall(r"uptime: (\d+)s", read_log()):
+                up = max(up, int(u))
+            if secs < anchor:
+                raise SystemExit("%s printed %d s, before the clock was seeded "
+                                 "at %d s" % (what, secs, anchor))
+            if secs > anchor + up + 5:
+                raise SystemExit("%s printed %d s, past %d s - the seed plus the "
+                                 "%d s this guest has been up. A dynamic variable "
+                                 "that runs fast is as wrong as one that lies"
+                                 % (what, secs, anchor + up + 5, up))
+
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+
+        # The prompt path. The row the kernel writes is the RESOLVED line, so
+        # the letters inside it are the formatter's own output and not something
+        # the harness typed.
+        mark = len(read_log())
+        mon.type_text("echo %date%\n")
+        mark, m = wait_serial_after(
+            mark, r"shell: prompt exec 'echo ((Sun|Mon|Tue|Wed|Thu|Fri|Sat) "
+                  r"(\d\d)/(\d\d)/(\d{4}))'")
+        got_date = m.group(1)
+        if got_date != want_date:
+            raise SystemExit("%%DATE%% expanded to '%s', the seeded clock says "
+                             "'%s'" % (got_date, want_date))
+        mark, _ = wait_serial_after(mark, r"shell: running 'echo' from the prompt")
+
+        # The duplication check the kernel's own comment promises: /bin/date
+        # formats the same instant in ring 3 from the syscall's three integers,
+        # with its own century rule and its own weekday arithmetic. Two copies of
+        # a rule are only safe if something forces them to agree, so the two
+        # strings are compared to each other rather than to a fixture - a drift
+        # between them shows up here as two different answers to one question.
+        mark = len(read_log())
+        mon.type_text("date /t\n")
+        mark, m = wait_serial_after(
+            mark, r"The current date is: ((Sun|Mon|Tue|Wed|Thu|Fri|Sat) "
+                  r"\d\d/\d\d/\d{4})")
+        if m.group(1) != got_date:
+            raise SystemExit("/bin/date says '%s' and the shell's %%DATE%% says "
+                             "'%s': the century rule or the weekday arithmetic "
+                             "drifted between the two copies"
+                             % (m.group(1), got_date))
+
+        # The time is live, on the prompt path first.
+        mark = len(read_log())
+        mon.type_text("echo %time%\n")
+        mark, m = wait_serial_after(
+            mark, r"shell: prompt exec 'echo (\d\d):(\d\d):(\d\d)'")
+        live(secs_of(m.group(1), m.group(2), m.group(3)), "the prompts %TIME%")
+
+        # And it keeps being live after something tried to pin it. 01:02:03 sits
+        # hours below the seeded instant, so a shell that preferred the stored
+        # value would fail the window as loudly as the literal comparison.
+        mark = len(read_log())
+        mon.type_text("set time=01:02:03\n")
+        mark, _ = wait_serial_after(mark, r"shell: prompt set TIME=01:02:03")
+        mark = len(read_log())
+        mon.type_text("echo %time%\n")
+        mark, m = wait_serial_after(
+            mark, r"shell: prompt exec 'echo (\d\d):(\d\d):(\d\d)'")
+        if (m.group(1), m.group(2), m.group(3)) == ("01", "02", "03"):
+            raise SystemExit("%%TIME%% expanded to the value SET stored; the "
+                             "clock must win, exactly as it does on a real cmd")
+        live(secs_of(m.group(1), m.group(2), m.group(3)), "the prompts %TIME%")
+
+        # The batch path, and the caret that makes a script writable at all: a
+        # typed `save ... echo %time%` now expands at the prompt - correctly,
+        # because that is what cmd does - so the reference has to be escaped to
+        # reach the file as a reference. The byte count is the proof the escape
+        # landed: an already-expanded file would be three bytes longer.
+        script_d = "set time=00:00:00\necho %time%\n"
+        mon.type_text("save script d set time=00:00:00 nl echo ^%time%\n")
+        mark, m = wait_serial_after(mark, r"save: wrote (\d+) bytes /tmp/d\.bat")
+        if int(m.group(1)) != len(script_d):
+            raise SystemExit("the script landed as %s bytes, want %d (%r): the "
+                             "caret did not protect the reference"
+                             % (m.group(1), len(script_d), script_d))
+        mark = len(read_log())
+        mon.type_text("bat d\n")
+        mark, _ = wait_serial_after(mark, r"shell: batch set TIME=00:00:00")
+        mark, m = wait_serial_after(
+            mark, r"shell: batch exec 'echo (\d\d):(\d\d):(\d\d)'")
+        if (m.group(1), m.group(2), m.group(3)) == ("00", "00", "00"):
+            raise SystemExit("the script's own SET TIME beat the clock on the "
+                             "batch path")
+        live(secs_of(m.group(1), m.group(2), m.group(3)), "the batch %TIME%")
+
+        # The date on the batch path too, byte for byte, so the expander is not
+        # proven on one variable alone.
+        script_e = "echo %date%\n"
+        mon.type_text("save script e echo ^%date%\n")
+        mark, m = wait_serial_after(mark, r"save: wrote (\d+) bytes /tmp/e\.bat")
+        if int(m.group(1)) != len(script_e):
+            raise SystemExit("the date script landed as %s bytes, want %d"
+                             % (m.group(1), len(script_e)))
+        mark = len(read_log())
+        mon.type_text("bat e\n")
+        mark, _ = wait_serial_after(
+            mark, r"shell: batch exec 'echo " + want_date + r"'")
+        _, ran = wait_serial_after(
+            mark, r"shell: batch ran (\d+) commands from /tmp/e\.bat")
+        if int(ran.group(1)) != 1:
+            raise SystemExit("the date script ran %s commands, want 1"
+                             % ran.group(1))
+
+        # The escape still escapes: `echo ^%date%` at the prompt is the caret
+        # consuming itself, so what gets dispatched carries a literal reference
+        # that never expanded. That is the one behaviour a person writing a real
+        # percent needs, and the clock moving in must not take it away.
+        mark = len(read_log())
+        mon.type_text("echo ^%date%\n")
+        mark, _ = wait_serial_after(mark, r"shell: prompt exec 'echo %date%'")
+        if count_serial(r"shell: prompt exec 'echo " + want_date + r"'") != 1:
+            raise SystemExit("the caret stopped protecting %DATE%: a second line "
+                             "expanded where only the first one should have")
     elif sc == "unzip":
         # v0.1.36: /bin/unzip unpacks a real archive the way Windows does, folder
         # names included. The archive is the single source of truth: the test
@@ -3484,6 +3634,17 @@ MARKERS = {
                   "shell: time exited with 1",
                   "time: setting the time is not supported",
                   "Invalid parameter - x"],
+    # v0.1.50: cmd's dynamic %DATE% and %TIME%, answered by the clock at the
+    # moment the shell asks. The exact date, the uptime-bounded time and the
+    # SET-cannot-overrule precedence are all asserted in the scenario; these are
+    # the lines the claim turns on - a resolved typed line carrying the
+    # formatters own output, a resolved script line doing the same, the stored
+    # variable that was written and then ignored, and the script that reached the
+    # file with its reference still a reference.
+    "dynvars":   ["shell: prompt exec", "shell: batch exec",
+                  "shell: prompt set TIME=01:02:03",
+                  "shell: batch set TIME=00:00:00",
+                  "save: wrote", "shell: batch ran"],
     # v0.1.36: a real ZIP unpacked, folder names included. The strict byte/digest
     # comparisons are in the scenario; these are the lines the claim turns on -
     # the archive read whole, each safe member out byte for byte (flat and nested,

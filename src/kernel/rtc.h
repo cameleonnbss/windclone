@@ -30,4 +30,13 @@ void rtc_now(int *hh, int *mm, int *ss);
  * fact. */
 void rtc_date(int *dd, int *mo, int *yy);
 
+/* cmd's two dynamic variables, formatted by the clock itself. Each writes its
+ * answer ("Fri 08/21/2026", "05:37:16") into out and returns the length, or 0
+ * when no chip has ever answered or cap is shorter than the answer needs (15
+ * for the date, 9 for the time) — a caller that prints nothing is honest, one
+ * that prints 01/01/1970 for a silent chip is not. Read fresh each call, which
+ * is what makes them dynamic rather than a copy of a variable. */
+int rtc_fmt_time(char *out, int cap);
+int rtc_fmt_date(char *out, int cap);
+
 #endif

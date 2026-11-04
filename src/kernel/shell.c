@@ -32,6 +32,7 @@
 #include "version.h"
 #include "desktop.h"
 #include "net.h"
+#include "rtc.h"
 
 #define SHELL_ROWS 17
 #define SHELL_COLS 62
@@ -352,6 +353,7 @@ static void cmd_help(void)
     put_line("  WHERE <NOM>    MONTRE LE CHEMIN DUN PROGRAMME (COMME CMD)");
     put_line("  DATE [/T]      MONTRE LA DATE DU CMOS (COMME CMD)");
     put_line("  TIME [/T]      MONTRE LHEURE DU CMOS (COMME CMD)");
+    put_line("  %DATE% %TIME%  DONNES PAR LHORLOGE A CHAQUE FOIS (CMD)");
     put_line("  NOTE <NOM>     EDITE /TMP/<NOM> (OU <NOM>.TXT)");
     put_line("  VIEW <FICHIER> AFFICHE UN FICHIER EN COULEUR");
     put_line("  PKG            MONTRE LA PAGE RECUPEREE /NET/FETCHED");
@@ -1353,6 +1355,25 @@ static int env_set(const char *name, int nlen, const char *val)
     return 1;
 }
 
+/* cmd keeps two variables that are stored nowhere: %DATE% and %TIME% come from
+ * the clock at the moment the shell asks, so the same script prints a different
+ * answer a minute later, and `SET DATE=x` cannot overrule the chip — the dynamic
+ * name wins, exactly as it does on a real cmd. The names reach here already
+ * folded, so `%date%`, `%Date%` and `%DATE%` are the same reference. Returns the
+ * length written into out; 0 means either "not one of the two" or "the CMOS chip
+ * never answered", and in both cases the caller falls through to what it would
+ * have done before this function existed. */
+static int dyn_var(const char *folded, char *out, int cap)
+{
+    if (strcmp(folded, "DATE") == 0)
+        return rtc_fmt_date(out, cap);
+    if (strcmp(folded, "TIME") == 0)
+        return rtc_fmt_time(out, cap);
+    if (cap > 0)
+        out[0] = '\0';
+    return 0;
+}
+
 /* Copy `in` to `out`, replacing every %NAME% with the value of the (folded)
  * name. An undefined name expands to nothing, which is exactly what cmd.exe
  * does and what makes the difference between "the name was never set" and "the
@@ -1377,7 +1398,12 @@ static int bat_expand(const char *in, char *out, int cap)
             if (in[j] == '%' && j > start) {
                 char folded[BAT_ENV_NAME];
                 upper_word(folded, sizeof folded, in + start, j - start);
-                const char *val = env_get(folded);
+                char dyn[24];           /* "Fri 08/21/2026" fits with room  */
+                const char *val;
+                if (dyn_var(folded, dyn, sizeof dyn) > 0)
+                    val = dyn;          /* the clock answers, and it wins   */
+                else
+                    val = env_get(folded);
                 if (val != NULL)
                     for (int k = 0; val[k] != '\0' && n < cap - 1; k++)
                         out[n++] = val[k];
@@ -1423,7 +1449,12 @@ static int prompt_expand(const char *in, char *out, int cap)
             if (in[j] == '%' && j > start) {
                 char folded[BAT_ENV_NAME];
                 upper_word(folded, sizeof folded, in + start, j - start);
-                const char *val = env_get(folded);
+                char dyn[24];           /* "Fri 08/21/2026" fits with room  */
+                const char *val;
+                if (dyn_var(folded, dyn, sizeof dyn) > 0)
+                    val = dyn;          /* the clock answers, and it wins   */
+                else
+                    val = env_get(folded);
                 if (val != NULL) {           /* defined: substitute the value  */
                     for (int k = 0; val[k] != '\0' && n < cap - 1; k++)
                         out[n++] = val[k];

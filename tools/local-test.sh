@@ -1021,6 +1021,19 @@ echo '==> hardware clock time (live advance bounded by uptime, refusals)'
 python3 tools/qemu-desktop.py windclone.iso time \
     || fail 'time did not answer the live clock within the uptime window, or its exit code lied'
 
+# v0.1.50: cmd's two dynamic variables, %DATE% and %TIME%. Nothing new runs —
+# the shell answers, on the typed path and inside a script. The date is exact
+# (seeded CMOS, weekday recomputed by Python) and is then compared to what
+# /bin/date prints for the same instant, which is what forces the kernel's copy
+# of the century rule and the weekday arithmetic to agree with the program's. The
+# time is bounded by the uptime window, and the sharp claim is precedence: a
+# script or a person may SET TIME=00:00:00 and the clock still answers, as on a
+# real cmd. The caret is checked too — a typed reference has to survive reaching
+# the file as a reference, not as the minute it was written in.
+echo '==> dynamic %DATE% and %TIME% (both expansion paths, SET cannot overrule)'
+python3 tools/qemu-desktop.py windclone.iso dynvars \
+    || fail 'the clock did not answer %DATE%/%TIME% on both paths, or SET overruled it'
+
 # v0.1.36: a real ZIP archive unpacked, folder names included.
 # /bin/unzip reads the committed specimen whole and extracts every safe entry
 # byte for byte - flat and nested, stored and deflated (the deflate path runs

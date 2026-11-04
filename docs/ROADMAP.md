@@ -639,6 +639,33 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       fc, the flag grammar is `/` + one letter exactly, so a path is never
       mistaken for a switch.
 
+- [x] **`%DATE%` and `%TIME%` — the two variables the clock writes itself
+      (v0.1.50).** Everything before this release answered a *command*; this one
+      answers a *reference*. cmd keeps these two names out of the environment and
+      formats them fresh at each expansion, so the kernel's RTC driver grew
+      `rtc_fmt_date` ("Fri 08/21/2026") and `rtc_fmt_time` ("05:37:16") and both
+      `%NAME%` expanders — the batch reader's `bat_expand` and the prompt's
+      `prompt_expand` — now ask the clock before they ask `env_get`. That order is
+      the whole feature: `SET DATE=nonsense` is legal, shows up in the `set`
+      listing, and changes nothing, because a dynamic name wins over a stored one
+      exactly as it does on a real cmd. No new syscall, no new program, no new
+      Start-menu row (/bin is still at its 32/32 ceiling — a builtin costs no row),
+      which is why this increment was scoped as one. The test pins the two halves
+      separately: the date is demanded digit-for-digit against the seeded CMOS and
+      the weekday recomputed in Python, then compared to what `/bin/date` prints
+      for the same instant, because a second copy of the century rule and the
+      weekday arithmetic now exists in the kernel and only a required agreement
+      makes that duplication safe; the time is bounded by the uptime window, since
+      a variable that printed one HH:MM:SS forever would be a stored copy wearing
+      the name of a clock. Both paths run the precedence test (a script that does
+      `set time=00:00:00` then `echo %time%` must still print a live 05:37:xx), and
+      the caret gets a new kind of importance: an unescaped typed `%time%` now
+      expands on its way into the file, so scripts are written as `^%time%` and the
+      writer's byte count is what proves the reference survived as a reference.
+      Not done, deliberately: the `%DATE:~0,3%` substring grammar, and cmd's other
+      dynamic names (`%RANDOM%`, `%ERRORLEVEL%`, `%CMDCMDLINE%`) — each is its own
+      rung.
+
 - [x] **`/bin/time` — cmd's clock, proved to be advancing (v0.1.49).**
       date's twin on the same syscall and the same two shapes: `time /t` prints
       the short form and stops, bare `time` prints the long form and prompts

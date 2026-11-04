@@ -4,7 +4,7 @@
 Windows does, with `pip install rich` working, on a desktop that behaves like a
 daily driver.
 
-**Where WindClone is today (v0.1.49):** a from-scratch x86-64 kernel on Limine,
+**Where WindClone is today (v0.1.50):** a from-scratch x86-64 kernel on Limine,
 its own ELF64 loader, its own int `0x80` ABI of fifteen numbered syscalls, a
 libc-less userland of 32 freestanding C programs, a tmpfs store, an e1000 driver
 with an ICMP/UDP/DHCP/TCP/HTTP stack on top of it, a compositor with per-cell
@@ -222,6 +222,24 @@ So the honest ladder, in the order each rung becomes testable:
       invented precision. A typed time comes back echoed and refused with exit 1
       (writing the chip is ring-0 work), which also proves a shifted `:` reaches
       the guest; a switch that is not `/t` is `Invalid parameter - x`.
+- [x] **`%DATE%` and `%TIME%` — the clock's two dynamic variables** (v0.1.50).
+      A copied `.bat` reaches for these two before it reaches for anything else,
+      and they are not stored variables: cmd formats them at the moment the shell
+      expands the reference. The RTC driver now does the formatting
+      (`rtc_fmt_date` → `Fri 08/21/2026`, `rtc_fmt_time` → `05:37:16`) and both
+      expanders — the batch reader's and the prompt's — consult the clock *before*
+      the environment, which is the exact behaviour that matters: `SET DATE=x`
+      succeeds, appears in the `set` listing, and still does not change what
+      `%DATE%` prints. No new syscall and no new program, so the start menu's
+      32-row ceiling is untouched. The date is asserted digit-for-digit against
+      the seeded CMOS and against what `/bin/date` prints for the same instant
+      (two copies of the century rule now exist, and the required agreement is
+      what keeps the second honest); the time is asserted inside the
+      seed-plus-uptime window, on the typed path and from inside a script that
+      tried to pin it. The caret earns a new role: an unescaped `%time%` typed
+      into a `save` line now expands on the way to the file, so scripts are
+      written with `^%time%` and the writer's byte count proves the reference
+      arrived as a reference.
 - [ ] **`CD`, `MKDIR`** as built-ins, so the prompt behaves like
       `cmd` for the remaining verbs a person actually types.
 - [ ] **a small Python-language interpreter** (`/bin/python`) for pure-Python
