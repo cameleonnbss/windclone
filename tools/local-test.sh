@@ -1034,6 +1034,19 @@ echo '==> dynamic %DATE% and %TIME% (both expansion paths, SET cannot overrule)'
 python3 tools/qemu-desktop.py windclone.iso dynvars \
     || fail 'the clock did not answer %DATE%/%TIME% on both paths, or SET overruled it'
 
+# v0.1.51: cmd's derived variables, %NAME:~off,len%. This is the grammar a real
+# .bat uses to cut a value down — and the two cuts that matter here are on the
+# clock itself: %TIME:~0,5% drops the seconds and %DATE:~0,3% keeps only the
+# weekday. So a slice has to work over a dynamic name, not only a stored one. All
+# four documented shapes are walked over abcdefghij, negative offsets count from
+# the end, an offset past the end is an empty slice, and an operand that is not a
+# number leaves the reference literal instead of punching a hole in the line. The
+# batch path is proven the same way dynvars proved the caret: the script file has
+# to arrive with its slice tail still a slice tail.
+echo '==> derived variables (slice a value and the clock itself, both paths)'
+python3 tools/qemu-desktop.py windclone.iso substr \
+    || fail '%NAME:~off,len% did not slice, or a bad operand was not left literal'
+
 # v0.1.36: a real ZIP archive unpacked, folder names included.
 # /bin/unzip reads the committed specimen whole and extracts every safe entry
 # byte for byte - flat and nested, stored and deflated (the deflate path runs

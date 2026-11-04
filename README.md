@@ -815,6 +815,24 @@ On boot the kernel:
    reference now always expands, cmd's caret is load-bearing: writing a script
    that contains `%time%` means typing `^%time%`, and the byte count the writer
    reports is the proof the escape landed.
+54. **`%VAR:~offset,length` — cmd's derived variables, and the clock cut with
+   them (v0.1.51)**. A stored value is not the end of the story: a real `.bat`
+   trims it, and the two trims people write most are `%DATE:~0,3%` for the
+   weekday and `%TIME:~0,5%` to drop the seconds. So the reference grammar grew
+   the substring tail, and it sits in front of everything a name resolves to —
+   dynamic names included, which is what makes the feature useful rather than
+   decorative. All four shapes cmd documents work: offset only, offset and
+   length, a negative offset counting back from the end (`%V:~-3%` is the last
+   three characters) and a negative length counting back from where the offset
+   started. An offset past the end is an empty answer, not an error, because that
+   is what cmd prints. An operand that is *not* a number is a different matter:
+   the reference is left alone, which at the prompt means the person sees
+   `%pv:~xy%` back rather than a silently emptied line, and inside a script it
+   means the same drop an undefined name gets. A colon with no tilde after it
+   stays part of the name, since cmd reads `%A:B%` as a variable called `A:B`.
+   One implementation detail is worth naming: both halves of the grammar needed a
+   keystroke no test had ever typed, `,` and `~`, and the kernel already decoded
+   both — the gap was in the harness, not in the OS.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

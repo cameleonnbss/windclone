@@ -1374,13 +1374,139 @@ static int dyn_var(const char *folded, char *out, int cap)
     return 0;
 }
 
+/* Read one substring operand: an optional minus and at least one digit. Stops on
+ * anything else and reports where it got to, so the caller can tell `~0,3` from
+ * `~0;3` from `~0`. The accumulator is clamped rather than allowed to wrap: a
+ * 32-bit overflow on `%X:~99999999999%` would come back as a plausible offset,
+ * and a plausible wrong offset is worse than a refusal. Returns 1 when it
+ * consumed a number. */
+static int parse_off(const char **pp, int *v)
+{
+    const char *p = *pp;
+    int neg = 0, acc = 0;
+
+    if (*p == '-') {
+        neg = 1;
+        p++;
+    }
+    if (*p < '0' || *p > '9')
+        return 0;
+    while (*p >= '0' && *p <= '9') {
+        acc = acc * 10 + (*p - '0');
+        if (acc > 4096)
+            acc = 4096;
+        p++;
+    }
+    *v = neg ? -acc : acc;
+    *pp = p;
+    return 1;
+}
+
+/* cmd's derived variables: %NAME:~offset% and %NAME:~offset,length%, where either
+ * operand may count back from the end. Scripts reach for this the moment they
+ * touch the clock - `%DATE:~0,3%` is how a real .bat gets the weekday and
+ * `%TIME:~0,5%` is how it drops the hundredths - so the slice runs over exactly
+ * the value the bare name would have produced, dynamic names included.
+ *
+ * `ref` is the text between two percent signs and `reflen` its length. Returns
+ * the length written to out - 0 is a real answer, an empty slice - or -1 for "no
+ * such name, or the operands are nonsense", which is the caller's cue to do what
+ * it has always done with a reference it could not resolve: drop it in a script,
+ * keep it literal at the prompt. A colon that is not followed by a tilde is not
+ * a slice at all: cmd keeps it as part of the name, so `%A:B%` looks up `A:B`. */
+static int ref_resolve(const char *ref, int reflen, char *out, int cap)
+{
+    char folded[BAT_ENV_NAME + 16];   /* a name plus a `:~-3,2` tail */
+    upper_word(folded, sizeof folded, ref, reflen);
+
+    int k = 0;
+    while (k < (int)sizeof folded - 1 && folded[k] != '\0')
+        k++;
+
+    /* The slice is marked by the first colon, and only when a tilde follows it.
+     * Scanning for the colon rather than reading past the name matters twice: a
+     * name is allowed to contain a colon (`%A:B%` looks up `A:B`, as cmd does),
+     * and the NUL the length walk stopped on is not one. */
+    int colon = -1;
+    for (int i = 0; i < k; i++)
+        if (folded[i] == ':') { colon = i; break; }
+    int slice = (colon >= 0 && folded[colon + 1] == '~');
+
+    char name[BAT_ENV_NAME];
+    int nlen = slice ? colon : k;
+    if (nlen > BAT_ENV_NAME - 1)
+        nlen = BAT_ENV_NAME - 1;      /* the ceiling env_set stores under, so a
+                                       * long name looks up the way it was saved */
+    for (int i = 0; i < nlen; i++)
+        name[i] = folded[i];
+    name[nlen] = '\0';
+    if (nlen == 0)
+        return -1;                    /* `%:~0%`: no name, so no answer */
+
+    char base[BAT_ENV_VAL];
+    const char *val;
+    if (dyn_var(name, base, sizeof base) > 0)
+        val = base;
+    else
+        val = env_get(name);
+    if (val == NULL)
+        return -1;
+
+    if (!slice) {                     /* a bare reference: the whole value */
+        int n = 0;
+        for (int i = 0; val[i] != '\0' && n < cap - 1; i++)
+            out[n++] = val[i];
+        out[n] = '\0';
+        return n;
+    }
+
+    const char *p = folded + colon + 2;
+    int off = 0, count = 0, has_count = 0, vl = 0, n = 0;
+
+    if (!parse_off(&p, &off))
+        return -1;
+    if (*p == ',') {
+        p++;
+        if (!parse_off(&p, &count))
+            return -1;
+        has_count = 1;
+    }
+    if (*p != '\0')
+        return -1;                    /* trailing junk is not a number */
+
+    for (vl = 0; val[vl] != '\0'; vl++)
+        ;
+    if (off < 0)
+        off += vl;                    /* negative counts from the end */
+    if (off < 0)
+        off = 0;
+    if (off > vl)
+        off = vl;
+    int take = vl - off;
+    if (has_count) {
+        if (count < 0)
+            count += take;            /* a negative length stops that far short */
+        if (count < 0)
+            count = 0;
+        if (count < take)
+            take = count;
+    }
+    for (int i = 0; i < take && n < cap - 1; i++)
+        out[n++] = val[off + i];
+    out[n] = '\0';
+    return n;
+}
+
 /* Copy `in` to `out`, replacing every %NAME% with the value of the (folded)
  * name. An undefined name expands to nothing, which is exactly what cmd.exe
  * does and what makes the difference between "the name was never set" and "the
  * value was empty" show up on the transcript rather than hide. A '%' with no
  * closing '%' is copied literally, so a stray percent does not eat the line.
  * cmd's caret escape applies here too: `^` consumes itself and emits the next
- * character literally, so a script can write a real percent with `^%`. */
+ * character literally, so a script can write a real percent with `^%`. A
+ * reference may also carry cmd's substring tail - `%NAME:~off,len%` slices the
+ * value it would otherwise have pasted in, dynamic clock names included, so the
+ * whole feature lives behind one call to ref_resolve(). */
 static int bat_expand(const char *in, char *out, int cap)
 {
     int n = 0;
@@ -1396,17 +1522,11 @@ static int bat_expand(const char *in, char *out, int cap)
             while (in[j] != '\0' && in[j] != '%')
                 j++;
             if (in[j] == '%' && j > start) {
-                char folded[BAT_ENV_NAME];
-                upper_word(folded, sizeof folded, in + start, j - start);
-                char dyn[24];           /* "Fri 08/21/2026" fits with room  */
-                const char *val;
-                if (dyn_var(folded, dyn, sizeof dyn) > 0)
-                    val = dyn;          /* the clock answers, and it wins   */
-                else
-                    val = env_get(folded);
-                if (val != NULL)
-                    for (int k = 0; val[k] != '\0' && n < cap - 1; k++)
-                        out[n++] = val[k];
+                char vbuf[BAT_ENV_VAL + 8];   /* a value, or a slice of one  */
+                int r = ref_resolve(in + start, j - start, vbuf, sizeof vbuf);
+                if (r >= 0)
+                    for (int k = 0; vbuf[k] != '\0' && n < cap - 1; k++)
+                        out[n++] = vbuf[k];
                 i = j + 1;
                 continue;
             }
@@ -1447,21 +1567,15 @@ static int prompt_expand(const char *in, char *out, int cap)
             while (in[j] != '\0' && in[j] != '%')
                 j++;
             if (in[j] == '%' && j > start) {
-                char folded[BAT_ENV_NAME];
-                upper_word(folded, sizeof folded, in + start, j - start);
-                char dyn[24];           /* "Fri 08/21/2026" fits with room  */
-                const char *val;
-                if (dyn_var(folded, dyn, sizeof dyn) > 0)
-                    val = dyn;          /* the clock answers, and it wins   */
-                else
-                    val = env_get(folded);
-                if (val != NULL) {           /* defined: substitute the value  */
-                    for (int k = 0; val[k] != '\0' && n < cap - 1; k++)
-                        out[n++] = val[k];
+                char vbuf[BAT_ENV_VAL + 8];   /* a value, or a slice of one  */
+                int r = ref_resolve(in + start, j - start, vbuf, sizeof vbuf);
+                if (r >= 0) {            /* resolved: substitute the value   */
+                    for (int k = 0; vbuf[k] != '\0' && n < cap - 1; k++)
+                        out[n++] = vbuf[k];
                     i = j + 1;
                     continue;
                 }
-                /* undefined: keep the literal %NAME% for the whole run  */
+                /* unresolved: keep the literal %NAME% for the whole run  */
                 for (int k = i; k <= j && n < cap - 1; k++)
                     out[n++] = in[k];
                 i = j + 1;

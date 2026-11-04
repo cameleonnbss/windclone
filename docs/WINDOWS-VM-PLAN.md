@@ -4,7 +4,7 @@
 Windows does, with `pip install rich` working, on a desktop that behaves like a
 daily driver.
 
-**Where WindClone is today (v0.1.50):** a from-scratch x86-64 kernel on Limine,
+**Where WindClone is today (v0.1.51):** a from-scratch x86-64 kernel on Limine,
 its own ELF64 loader, its own int `0x80` ABI of fifteen numbered syscalls, a
 libc-less userland of 32 freestanding C programs, a tmpfs store, an e1000 driver
 with an ICMP/UDP/DHCP/TCP/HTTP stack on top of it, a compositor with per-cell
@@ -30,7 +30,7 @@ because it is the biggest single fact in this file:
 | Requested | Reality in v0.1.42 |
 |---|---|
 | `.bat` files run | Yes, and since v0.1.37 with the cmd semantics a copied script actually leans on: `bat <NAME>` executes `/tmp/<NAME>.BAT` with `@` suppressing a line's echo, `ECHO OFF`/`ECHO ON`/bare `ECHO` as the script's echo state, `SET NAME=value` + `%NAME%` expansion (session environment, case-insensitive names), `rem` alongside `;` as a comment, and a nested `bat` refused. Every script line also logs its resolved form to the serial transcript, so an `ECHO OFF` run is still fully provable. **No** `if`/`for`/`goto`/`call`/`errorlevel`, no redirection or pipes, no arguments passed to a script. |
-| Windows-like shell verbs | `DIR`, `DEL`, `REN` are built-ins with `cmd`'s error classes (`EPERM` read-only, `ENOENT`, `EEXIST`, `EBUSY`) — v0.1.32. `SET` and `%VAR%` live inside scripts (v0.1.37), and since v0.1.38 `SET NAME=value` / bare `SET` and `TYPE <path>` are prompt built-ins too (`set` folds the name to upper case like cmd, lists the environment back, and `type` prints a store/archive file's bytes to the transcript). Since v0.1.39 `%VAR%` expands on a *typed* line too — a defined name substitutes before the command runs, an undefined one stays literal so a `save script` writing a `%` survives. Since v0.1.40 cmd's caret escape works on both typed and scripted lines: `^` consumes itself and emits the next character literally, and `^%` cannot start a reference, so a real percent survives a line that also expands variables. `MOVE` is a built-in too since v0.1.42, and it is deliberately not `REN`: where `ren` refuses an occupied destination (`EEXIST`), `move` drops the file in the way, lands the source on the freed name and says `(replaced existing)`; `/Y` is parsed (any case) so a script that passes it still resolves to the right source and target. Still missing: cmd's doubled-caret-inside-a-batch-file and its quoting interaction, `CD`, `COPY` as a verb (it is a `/bin` program), `MKDIR`, and `MOVE` over wildcards or directory trees (this store has flat names, so there is no tree to recurse). |
+| Windows-like shell verbs | `DIR`, `DEL`, `REN` are built-ins with `cmd`'s error classes (`EPERM` read-only, `ENOENT`, `EEXIST`, `EBUSY`) — v0.1.32. `SET` and `%VAR%` live inside scripts (v0.1.37), and since v0.1.38 `SET NAME=value` / bare `SET` and `TYPE <path>` are prompt built-ins too (`set` folds the name to upper case like cmd, lists the environment back, and `type` prints a store/archive file's bytes to the transcript). Since v0.1.39 `%VAR%` expands on a *typed* line too — a defined name substitutes before the command runs, an undefined one stays literal so a `save script` writing a `%` survives. Since v0.1.40 cmd's caret escape works on both typed and scripted lines: `^` consumes itself and emits the next character literally, and `^%` cannot start a reference, so a real percent survives a line that also expands variables. `MOVE` is a built-in too since v0.1.42, and it is deliberately not `REN`: where `ren` refuses an occupied destination (`EEXIST`), `move` drops the file in the way, lands the source on the freed name and says `(replaced existing)`; `/Y` is parsed (any case) so a script that passes it still resolves to the right source and target. Since v0.1.50 `%DATE%` and `%TIME%` are answered by the clock at the moment of expansion (a stored `SET DATE=x` cannot overrule the chip), and since v0.1.51 any reference may carry cmd's substring tail — `%VAR:~off,len%` slices whatever the bare name would have produced, `%DATE:~0,3%` and `%TIME:~0,5%` included. Still missing: cmd's doubled-caret-inside-a-batch-file and its quoting interaction, `CD`, `COPY` as a verb (it is a `/bin` program), `MKDIR`, and `MOVE` over wildcards or directory trees (this store has flat names, so there is no tree to recurse). |
 | ZIP extraction "like Windows" | `/bin/unzip` extracts **STORED** (v0.1.33) *and* **DEFLATE** (v0.1.35, `src/user/inflate.h`) members, and since v0.1.36 under **relative directory names** (`demo/__init__.py`) into the store, with a per-entry digest the test recomputes from what the format says the file is — so a real `.whl` unpacks in place. Still refused, by rule and not by accident: a name carrying a `..` component or a leading `/` (the zip-slip that would write outside the destination), and bzip2/LZMA entries, which are not this decoder's format. A folder record (a name ending in `/`) is skipped because this store has no directories. What a `.whl` still needs is an interpreter, not an extractor. |
 | Internet access to download things | Yes over the e1000: DHCP lease, ARP, ICMP, UDP, a TCP handshake and an HTTP `GET` whose body lands in the store (`fetch <path>`, `/bin/pkg`, `/bin/browser`) — v0.1.25→31. |
 | Images on screen | `/bin/imgview` decodes a 24-bit BI_RGB BMP and the kernel blits it — v0.1.34. |
@@ -240,6 +240,22 @@ So the honest ladder, in the order each rung becomes testable:
       into a `save` line now expands on the way to the file, so scripts are
       written with `^%time%` and the writer's byte count proves the reference
       arrived as a reference.
+- [x] **`%VAR:~offset,length%` — derived variables, clock included** (v0.1.51).
+      The grammar a real `.bat` uses to trim a value, and the trimming people
+      actually write is aimed at the clock: `%DATE:~0,3%` for the weekday alone,
+      `%TIME:~0,5%` to drop the hundredths. So the slice is applied to whatever
+      the bare name would have produced — dynamic names included — rather than
+      only to the stored environment. Offset only, offset and length, a negative
+      offset counting back from the end and a negative length counting back from
+      where the offset started all behave as cmd documents them; an offset past
+      the end is an empty answer, and an operand that is not a number is refused,
+      which leaves the reference literal at the prompt (a hole in a typed line is
+      worse than the line coming back unchanged) and dropped inside a script. A
+      colon with no tilde after it stays part of the name, since cmd reads
+      `%A:B%` as a variable called `A:B`. No new syscall, program or start-menu
+      row: this is grammar in the two expanders. It did need two keystrokes the
+      test harness had never sent, `,` and `~` — the kernel already decoded both,
+      so the gap was in the scenario and not in the OS.
 - [ ] **`CD`, `MKDIR`** as built-ins, so the prompt behaves like
       `cmd` for the remaining verbs a person actually types.
 - [ ] **a small Python-language interpreter** (`/bin/python`) for pure-Python

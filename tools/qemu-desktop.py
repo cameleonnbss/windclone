@@ -230,9 +230,23 @@ RESIZE_EDGE, MIN_W, MIN_H = 5, 200, 120
 # "shift-semicolon" - a name with a dash, so it goes through QMP like every
 # other chord rather than trusting `sendkey` to stay silent about a key it
 # never sends.
+#
+# ',' arrives the same way for a reason nobody needed before v0.1.51: cmd's
+# derived variables are spelled %NAME:~offset,length%, so a comma is now part of
+# what a person has to be able to type at all. The kernel already decodes
+# map_plain[0x33] = ',' and QEMU's own qcode name is "comma" - not a bare qcode
+# the human monitor has ever been proved to deliver, so it goes through the
+# channel that answers rather than through a `sendkey` that would nod and send
+# nothing.
+#
+# '~' is the other half of that same grammar and it is a chord: the kernel
+# decodes map_shift[0x29] = '~' over the '`' make code, which QEMU spells
+# "grave_accent". Split on the dash it becomes [shift, grave_accent], the pair
+# send-key holds down together.
 KEYMAP = {" ": "spc", "\n": "ret", "/": "slash", ".": "dot", "-": "minus",
           "_": "shift-minus", "=": "equal", "%": "shift-5", "^": "shift-6",
-          "@": "shift-2", ";": "semicolon", ":": "shift-semicolon"}
+          "@": "shift-2", ";": "semicolon", ":": "shift-semicolon",
+          ",": "comma", "~": "shift-grave_accent"}
 # Key names the *human* monitor has been proved to deliver: the letters and
 # digits every scenario has always typed, plus the unshifted spellings KEYMAP
 # maps to. Anything else goes through QMP, because `sendkey` accepts an unknown
@@ -3166,6 +3180,135 @@ def scenario_actions(sc, mon, W, H):
         if count_serial(r"shell: prompt exec 'echo " + want_date + r"'") != 1:
             raise SystemExit("the caret stopped protecting %DATE%: a second line "
                              "expanded where only the first one should have")
+    elif sc == "substr":
+        # v0.1.51: cmd's derived variables, %NAME:~offset,length%. This is the
+        # grammar a real .bat leans on to cut a value into the piece it needs,
+        # and the two uses worth proving are the ones the clock made necessary:
+        # %TIME:~0,5% is how a script drops the seconds it does not want, and
+        # %DATE:~0,3% is how it gets at the weekday alone. A slice therefore has
+        # to work over a dynamic name, not only over a stored one.
+        #
+        # Offsets count from the end when they are negative, and a length may be
+        # negative too, so the scenario walks all four shapes over a known
+        # ten-character value (`abcdefghij`) and checks each answer inside the
+        # kernel's own resolved row rather than in a program's output. The
+        # refusal is a claim as well: an operand that is not a number is not a
+        # slice, and the prompt keeps the reference literal the way it keeps any
+        # name it cannot resolve - a half-parsed `%pv:~xy%` pasted as an empty
+        # hole would be the worse behaviour, because the person typing would
+        # never see what went wrong. Both halves need a keystroke no scenario had
+        # asked for before: ',' and '~', which is why the comma and the
+        # shift-grave chord are in the test's path and not just in the kernel's
+        # scancode table.
+        import datetime
+
+        seeded = datetime.date(2026, 8, 21)
+        wd = seeded.strftime("%a")
+
+        text = read_log()
+        rm = re.search(r"rtc: hardware clock (\d\d):(\d\d):(\d\d)", text)
+        if not rm:
+            raise SystemExit("no boot-time rtc reading to anchor the clock to")
+        anchor = int(rm.group(1)) * 3600 + int(rm.group(2)) * 60 + int(rm.group(3))
+
+        def uptime_secs():
+            up = 0
+            for u in re.findall(r"uptime: (\d+)s", read_log()):
+                up = max(up, int(u))
+            return up
+
+        def minute_of(hh, mm):
+            """The short slice keeps HH:MM and truncates the seconds, so both
+            sides of the window are rounded to the minute before comparing - the
+            same rounding the time scenario had to learn about."""
+            up = uptime_secs()
+            got = int(hh) * 60 + int(mm)
+            if got < anchor // 60:
+                raise SystemExit("%%TIME:~0,5%% printed %02d:%s, earlier than the "
+                                 "seed" % (int(hh), mm))
+            if got > (anchor + up + 5) // 60:
+                raise SystemExit("%%TIME:~0,5%% printed %02d:%s, past the seed "
+                                 "plus %d s of uptime" % (int(hh), mm, up))
+
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+
+        mark = len(read_log())
+        mon.type_text("set pv=abcdefghij\n")
+        mark, _ = wait_serial_after(mark, r"shell: prompt set PV=abcdefghij")
+
+        # The four shapes cmd documents, one typed line each, read out of the
+        # resolved row the kernel writes for itself.
+        for ref, want in (("%pv:~0,3%", "abc"), ("%pv:~3%", "defghij"),
+                          ("%pv:~-4,2%", "gh"), ("%pv:~-3%", "hij")):
+            mark = len(read_log())
+            mon.type_text("echo " + ref + "\n")
+            mark, m = wait_serial_after(
+                mark, r"shell: prompt exec 'echo ([a-z]*)'")
+            if m.group(1) != want:
+                raise SystemExit("%s resolved to '%s', cmd says '%s' "
+                                 "against abcdefghij" % (ref, m.group(1), want))
+            mark, _ = wait_serial_after(mark, r"shell: running 'echo' from the prompt")
+
+        # Past the end there is nothing to take, and cmd agrees: an empty slice
+        # is an empty argument, not a refusal and not the whole value.
+        mark = len(read_log())
+        mon.type_text("echo %pv:~20%\n")
+        mark, _ = wait_serial_after(mark, r"shell: prompt exec 'echo '")
+
+        # The clock through the same door, because a slice is taken from whatever
+        # the name would have produced: five characters of a live HH:MM:SS, and
+        # the window check is at minute granularity because the slice truncated
+        # the seconds away.
+        mark = len(read_log())
+        mon.type_text("echo %time:~0,5%\n")
+        mark, m = wait_serial_after(
+            mark, r"shell: prompt exec 'echo (\d\d):(\d\d)'")
+        minute_of(m.group(1), m.group(2))
+
+        # And the weekday, which is the reason a script wants a slice of a date
+        # at all. Exact, seeded, and the same three letters /bin/date leads its
+        # own line with.
+        mark = len(read_log())
+        mon.type_text("echo %date:~0,3%\n")
+        mark, m = wait_serial_after(
+            mark, r"shell: prompt exec 'echo (Sun|Mon|Tue|Wed|Thu|Fri|Sat)'")
+        if m.group(1) != wd:
+            raise SystemExit("%%DATE:~0,3%% gave '%s', the seeded %s says '%s'"
+                             % (m.group(1), seeded.isoformat(), wd))
+
+        # A nonsense operand is not a slice and not a hole: the reference stays
+        # literal and reaches the dispatcher untouched, so no exec row is written
+        # at all. This is the same safety property promptvar pins for an
+        # undefined name, now proven for a name that is defined but whose tail
+        # does not parse.
+        mark = len(read_log())
+        mon.type_text("echo %pv:~xy%\n")
+        mark, _ = wait_serial_after(mark, r"shell: running 'echo' from the prompt")
+        if count_serial(r"shell: prompt exec 'echo %pv:~xy%'") != 0:
+            raise SystemExit("a malformed %pv:~xy% produced a prompt exec row; "
+                             "an operand that is not a number must stay literal")
+
+        # The batch path, where a slice matters most: a script that sets its own
+        # value and cuts it two characters in. The caret is load-bearing again -
+        # the reference has to reach the file as a reference - and the byte count
+        # is the proof it did.
+        script_s = "set q=0123456789\necho %q:~2,5%\n"
+        mon.type_text("save script s set q=0123456789 nl echo ^%q:~2,5%\n")
+        mark, m = wait_serial_after(mark, r"save: wrote (\d+) bytes /tmp/s\.bat")
+        if int(m.group(1)) != len(script_s):
+            raise SystemExit("the slice script landed as %s bytes, want %d (%r)"
+                             % (m.group(1), len(script_s), script_s))
+        mark = len(read_log())
+        mon.type_text("bat s\n")
+        mark, _ = wait_serial_after(mark, r"shell: batch set Q=0123456789")
+        mark, _ = wait_serial_after(mark, r"shell: batch exec 'echo 23456'")
+        _, ran = wait_serial_after(
+            mark, r"shell: batch ran (\d+) commands from /tmp/s\.bat")
+        if int(ran.group(1)) != 1:
+            raise SystemExit("the slice script ran %s commands, want 1"
+                             % ran.group(1))
     elif sc == "unzip":
         # v0.1.36: /bin/unzip unpacks a real archive the way Windows does, folder
         # names included. The archive is the single source of truth: the test
@@ -3645,6 +3788,20 @@ MARKERS = {
                   "shell: prompt set TIME=01:02:03",
                   "shell: batch set TIME=00:00:00",
                   "save: wrote", "shell: batch ran"],
+    # v0.1.51: derived variables, %NAME:~off,len%. The four shapes, the empty
+    # slice past the end, the clock sliced at minute granularity and the refusal
+    # of a nonsense operand are all asserted in the scenario; these are the lines
+    # the claim turns on - the stored value the slices are cut from, one resolved
+    # row per shape, the script that reached the file with its slice tail intact,
+    # and the batch line that came out shorter than it went in.
+    "substr":    ["shell: prompt set PV=abcdefghij",
+                  "shell: prompt exec 'echo abc'",
+                  "shell: prompt exec 'echo defghij'",
+                  "shell: prompt exec 'echo gh'",
+                  "shell: prompt exec 'echo hij'",
+                  "shell: prompt exec 'echo '",
+                  "save: wrote", "shell: batch set Q=0123456789",
+                  "shell: batch exec 'echo 23456'", "shell: batch ran"],
     # v0.1.36: a real ZIP unpacked, folder names included. The strict byte/digest
     # comparisons are in the scenario; these are the lines the claim turns on -
     # the archive read whole, each safe member out byte for byte (flat and nested,

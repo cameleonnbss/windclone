@@ -662,9 +662,32 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       the caret gets a new kind of importance: an unescaped typed `%time%` now
       expands on its way into the file, so scripts are written as `^%time%` and the
       writer's byte count is what proves the reference survived as a reference.
-      Not done, deliberately: the `%DATE:~0,3%` substring grammar, and cmd's other
-      dynamic names (`%RANDOM%`, `%ERRORLEVEL%`, `%CMDCMDLINE%`) — each is its own
-      rung.
+      Not done, deliberately: cmd's other dynamic names (`%RANDOM%`,
+      `%ERRORLEVEL%`, `%CMDCMDLINE%`) — each is its own rung. The substring
+      grammar `DATE:~0,3` landed one release later, in v0.1.51.
+
+- [x] **`%VAR:~offset,length%` — derived variables, and the clock cut with them
+      (v0.1.51).** The rung after teaching the shell to answer the clock is
+      teaching it to trim the answer, because that is what a real `.bat` does:
+      `%DATE:~0,3%` is how a script gets the weekday alone and `%TIME:~0,5%` is
+      how it drops the hundredths cmd would otherwise print. Both now work, and
+      the reason they work over `%DATE%` and not only over a stored name is that
+      the slice lives in one function — `ref_resolve` — which resolves the name
+      the way the bare reference would have (clock first, then the environment)
+      and only then cuts it. All four shapes cmd documents are in: offset only,
+      offset and length, a negative offset that counts back from the end, and a
+      negative length that stops that far short. The edges were chosen to match
+      cmd rather than to be convenient: an offset past the end is an empty
+      answer (`%V:~20%` on a ten-character value yields nothing, which is what a
+      real cmd pastes), while an operand that is not a number is not an answer at
+      all — the reference is refused, so the prompt keeps `%pv:~xy%` literal for
+      the person to see and the batch reader drops it the way it drops an
+      undefined name. A colon with no tilde after it stays part of the name,
+      because cmd reads `%A:B%` as a variable called `A:B`. Still no new syscall,
+      no new program, no new Start-menu row: this is one more piece of grammar in
+      the two expanders, and it is the first shell feature whose test needs a
+      keystroke the harness had never sent — `,` and `~`, both already decoded by
+      the kernel's scancode tables, neither reachable from a scenario until now.
 
 - [x] **`/bin/time` — cmd's clock, proved to be advancing (v0.1.49).**
       date's twin on the same syscall and the same two shapes: `time /t` prints
