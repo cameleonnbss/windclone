@@ -4,7 +4,7 @@
 Windows does, with `pip install rich` working, on a desktop that behaves like a
 daily driver.
 
-**Where WindClone is today (v0.1.52):** a from-scratch x86-64 kernel on Limine,
+**Where WindClone is today (v0.1.53):** a from-scratch x86-64 kernel on Limine,
 its own ELF64 loader, its own int `0x80` ABI of fifteen numbered syscalls, a
 libc-less userland of 32 freestanding C programs, a tmpfs store, an e1000 driver
 with an ICMP/UDP/DHCP/TCP/HTTP stack on top of it, a compositor with per-cell
@@ -27,10 +27,10 @@ because it is the biggest single fact in this file:
 
 ## What already works, exactly
 
-| Requested | Reality in v0.1.52 |
+| Requested | Reality in v0.1.53 |
 |---|---|
-| `.bat` files run | Yes, and since v0.1.37 with the cmd semantics a copied script actually leans on: `bat <NAME>` executes `/tmp/<NAME>.BAT` with `@` suppressing a line's echo, `ECHO OFF`/`ECHO ON`/bare `ECHO` as the script's echo state, `SET NAME=value` + `%NAME%` expansion (session environment, case-insensitive names), `rem` alongside `;` as a comment, and a nested `bat` refused. Every script line also logs its resolved form to the serial transcript, so an `ECHO OFF` run is still fully provable, and since v0.1.52 a script can read `%ERRORLEVEL%` — the code the last program came back with. **No** `if`/`for`/`goto`/`call`, no redirection or pipes, no arguments passed to a script. |
-| Windows-like shell verbs | `DIR`, `DEL`, `REN` are built-ins with `cmd`'s error classes (`EPERM` read-only, `ENOENT`, `EEXIST`, `EBUSY`) — v0.1.32. `SET` and `%VAR%` live inside scripts (v0.1.37), and since v0.1.38 `SET NAME=value` / bare `SET` and `TYPE <path>` are prompt built-ins too (`set` folds the name to upper case like cmd, lists the environment back, and `type` prints a store/archive file's bytes to the transcript). Since v0.1.39 `%VAR%` expands on a *typed* line too — a defined name substitutes before the command runs, an undefined one stays literal so a `save script` writing a `%` survives. Since v0.1.40 cmd's caret escape works on both typed and scripted lines: `^` consumes itself and emits the next character literally, and `^%` cannot start a reference, so a real percent survives a line that also expands variables. `MOVE` is a built-in too since v0.1.42, and it is deliberately not `REN`: where `ren` refuses an occupied destination (`EEXIST`), `move` drops the file in the way, lands the source on the freed name and says `(replaced existing)`; `/Y` is parsed (any case) so a script that passes it still resolves to the right source and target. Since v0.1.50 `%DATE%` and `%TIME%` are answered by the clock at the moment of expansion (a stored `SET DATE=x` cannot overrule the chip), and since v0.1.51 any reference may carry cmd's substring tail — `%VAR:~off,len%` slices whatever the bare name would have produced, `%DATE:~0,3%` and `%TIME:~0,5%` included. Since v0.1.52 the third name cmd writes is answered the same way: `%ERRORLEVEL%` is the code the last program came back with — dynamic, so a stored `SET ERRORLEVEL=7` loses to it, and sliceable like anything else. Still missing: cmd's doubled-caret-inside-a-batch-file and its quoting interaction, `CD`, `COPY` as a verb (it is a `/bin` program), `MKDIR`, and `MOVE` over wildcards or directory trees (this store has flat names, so there is no tree to recurse). |
+| `.bat` files run | Yes, and since v0.1.37 with the cmd semantics a copied script actually leans on: `bat <NAME>` executes `/tmp/<NAME>.BAT` with `@` suppressing a line's echo, `ECHO OFF`/`ECHO ON`/bare `ECHO` as the script's echo state, `SET NAME=value` + `%NAME%` expansion (session environment, case-insensitive names), `rem` alongside `;` as a comment, and a nested `bat` refused. Every script line also logs its resolved form to the serial transcript, so an `ECHO OFF` run is still fully provable, and since v0.1.52 a script can read `%ERRORLEVEL%` — the code the last program came back with — and since v0.1.53 branch on it with `IF [/I] [NOT] <cond> <cmd>` over the three conditions cmd reads (`a == b`, `EXIST path`, `ERRORLEVEL n`), the condition evaluated after `@` and after `%expansion%` and the chosen command handed back to the ordinary dispatcher. **No** `else`/`for`/`goto`/`call`, no redirection or pipes, no arguments passed to a script. |
+| Windows-like shell verbs | `DIR`, `DEL`, `REN` are built-ins with `cmd`'s error classes (`EPERM` read-only, `ENOENT`, `EEXIST`, `EBUSY`) — v0.1.32. `SET` and `%VAR%` live inside scripts (v0.1.37), and since v0.1.38 `SET NAME=value` / bare `SET` and `TYPE <path>` are prompt built-ins too (`set` folds the name to upper case like cmd, lists the environment back, and `type` prints a store/archive file's bytes to the transcript). Since v0.1.39 `%VAR%` expands on a *typed* line too — a defined name substitutes before the command runs, an undefined one stays literal so a `save script` writing a `%` survives. Since v0.1.40 cmd's caret escape works on both typed and scripted lines: `^` consumes itself and emits the next character literally, and `^%` cannot start a reference, so a real percent survives a line that also expands variables. `MOVE` is a built-in too since v0.1.42, and it is deliberately not `REN`: where `ren` refuses an occupied destination (`EEXIST`), `move` drops the file in the way, lands the source on the freed name and says `(replaced existing)`; `/Y` is parsed (any case) so a script that passes it still resolves to the right source and target. Since v0.1.50 `%DATE%` and `%TIME%` are answered by the clock at the moment of expansion (a stored `SET DATE=x` cannot overrule the chip), and since v0.1.51 any reference may carry cmd's substring tail — `%VAR:~off,len%` slices whatever the bare name would have produced, `%DATE:~0,3%` and `%TIME:~0,5%` included. Since v0.1.52 the third name cmd writes is answered the same way: `%ERRORLEVEL%` is the code the last program came back with — dynamic, so a stored `SET ERRORLEVEL=7` loses to it, and sliceable like anything else. Since v0.1.53 `IF` is a verb a person can type as well as a line a script carries: `if exist /bin/ls dir`, `if %x% == go echo yes`, `if errorlevel 1 echo it failed`, with `/I` folding the compare and `NOT` turning the answer around, and a malformed condition refused out loud rather than guessed at. Still missing: cmd's doubled-caret-inside-a-batch-file and its quoting interaction, `CD`, `COPY` as a verb (it is a `/bin` program), `MKDIR`, and `MOVE` over wildcards or directory trees (this store has flat names, so there is no tree to recurse). |
 | ZIP extraction "like Windows" | `/bin/unzip` extracts **STORED** (v0.1.33) *and* **DEFLATE** (v0.1.35, `src/user/inflate.h`) members, and since v0.1.36 under **relative directory names** (`demo/__init__.py`) into the store, with a per-entry digest the test recomputes from what the format says the file is — so a real `.whl` unpacks in place. Still refused, by rule and not by accident: a name carrying a `..` component or a leading `/` (the zip-slip that would write outside the destination), and bzip2/LZMA entries, which are not this decoder's format. A folder record (a name ending in `/`) is skipped because this store has no directories. What a `.whl` still needs is an interpreter, not an extractor. |
 | Internet access to download things | Yes over the e1000: DHCP lease, ARP, ICMP, UDP, a TCP handshake and an HTTP `GET` whose body lands in the store (`fetch <path>`, `/bin/pkg`, `/bin/browser`) — v0.1.25→31. |
 | Images on screen | `/bin/imgview` decodes a 24-bit BI_RGB BMP and the kernel blits it — v0.1.34. |
@@ -79,8 +79,12 @@ So the honest ladder, in the order each rung becomes testable:
       prompt keeps its v0.1.19 behaviour), proven by typing three scripts at
       the prompt and reading the resolved lines back off the serial transcript —
       including `/bin/echo` printing the *expanded* value of `%X%`.
-- [ ] **the control-flow half of batch semantics**: `IF`/`FOR`, `>`/`|`, and
-      arguments passed to a script. Each is its own rung, each proven the same
+- [ ] **the rest of the control-flow half of batch semantics**: `FOR`, `>`/`|`,
+      and arguments passed to a script. `IF` landed ahead of them, in v0.1.53,
+      with `==`, `EXIST` and `ERRORLEVEL n` plus `/I` and `NOT`, on the typed and
+      the scripted path alike; `ELSE` is deliberately not in that release,
+      because it only means something once a line can span a branched statement.
+      Each is its own rung, each proven the same
       typed-script-against-transcript way.
 - [x] **prompt-time `SET` and `TYPE`**, the two cmd verbs a person types at the
       keyboard. Landed in v0.1.38 on the `execute()` path: `do_set(work, who)`
@@ -270,7 +274,23 @@ So the honest ladder, in the order each rung becomes testable:
       cmd does after an external command, so the level is "what the last *program*
       returned" and a test must wait for that program's own exit row before
       establishing the next number. `IF ERRORLEVEL n`, the branch the number
-      exists for, is still the control-flow rung further up.
+      exists for, landed one release later, in v0.1.53.
+- [x] **`IF <cond> <cmd>` — the branch** (v0.1.53). cmd's three conditions, read
+      in the order cmd reads them: `a == b` on text, `EXIST path` answered through
+      the same `vfs_exists` the loader uses, and `ERRORLEVEL n` meaning *at least*
+      n — the form a script uses to ask "did something just fail", and the reason
+      the release before exists. `/I` folds a compare and `NOT` turns the answer
+      around, and they stack in cmd's order (`IF /I NOT ...`). It sits on both
+      paths a line can arrive on, and the line reaches it after `@` and after
+      `%expansion%`, so a condition compares values rather than names; on a yes
+      the line is rewritten to its own tail and handed to the dispatcher a typed
+      command would have used, which means the built-ins, the programs, and a
+      script's own command count all see one ordinary line. A condition that is
+      not one (`if hello echo x`) is refused in the transcript and on the screen
+      instead of guessed at. What is *not* here is the rest of cmd's grammar:
+      `ELSE`, `DEFINED`, `FOR`, redirection, pipes and labels. And a limit worth
+      naming: this store has flat names, so `EXIST` answers about a file, never
+      about a directory.
 - [ ] **`CD`, `MKDIR`** as built-ins, so the prompt behaves like
       `cmd` for the remaining verbs a person actually types.
 - [ ] **a small Python-language interpreter** (`/bin/python`) for pure-Python

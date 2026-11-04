@@ -1069,6 +1069,19 @@ echo '==> dynamic %ERRORLEVEL% (0, a refusal, 9009, and a slice of the number)'
 python3 tools/qemu-desktop.py windclone.iso errlvl \
     || fail '%ERRORLEVEL% did not follow the last program, or SET overruled it'
 
+# v0.1.53: cmd's IF — the branch the level exists for. Three conditions, two
+# modifiers, both paths. The compare is shown case-sensitive and then folded by
+# /I on operands that differ only in capitalisation, NOT turns one answer around,
+# EXIST answers from the store the same way the loader does, and ERRORLEVEL is
+# proven to mean "at least" by two numbers on the same 9009 (1 yes, 9999 no). A
+# condition with no operator is refused and runs nothing, which the scenario tells
+# apart from a silent false by counting program starts across a barrier. The
+# script path then proves the count that matters most: two IF lines, one true and
+# one false, and the batch reports one command run.
+echo '==> if (==, /I, NOT, EXIST, ERRORLEVEL, refusal) in both paths'
+python3 tools/qemu-desktop.py windclone.iso ifelse \
+    || fail 'if took the wrong branch, ignored /I or NOT, or ran a command it refused'
+
 # v0.1.36: a real ZIP archive unpacked, folder names included.
 # /bin/unzip reads the committed specimen whole and extracts every safe entry
 # byte for byte - flat and nested, stored and deflated (the deflate path runs

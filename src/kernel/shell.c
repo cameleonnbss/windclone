@@ -355,6 +355,7 @@ static void cmd_help(void)
     put_line("  TIME [/T]      MONTRE LHEURE DU CMOS (COMME CMD)");
     put_line("  %DATE% %TIME%  DONNES PAR LHORLOGE A CHAQUE FOIS (CMD)");
     put_line("  %ERRORLEVEL% CODE DU DERNIER PROGRAMME (CMD)");
+    put_line("  IF <COND> <CMD> BRANCHE (==, EXIST, ERRORLEVEL)");
     put_line("  NOTE <NOM>     EDITE /TMP/<NOM> (OU <NOM>.TXT)");
     put_line("  VIEW <FICHIER> AFFICHE UN FICHIER EN COULEUR");
     put_line("  PKG            MONTRE LA PAGE RECUPEREE /NET/FETCHED");
@@ -1294,13 +1295,16 @@ static int bat_path(const char *name, char *out, int cap)
  * every Windows script opens with `@echo off` and carries its values in
  * `SET NAME=value` referenced as `%NAME%`; without those three, a script copied
  * from Windows echoed its own commands and ran a literal "%GREET%" where it
- * meant "hello". This adds exactly those, and nothing else: no `if`, no `for`,
- * no redirection, no labels — each is its own rung and its own release.
+ * meant "hello". This adds exactly those, and nothing else: no `for`, no
+ * redirection, no labels - each is its own rung and its own release. (`if` sat
+ * on that list until v0.1.53 grew it a function of its own below.)
  *
  * They live here, in the batch reader, not in run_line. A line typed at the
  * prompt is dispatched the way it always was (an `echo` there still runs the
  * /bin/echo program); the ON/OFF/SET/% behaviour is what a *script* gets. That
- * keeps v0.1.19's prompt path untouched and states the scope honestly. */
+ * keeps v0.1.19's prompt path untouched and states the scope honestly - and the
+ * rungs that later reached the keyboard anyway (SET, %expansion%, the caret and
+ * IF) each say so where they are defined. */
 #define BAT_ENV_MAX   8                 /* variables held for the session      */
 #define BAT_ENV_NAME  16
 #define BAT_ENV_VAL   48                /* a value with spaces in it still fits */
@@ -1776,6 +1780,186 @@ static int do_type(const char *line)
     return 1;
 }
 
+/* cmd's IF: the branch the release before's %ERRORLEVEL% exists for. Three
+ * conditions, read in the order cmd reads them, and each is one a copied script
+ * actually uses:
+ *
+ *   IF [/I] [NOT] ERRORLEVEL <n> <command>   true when the level is at least n
+ *   IF [/I] [NOT] EXIST <path> <command>     true when the store or archive has it
+ *   IF [/I] [NOT] <a> == <b> <command>       a text compare, /I folding the case
+ *
+ * The line arrives here after '@' and after %expansion%, and that order is the
+ * whole point: `if %x% == y` compares values, not names. On a yes the line is
+ * rewritten in place to the command that follows its condition, so the caller
+ * dispatches exactly what it would have dispatched had the person typed the
+ * command alone - which is what lets `if exist /tmp/a.bat del /tmp/a.bat` reach
+ * the built-ins and the programs alike. On a no the line is spent, and the
+ * transcript still names the command that did not run, because a script with
+ * silent holes in it is a script nobody can debug.
+ *
+ * The operands are never copied out of the line: the line is the buffer, and a
+ * typed line is bounded by SHELL_COLS-1 while a script line is bounded by
+ * BAT_LINE_MAX, both of which fit any comparison a person can type here. Quotes
+ * are kept as characters, because cmd keeps them - that is why the
+ * `if "%x%"=="y"` idiom works at all. NOT flips the answer and swallows nothing.
+ * Not done, deliberately: cmd's numeric family (EQU, GTR, NEQ and the rest), and
+ * wildcards in EXIST, which would need directories this store does not have. */
+#define IF_NONE 0        /* not an IF line: the caller carries on           */
+#define IF_YES  1        /* true, and `work` now holds the command to run   */
+#define IF_NO   2        /* the condition ran; nothing else does            */
+#define IF_BAD  3        /* not a condition cmd would accept: say so, stop  */
+
+/* One refusal, in the transcript and on the screen, because an IF that quietly
+ * does nothing is indistinguishable from an IF that was false. */
+static void if_refused(const char *who, const char *why)
+{
+    serial_write("shell: ");
+    serial_write(who);
+    serial_write(" if refused - ");
+    serial_write(why);
+    serial_write("\n");
+    put_line("SYNTAXE IF INVALIDE.");
+}
+
+/* Compare two spans, either folded. `fold` is cmd's /I: without it the compare
+ * is case-sensitive, which is the default people expect from `if ABC==abc`. */
+static int ci_span(const char *a, int an, const char *b, int bn, int fold)
+{
+    if (an != bn)
+        return 0;
+    for (int i = 0; i < an; i++) {
+        char x = fold ? upper(a[i]) : a[i];
+        char y = fold ? upper(b[i]) : b[i];
+        if (x != y)
+            return 0;
+    }
+    return 1;
+}
+
+static int do_if(char *work, int *len, const char *who)
+{
+    if (!is_word(work, "if"))
+        return IF_NONE;
+
+    const char *p = work + 2;
+    while (*p == ' ')
+        p++;
+
+    int fold = 0;
+    if (is_word(p, "/i")) {
+        fold = 1;
+        p += 2;
+        while (*p == ' ')
+            p++;
+    }
+
+    int negate = 0;
+    if (is_word(p, "not")) {
+        negate = 1;
+        p += 3;
+        while (*p == ' ')
+            p++;
+    }
+
+    int answer = 0;
+    const char *then = NULL;
+
+    if (is_word(p, "errorlevel")) {
+        /* "at least", not "equals": `IF ERRORLEVEL 1` is true for every nonzero
+         * level, which is how a script asks "did something just fail". */
+        p += 10;
+        while (*p == ' ')
+            p++;
+        int neg = 0;
+        if (*p == '-') {
+            neg = 1;
+            p++;
+        }
+        if (*p < '0' || *p > '9') {
+            if_refused(who, "errorlevel wants a number");
+            return IF_BAD;
+        }
+        int want = 0;
+        while (*p >= '0' && *p <= '9')
+            want = want * 10 + (*p++ - '0');
+        answer = last_errorlevel >= (neg ? -want : want);
+        then = p;
+    } else if (is_word(p, "exist")) {
+        p += 5;
+        while (*p == ' ')
+            p++;
+        char path[PROGRAM_PATH_MAX];
+        int n = 0;
+        while (*p != '\0' && *p != ' ' && n < (int)sizeof path - 1)
+            path[n++] = *p++;
+        if (n == 0) {
+            if_refused(who, "exist wants a path");
+            return IF_BAD;
+        }
+        path[n] = '\0';
+        answer = vfs_exists(path);
+        then = p;
+    } else {
+        /* Find the operator first, then trim the spaces in front of it. The two
+         * are separate steps on purpose: the right-hand operand is measured from
+         * where the '==' actually sits, so shortening the left side must not
+         * shift the offset the right side is read at. */
+        int eq = 0;
+        while (p[eq] != '\0' && !(p[eq] == '=' && p[eq + 1] == '='))
+            eq++;
+        if (p[eq] != '=') {
+            if_refused(who, "expected ==");
+            return IF_BAD;
+        }
+        int l = eq;
+        while (l > 0 && p[l - 1] == ' ')
+            l--;                    /* cmd trims the spaces in front of the == */
+        if (l == 0) {
+            if_refused(who, "nothing to compare");
+            return IF_BAD;
+        }
+        const char *r = p + eq + 2;   /* from the operator, not the trimmed left */
+        while (*r == ' ')
+            r++;
+        int rn = 0;
+        while (r[rn] != '\0' && r[rn] != ' ')
+            rn++;
+        if (rn == 0) {
+            if_refused(who, "no right-hand operand");
+            return IF_BAD;
+        }
+        answer = ci_span(p, l, r, rn, fold);
+        then = r + rn;
+    }
+
+    if (negate)
+        answer = !answer;
+
+    while (*then == ' ')
+        then++;
+    if (*then == '\0') {
+        if_refused(who, "no command after the condition");
+        return IF_BAD;
+    }
+
+    /* Shorten the line to its own tail. `then` always points ahead of `work`, so
+     * copying forward never overwrites a byte that has not been read yet. */
+    int n = 0;
+    while (then[n] != '\0') {
+        work[n] = then[n];
+        n++;
+    }
+    work[n] = '\0';
+    *len = n;
+
+    serial_write("shell: ");
+    serial_write(who);
+    serial_write(answer ? " if true '" : " if false '");
+    serial_write(work);
+    serial_write("'\n");
+    return answer ? IF_YES : IF_NO;
+}
+
 /* Handle a batch line that is one of the three built-ins. `work` is the line
  * after '@' and after %expansion%. Returns 1 when the line was a built-in (and
  * so must not be dispatched to a program), 0 to let it run normally. Only
@@ -1930,6 +2114,15 @@ static void cmd_bat(int argc, const char *const *argv)
             put_line(echo);
         }
 
+        /* cmd's IF comes first, because it decides whether the rest of the line
+         * runs at all: a yes leaves the command the condition chose sitting in
+         * bat_work, and everything below sees exactly the line the person would
+         * have typed alone. A no - and a line cmd itself would reject - is spent
+         * here, with its own transcript row naming what did not run. */
+        int cond = do_if(bat_work, &wl, "batch");
+        if (cond == IF_NO || cond == IF_BAD)
+            continue;
+
         /* The three batch built-ins (ECHO ON/OFF, SET, REM) never reach a
          * program; everything else falls through to run_line as before. */
         if (batch_builtin(bat_work))
@@ -1998,8 +2191,16 @@ static void execute(void)
          * of `set` via do_set(work, "batch"). The origin tag on anything that
          * still runs ("from the prompt") is what keeps a typed launch
          * distinguishable from a scripted one in the transcript. */
-        if (!do_set(line, "prompt") && !do_type(line))
-            run_line(resolved, rl, "from the prompt");
+        /* `IF` is not a script-only word on a real cmd, and `resolved` is this
+         * scope's own buffer, so a yes can shorten the typed line in place and
+         * the built-ins below read the command the condition chose. A no spends
+         * the line; a line that is not a condition at all falls through exactly
+         * as it did one release ago. */
+        int cond = do_if(resolved, &rl, "prompt");
+        if (cond == IF_YES || cond == IF_NONE) {
+            if (!do_set(line, "prompt") && !do_type(line))
+                run_line(resolved, rl, "from the prompt");
+        }
     }
 
     input_len = 0;

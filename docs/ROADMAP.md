@@ -713,6 +713,28 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       and an async-launch claim. No new syscall, no new program, no new
       Start-menu row.
 
+- [x] **`IF <cond> <cmd>` — the branch a script was missing (v0.1.53).**
+      Every release before this one made lines run in order; this one lets a
+      line decide. cmd's three conditions, read in the order cmd reads them:
+      `==` on text, `EXIST` on a path (asked of the store and the archive
+      exactly the way the loader asks it), and `ERRORLEVEL n`, which means *at
+      least* n and not equal to n — the distinction a script leans on when it
+      asks whether something just failed. `/I` folds a compare, `NOT` turns an
+      answer around, and the two stack in cmd's order. The evaluation point is
+      the feature: the line reaches the branch after `@` and after
+      `%expansion%`, so `if %x% == hello` compares a value and not a name, and
+      that is why this rung came after three variable releases instead of
+      before them. On a yes the line is rewritten to its own tail and handed to
+      the dispatcher a typed command would have used, so the built-ins, the
+      programs, and a script's own `ran` count all see one ordinary line. A
+      condition with no operator is refused on the screen and in the transcript
+      rather than guessed at. Still open in cmd's grammar, each its own rung:
+      `ELSE`, `DEFINED`, `FOR`, redirection, labels. What the test had to
+      invent is the proof of a *no* — nothing happening writes no row — so every
+      step closes on a barrier command and asserts a count of program starts
+      across it, which is also the only thing that separates a false condition
+      from a refusal that ran anyway.
+
 - [x] **`/bin/time` — cmd's clock, proved to be advancing (v0.1.49).**
       date's twin on the same syscall and the same two shapes: `time /t` prints
       the short form and stops, bare `time` prints the long form and prompts

@@ -3431,6 +3431,187 @@ def scenario_actions(sc, mon, W, H):
         if int(ran.group(1)) != 1:
             raise SystemExit("the level script ran %s commands, want 1"
                              % ran.group(1))
+    elif sc == "ifelse":
+        # v0.1.53: cmd's IF, the branch the %ERRORLEVEL% release exists for.
+        # Three conditions and two modifiers, each one a line a real .bat leans
+        # on:
+        #
+        #   IF [/I] [NOT] <a> == <b> <cmd>      text compare, /I folds the case
+        #   IF [/I] [NOT] EXIST <path> <cmd>    asks the store and the archive
+        #   IF [/I] [NOT] ERRORLEVEL <n> <cmd>  at least n, not equal to n
+        #
+        # The order of the steps is the argument. `if %x% == HELLO` and
+        # `if /i %x% == HELLO` differ in exactly one token, so that pair proves
+        # both halves of the compare rule and no other value moves between them.
+        # `IF ERRORLEVEL 1` answering yes and `IF ERRORLEVEL 9999` answering no
+        # on the same 9009 is what proves "at least": one number alone cannot
+        # tell >= from ==. And the refusal (`if hello echo nope`, a condition with
+        # no operator) is counted like any branch, because cmd rejects the line
+        # and runs nothing - which on a serial port looks exactly like a silent
+        # no.
+        #
+        # Proving a *no* is the part that needs a trick. Nothing happening is
+        # invisible: the shell writes a row only when a command starts. So every
+        # step closes on a barrier - one more `echo tick`, waited for to its exit
+        # row - and the assertion is a count of `shell: running 'echo'` rows over
+        # the window. The launch is asynchronous, but a branch that ran anyway
+        # would have logged its start inside the same execute(), before the next
+        # keystroke was read; by the time the barrier has come back there is no
+        # window left in which a phantom launch could still appear. A true step
+        # counts 2 (the branch plus the barrier), a false one counts 1 (the
+        # barrier alone), and that difference is the whole test.
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+
+        RUN = r"shell: running 'echo' from the prompt"
+        RUN_BAT = r"shell: running 'echo' from a batch file"
+        EXIT0 = r"shell: echo exited with 0"
+
+        def typed(mark, cmd, want):
+            """Type one line and wait for the row that proves it was read."""
+            mark = len(read_log())
+            mon.type_text(cmd + "\n")
+            return wait_serial_after(mark, want)
+
+        def barrier(mark):
+            """One `echo tick`, waited for to its exit row: the far edge of the
+            window a branch's launch could still be hiding in, and the one start
+            every count below subtracts."""
+            return typed(mark, "echo tick", EXIT0)
+
+        def branch(mark, cmd, if_row, want_exec=None, runs=True):
+            """Type one IF line, read what it decided, and check the count that
+            makes the decision mean something: `runs` says whether the command
+            the condition chose was supposed to reach a program at all."""
+            was = count_serial(RUN)
+            mark, _ = typed(mark, cmd, want_exec or if_row)
+            if want_exec:
+                mark, _ = wait_serial_after(mark, if_row)
+            if runs:
+                mark, _ = wait_serial_after(mark, RUN)
+                mark, _ = wait_serial_after(mark, EXIT0)
+            mark = barrier(mark)
+            got = count_serial(RUN) - was
+            if got != (2 if runs else 1):
+                raise SystemExit("%r started %d programs, want %d"
+                                 % (cmd, got, 2 if runs else 1))
+            return mark
+
+        mark = len(read_log())
+        mark, _ = typed(mark, "set x=hello", r"shell: prompt set X=hello")
+
+        # Expansion first, comparison second - the row the shell writes for the
+        # line is `if hello == hello ...`, which is the whole reason `IF` landed
+        # after %expansion% and not before it.
+        mark = branch(mark, "if %x% == hello echo yes",
+                      r"shell: prompt if true 'echo yes'",
+                      r"shell: prompt exec 'if hello == hello echo yes'")
+
+        # One operand changed and the answer changes with it, loudly enough that
+        # the count says nothing ran.
+        mark = branch(mark, "if %x% == world echo no",
+                      r"shell: prompt if false 'echo no'",
+                      r"shell: prompt exec 'if hello == world echo no'",
+                      runs=False)
+
+        # NOT turns exactly that answer around - and the modifier survives the
+        # expansion, so the row shows `if not hello == world`, the condition cmd
+        # really evaluated with the impostor token still in front of it.
+        mark = branch(mark, "if not %x% == world echo flip",
+                      r"shell: prompt if true 'echo flip'",
+                      r"shell: prompt exec 'if not hello == world echo flip'")
+
+        # The pair that pins the case rule: operands that differ only in
+        # capitalisation, answered differently by one token.
+        mark = branch(mark, "if %x% == HELLO echo case",
+                      r"shell: prompt if false 'echo case'",
+                      r"shell: prompt exec 'if hello == HELLO echo case'",
+                      runs=False)
+        mark = branch(mark, "if /i %x% == HELLO echo fold",
+                      r"shell: prompt if true 'echo fold'",
+                      r"shell: prompt exec 'if /i hello == HELLO echo fold'")
+
+        # EXIST asks the same question the loader asks, so a name the store has
+        # and a name it has not get different answers - and the one that is false
+        # starts nothing.
+        mark = branch(mark, "if exist /bin/echo echo arch",
+                      r"shell: prompt if true 'echo arch'")
+        mark = branch(mark, "if exist /tmp/ghost echo ghost",
+                      r"shell: prompt if false 'echo ghost'", runs=False)
+
+        # ERRORLEVEL, both numbers on the same 9009: the "at least" rule needs
+        # the yes and the no or it is only ever been shown one side of itself.
+        mark, _ = typed(mark, "nosuchthing",
+                        r"shell: no program /bin/nosuchthing")
+        mark = branch(mark, "if errorlevel 1 echo one",
+                      r"shell: prompt if true 'echo one'")
+        mark, _ = typed(mark, "nosuchthing",
+                        r"shell: no program /bin/nosuchthing")
+        mark = branch(mark, "if errorlevel 9999 echo big",
+                      r"shell: prompt if false 'echo big'", runs=False)
+
+        # A condition with no operator is not a false condition. cmd refuses the
+        # line, says why, and runs nothing - and the barrier count is what tells
+        # that apart from a branch that quietly took the no path.
+        mark = branch(mark, "if hello echo nope",
+                      r"shell: prompt if refused - expected ==", runs=False)
+
+        # The script path, where the branch decides what `ran` counts: two IF
+        # lines, one true and one false, and the script reports ONE command run.
+        # 43 bytes is the proof both lines reached the file as written.
+        script_c = "if exist /bin/ls echo f\nif exist /z echo g\n"
+        mark = len(read_log())
+        mon.type_text("save script c if exist /bin/ls echo f nl "
+                      "if exist /z echo g\n")
+        mark, m = wait_serial_after(mark, r"save: wrote (\d+) bytes /tmp/c\.bat")
+        if int(m.group(1)) != len(script_c):
+            raise SystemExit("the branch script landed as %s bytes, want %d (%r)"
+                             % (m.group(1), len(script_c), script_c))
+        mark, _ = wait_serial_after(mark, r"shell: save exited with 0")
+
+        was = count_serial(RUN_BAT)
+        mark = len(read_log())
+        mon.type_text("bat c\n")
+        mark, _ = wait_serial_after(
+            mark, r"shell: batch exec 'if exist /bin/ls echo f'")
+        mark, _ = wait_serial_after(mark, r"shell: batch if true 'echo f'")
+        mark, _ = wait_serial_after(mark, RUN_BAT)
+        mark, _ = wait_serial_after(
+            mark, r"shell: batch exec 'if exist /z echo g'")
+        mark, _ = wait_serial_after(mark, r"shell: batch if false 'echo g'")
+        mark, ran = wait_serial_after(
+            mark, r"shell: batch ran (\d+) commands from /tmp/c\.bat")
+        if int(ran.group(1)) != 1:
+            raise SystemExit("the branch script ran %s commands, want 1 - the "
+                             "false branch must not add one" % ran.group(1))
+        if count_serial(RUN_BAT) - was != 1:
+            raise SystemExit("the branch script started %d programs, want 1"
+                             % (count_serial(RUN_BAT) - was))
+
+        # And the two features meet inside a script: the reference has to reach
+        # the file as a reference (the caret is load-bearing, and 29 bytes is the
+        # proof it did), the batch expander resolves it, and the condition
+        # compares the value the script stored a line earlier.
+        script_d = "set p=go\nif %p% == go echo y\n"
+        mark = len(read_log())
+        mon.type_text("save script d set p=go nl if ^%p% == go echo y\n")
+        mark, m = wait_serial_after(mark, r"save: wrote (\d+) bytes /tmp/d\.bat")
+        if int(m.group(1)) != len(script_d):
+            raise SystemExit("the expanded script landed as %s bytes, want %d (%r)"
+                             % (m.group(1), len(script_d), script_d))
+        mark, _ = wait_serial_after(mark, r"shell: save exited with 0")
+        mark = len(read_log())
+        mon.type_text("bat d\n")
+        mark, _ = wait_serial_after(mark, r"shell: batch set P=go")
+        mark, _ = wait_serial_after(
+            mark, r"shell: batch exec 'if go == go echo y'")
+        mark, _ = wait_serial_after(mark, r"shell: batch if true 'echo y'")
+        _, ran = wait_serial_after(
+            mark, r"shell: batch ran (\d+) commands from /tmp/d\.bat")
+        if int(ran.group(1)) != 1:
+            raise SystemExit("the expanded script ran %s commands, want 1"
+                             % ran.group(1))
     elif sc == "unzip":
         # v0.1.36: /bin/unzip unpacks a real archive the way Windows does, folder
         # names included. The archive is the single source of truth: the test
@@ -3938,6 +4119,25 @@ MARKERS = {
                   "shell: prompt set ERRORLEVEL=7",
                   "save: wrote", "shell: batch exec 'echo 0'",
                   "shell: batch ran"],
+    # v0.1.53: cmd's IF. Every yes and every no is a row of its own, the refusal
+    # is a third kind of answer, and the two script rows are what proves a branch
+    # inside a .bat decides what `ran` counts. The case pair and the ERRORLEVEL
+    # pair are in here because each is only meaningful next to its twin.
+    "ifelse":    ["shell: prompt exec 'if hello == hello echo yes'",
+                  "shell: prompt if true 'echo yes'",
+                  "shell: prompt if false 'echo no'",
+                  "shell: prompt if true 'echo flip'",
+                  "shell: prompt if false 'echo case'",
+                  "shell: prompt if true 'echo fold'",
+                  "shell: prompt if true 'echo arch'",
+                  "shell: prompt if false 'echo ghost'",
+                  "shell: prompt if true 'echo one'",
+                  "shell: prompt if false 'echo big'",
+                  "shell: prompt if refused - expected ==",
+                  "shell: batch if true 'echo f'",
+                  "shell: batch if false 'echo g'",
+                  "shell: batch exec 'if go == go echo y'",
+                  "shell: batch if true 'echo y'"],
     # v0.1.36: a real ZIP unpacked, folder names included. The strict byte/digest
     # comparisons are in the scenario; these are the lines the claim turns on -
     # the archive read whole, each safe member out byte for byte (flat and nested,

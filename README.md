@@ -849,6 +849,33 @@ On boot the kernel:
    0, and a test has to wait for that reader before establishing the next number.
    And the level is a number, not a name: `dir` and the other shell verbs have no
    exit code to report, so they do not move it.
+56. **`IF <cond> <cmd>` — the branch, in a typed line and in a script (v0.1.53)**.
+   Until now a `.bat` could only run its lines in order. This is the first line
+   that decides, and it carries cmd's three conditions in the order cmd reads
+   them: `IF a == b`, `IF EXIST path`, and `IF ERRORLEVEL n` — where the third
+   means *at least* n and not equal to n, because that is how a script asks "did
+   something just fail". `/I` folds the case of a text compare, `NOT` turns the
+   answer around, and they compose in cmd's order. The condition is evaluated
+   after `@` and after `%expansion%`, so `if %x% == hello` compares values and not
+   names — the row the shell writes for the line says `if hello == hello`, and that
+   is the whole reason `IF` landed after the two variable releases and not before
+   them. On a yes the line is rewritten to its own tail, so what the branch chose
+   goes back through the same dispatcher a typed line would have used: `set`,
+   `type`, every program, and the script's own command count all see one ordinary
+   command. A condition that is not a condition (`if hello echo x`, no operator) is
+   refused in the transcript and on the screen rather than guessed at, because a
+   shell that infers what a broken line meant cannot be trusted with a correct one.
+   One honest limit: there is no `ELSE`, since cmd's `ELSE` only means something
+   after a statement that has already branched, and that is a rung of its own.
+   The test's hard half is proving a *no*. Nothing happening leaves no row on a
+   serial port, so every step closes on a barrier command and asserts a count of
+   program starts across it — one extra for a branch that ran, none for one that
+   did not — which is the only thing that separates a false condition from a
+   refusal that quietly executed. `== HELLO` false against `/I == HELLO` true on
+   operands that differ in exactly one token pins the case rule, `ERRORLEVEL 1`
+   true against `ERRORLEVEL 9999` false on the same 9009 pins the "at least" rule,
+   and the script path reports one command run for a file that holds two branch
+   lines.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
