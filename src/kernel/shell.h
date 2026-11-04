@@ -35,6 +35,13 @@ void shell_key(int c);
  * table. */
 int shell_launch(const char *name);
 
+/* cmd's %ERRORLEVEL%: the exit code of the last program the shell ran. The
+ * reaper hands it over as each child is collected (proc.c), and a command that
+ * never became a process gets cmd's own 9009 ("is not recognized as an internal
+ * or external command"). The shell answers the reference from this state; a
+ * built-in leaves it alone, because a built-in has no exit code to report. */
+void shell_set_errorlevel(int code);
+
 /* Paint the grid at (x,y); `width` is for wrapping the input line. */
 void shell_draw(int x, int y, int width);
 

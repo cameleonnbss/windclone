@@ -183,10 +183,19 @@ send_keys /tmp/wc-biosmon a b ret h e l l o ret \
 poll_for /tmp/wc-bios.log "[nest] exiting pid" "$TIMEOUT" \
     || fail "BIOS boot never ran the typed orphan/nest command (deadline ${TIMEOUT}s)"
 qemu_quit /tmp/wc-biosmon $BIOPID
+# The uptime marker below is deliberately the prefix and not the whole line. The
+# idle loop prints its first `uptime: Ns (ticks T)` the moment T crosses 100, and
+# it writes N as T/100 - so a boot that reaches that first second at tick 191
+# claims "1s" and one that reaches it at tick 204 claims "2s". Both are the same
+# kernel fact, and which one a machine produces depends on how busy the host is
+# (a UEFI boot under load has been seen to land at 4s). Pinning the digit would
+# pin the test to the host's speed, not to the timer's; what the row has to prove
+# is that the timer drove the loop to its first second, and the tick counter in
+# the line says that in the guest's own words.
 for want in "step: pmm ok" "paging: self-checks passed" "step: paging ok" \
             "vga: text console live" "kmalloc selftest ok" "step: heap ok" \
             "boot complete" "step: interrupts armed" \
-            "irq0: timer interrupt firing" "uptime: 1s" \
+            "irq0: timer interrupt firing" "uptime: " \
             "step: log ring armed" "pci: enumeration done" \
             "pci: host bridge" \
             "e1000: found 82540EM" \
@@ -656,7 +665,7 @@ else
         || fail "UEFI boot never finished its startup demo (deadline ${TIMEOUT}s)"
     qemu_quit /tmp/wc-uefimon $UEPID
     for want in "step: pmm ok" "step: paging ok" "vga: text console live" \
-                "kmalloc selftest ok" "step: heap ok" "boot complete" "uptime: 1s" \
+                "kmalloc selftest ok" "step: heap ok" "boot complete" "uptime: " \
                 "boot: windclone $WC_V" \
                 "pci: enumeration done" "step: keyboard live" \
                 "log ring (most recent):" "step: initrd ok" \
@@ -1046,6 +1055,19 @@ python3 tools/qemu-desktop.py windclone.iso dynvars \
 echo '==> derived variables (slice a value and the clock itself, both paths)'
 python3 tools/qemu-desktop.py windclone.iso substr \
     || fail '%NAME:~off,len% did not slice, or a bad operand was not left literal'
+
+# v0.1.52: cmd's third dynamic variable, %ERRORLEVEL% — the code the last program
+# came back with. Three different answers are demanded: 0 from a program that
+# succeeded, 2 from sort refusing a file that is not there, and 9009 from a
+# command that never became a process at all (the number a real cmd prints for
+# "not recognized"). SET ERRORLEVEL=7 is written and then ignored, because the
+# dynamic name wins, and %ERRORLEVEL:~1,3% proves the slice from v0.1.51 reaches
+# a number the shell is remembering, not only text. Every read is typed only
+# after the "exited with" row it depends on — the shell launches asynchronously,
+# and a test that raced it would be proving nothing.
+echo '==> dynamic %ERRORLEVEL% (0, a refusal, 9009, and a slice of the number)'
+python3 tools/qemu-desktop.py windclone.iso errlvl \
+    || fail '%ERRORLEVEL% did not follow the last program, or SET overruled it'
 
 # v0.1.36: a real ZIP archive unpacked, folder names included.
 # /bin/unzip reads the committed specimen whole and extracts every safe entry

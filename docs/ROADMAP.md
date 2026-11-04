@@ -664,7 +664,8 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       writer's byte count is what proves the reference survived as a reference.
       Not done, deliberately: cmd's other dynamic names (`%RANDOM%`,
       `%ERRORLEVEL%`, `%CMDCMDLINE%`) — each is its own rung. The substring
-      grammar `DATE:~0,3` landed one release later, in v0.1.51.
+      grammar `DATE:~0,3` landed one release later, in v0.1.51, and
+      `%ERRORLEVEL%` two after that, in v0.1.52.
 
 - [x] **`%VAR:~offset,length%` — derived variables, and the clock cut with them
       (v0.1.51).** The rung after teaching the shell to answer the clock is
@@ -688,6 +689,29 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       the two expanders, and it is the first shell feature whose test needs a
       keystroke the harness had never sent — `,` and `~`, both already decoded by
       the kernel's scancode tables, neither reachable from a scenario until now.
+
+- [x] **`%ERRORLEVEL%` — the code the last program came back with (v0.1.52).**
+      The third name cmd writes for the person typing, and the one a script would
+      branch on. DATE and TIME are formatted from a chip; this one is remembered
+      from a wait, so the work sits in the scheduler instead: when
+      `proc_reap_live()` logs a child's code it hands the same number to the
+      shell, and the shell answers it as a dynamic name — which is why
+      `SET ERRORLEVEL=7` is stored and then ignored, and why
+      `%ERRORLEVEL:~1,3%` slices it like anything else the previous release made
+      sliceable. Two numbers are chosen rather than replayed: 9009 for a command
+      that never became a process, which is what cmd prints for "is not
+      recognized as an internal or external command", and 8 when a spawn is
+      refused, the closest honest Windows analogue to "the table had no room".
+      The part worth stating out loud is built-ins: cmd's `echo` is internal and
+      leaves the level alone, while every verb that prints here is /bin/echo, a
+      real program that comes back with 0 — exactly what cmd does after any
+      external command. So the level is what the last *program* returned, reader
+      included, and the scenario is built around that fact rather than around the
+      wish: each read is typed only after the row proving the previous reader was
+      reaped, and the batch assertion expects the 0 that `save` just came back
+      with instead of the stored 7, which makes one line both a precedence claim
+      and an async-launch claim. No new syscall, no new program, no new
+      Start-menu row.
 
 - [x] **`/bin/time` — cmd's clock, proved to be advancing (v0.1.49).**
       date's twin on the same syscall and the same two shapes: `time /t` prints

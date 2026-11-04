@@ -354,6 +354,7 @@ static void cmd_help(void)
     put_line("  DATE [/T]      MONTRE LA DATE DU CMOS (COMME CMD)");
     put_line("  TIME [/T]      MONTRE LHEURE DU CMOS (COMME CMD)");
     put_line("  %DATE% %TIME%  DONNES PAR LHORLOGE A CHAQUE FOIS (CMD)");
+    put_line("  %ERRORLEVEL% CODE DU DERNIER PROGRAMME (CMD)");
     put_line("  NOTE <NOM>     EDITE /TMP/<NOM> (OU <NOM>.TXT)");
     put_line("  VIEW <FICHIER> AFFICHE UN FICHIER EN COULEUR");
     put_line("  PKG            MONTRE LA PAGE RECUPEREE /NET/FETCHED");
@@ -799,6 +800,7 @@ static int launch(int argc, const char *const *argv,
         serial_write("shell: no program ");
         serial_write(path);
         serial_write("\n");
+        shell_set_errorlevel(9009);   /* cmd's "not recognized" number */
         return -1;
     }
 
@@ -819,6 +821,10 @@ static int launch(int argc, const char *const *argv,
         serial_write("shell: failed to run ");
         serial_write(path);
         serial_write("\n");
+        /* Not 9009: the name was recognised and the file was there, so this is
+         * the resource failure, and 8 is what Windows calls ERROR_NOT_ENOUGH_MEMORY
+         * - the closest honest answer to "the table had no room for it". */
+        shell_set_errorlevel(8);
         return -1;
     }
 
@@ -1355,20 +1361,66 @@ static int env_set(const char *name, int nlen, const char *val)
     return 1;
 }
 
-/* cmd keeps two variables that are stored nowhere: %DATE% and %TIME% come from
+/* cmd's third unstored variable, %ERRORLEVEL%: the code the last program came
+ * back with. The reaper in proc.c hands it over as each child is collected, and
+ * a command that never became a process gets cmd's own 9009 - the number a real
+ * cmd prints for "'foo' is not recognized as an internal or external command".
+ * Built-ins leave it alone, because `dir` has no exit code to report, and that
+ * is stated rather than hidden: it is the difference between this shell and one
+ * that pretended to know. */
+static int last_errorlevel;
+
+void shell_set_errorlevel(int code)
+{
+    last_errorlevel = code;
+}
+
+/* Write a signed decimal from the start of `out`, returning the length (0 when
+ * there is no room for even one digit). %ERRORLEVEL% needs a signed one - a
+ * program killed by a signal ends -9 here, and cmd prints the negative number it
+ * actually got - and the existing dec_into() appends unsigned digits into a
+ * screen row, which is the other job. */
+static int sdec_into(char *out, int cap, int v)
+{
+    char tmp[12];
+    int n = 0, m = 0;
+    unsigned u;
+
+    if (cap <= 0)
+        return 0;
+    if (v < 0) {
+        out[m++] = '-';
+        u = (unsigned)(-(long)v);
+    } else {
+        u = (unsigned)v;
+    }
+    do {
+        tmp[n++] = (char)('0' + u % 10);
+        u /= 10;
+    } while (u != 0);
+    while (n > 0 && m < cap - 1)
+        out[m++] = tmp[--n];
+    out[m] = '\0';
+    return m;
+}
+
+/* cmd keeps variables that are stored nowhere: %DATE% and %TIME% come from
  * the clock at the moment the shell asks, so the same script prints a different
  * answer a minute later, and `SET DATE=x` cannot overrule the chip — the dynamic
- * name wins, exactly as it does on a real cmd. The names reach here already
- * folded, so `%date%`, `%Date%` and `%DATE%` are the same reference. Returns the
- * length written into out; 0 means either "not one of the two" or "the CMOS chip
- * never answered", and in both cases the caller falls through to what it would
- * have done before this function existed. */
+ * name wins, exactly as it does on a real cmd. %ERRORLEVEL% is the third, and it
+ * comes from the last program the shell ran rather than from the clock. The names
+ * reach here already folded, so `%date%`, `%Date%` and `%DATE%` are the same
+ * reference. Returns the length written into out; 0 means either "not one of
+ * these" or "the CMOS chip never answered", and in both cases the caller falls
+ * through to what it would have done before this function existed. */
 static int dyn_var(const char *folded, char *out, int cap)
 {
     if (strcmp(folded, "DATE") == 0)
         return rtc_fmt_date(out, cap);
     if (strcmp(folded, "TIME") == 0)
         return rtc_fmt_time(out, cap);
+    if (strcmp(folded, "ERRORLEVEL") == 0)
+        return sdec_into(out, cap, last_errorlevel);
     if (cap > 0)
         out[0] = '\0';
     return 0;

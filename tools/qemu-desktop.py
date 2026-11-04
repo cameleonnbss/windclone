@@ -535,7 +535,16 @@ class Monitor:
         and silently dropped, which is why the batch scenario asserts the whole
         name back out of the serial log instead of trusting the typing."""
         for ch in text:
-            self.key(KEYMAP.get(ch, ch))
+            if "A" <= ch <= "Z":
+                # An uppercase letter is a chord, not a name: QEMU refuses
+                # `sendkey E` out loud ("Parameter 'data' does not accept value
+                # 'E'"), and the kernel decodes shift over the letter's own make
+                # code into the capital the shell folds to. v0.1.52 is the first
+                # scenario that needs one, because cmd's names are typed as
+                # %ERRORLEVEL% rather than as a lowercase guess.
+                self.key("shift-" + ch.lower())
+            else:
+                self.key(KEYMAP.get(ch, ch))
             time.sleep(0.12)
 
     def shot(self, path):
@@ -3309,6 +3318,119 @@ def scenario_actions(sc, mon, W, H):
         if int(ran.group(1)) != 1:
             raise SystemExit("the slice script ran %s commands, want 1"
                              % ran.group(1))
+    elif sc == "errlvl":
+        # v0.1.52: cmd's third unstored variable, %ERRORLEVEL% - the code the
+        # last program came back with. Unlike the clock variables this one is not
+        # formatted from a chip but remembered from a wait, so the scenario has to
+        # produce three different answers and prove each: 0 from a program that
+        # succeeded, 2 from one that refused (sort cannot open what is not there),
+        # and 9009 from a command that never became a process at all, which is the
+        # number a real cmd prints for "is not recognized as an internal or
+        # external command".
+        #
+        # Two more claims are worth pinning while the machine is running. The
+        # dynamic name has to win over a stored one exactly like %TIME% does, so a
+        # `SET ERRORLEVEL=7` is written and then ignored. And the slice from the
+        # release before has to work on it - %ERRORLEVEL:~1,3% is "009" - because
+        # two features that only work apart are two features nobody can use.
+        #
+        # Sequencing is the part a test cannot fake, twice over. The shell launches
+        # a program asynchronously, so a read of %ERRORLEVEL% is typed only after
+        # the "exited with" row of the program that produced it has been seen. And
+        # the reader is itself a program here - `echo` is /bin/echo, not a built-in -
+        # so it comes back with 0 and moves the level on its way out, exactly as an
+        # external command does on a real machine. Every read is therefore followed
+        # by a wait for that reader's own exit row before the next number is
+        # established: a scenario that skipped it would be comparing against a race.
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+
+        def read_after(mark, cmd, want):
+            """Run one command, then read the resolved row the shell wrote for it."""
+            mark = len(read_log())
+            mon.type_text(cmd + "\n")
+            mark, m = wait_serial_after(mark, want)
+            return mark, m
+
+        def drain(mark):
+            """Wait for the reader program to be reaped, so nothing is in flight."""
+            mark, _ = wait_serial_after(mark, r"shell: echo exited with 0")
+            return mark
+
+        # A program that succeeds: the code is 0, and 0 is a real answer rather
+        # than the absence of one.
+        mark = len(read_log())
+        mon.type_text("echo hello\n")
+        mark, _ = wait_serial_after(mark, r"shell: echo exited with 0")
+        mark, m = read_after(mark, "echo %errorlevel%",
+                             r"shell: prompt exec 'echo (-?\d+)'")
+        if m.group(1) != "0":
+            raise SystemExit("%%ERRORLEVEL%% said '%s' after a program that "
+                             "exited 0" % m.group(1))
+        mark = drain(mark)
+
+        # The stored impostor goes in first, then a program that refuses with a
+        # code of its own. The number the shell remembers has to beat the 7 the
+        # environment holds, and the reference typed in capitals is the same
+        # reference - the sort refusal is the one the sort scenario pins at 2.
+        mark, _ = read_after(mark, "set errorlevel=7",
+                             r"shell: prompt set ERRORLEVEL=7")
+        mark, _ = read_after(mark, "sort /tmp/ghost",
+                             r"shell: sort exited with 2")
+        mark, m = read_after(mark, "echo %ERRORLEVEL%",
+                             r"shell: prompt exec 'echo (-?\d+)'")
+        if m.group(1) != "2":
+            raise SystemExit("SET ERRORLEVEL=7 overruled the shell: %%ERRORLEVEL%% "
+                             "said '%s', sort exited 2" % m.group(1))
+        mark = drain(mark)
+
+        # A command that never became a process: cmd's 9009, and the refusal row
+        # is the proof the number came from that line and not from the sort.
+        mark, _ = read_after(mark, "nosuchthing",
+                             r"shell: no program /bin/nosuchthing")
+        mark, m = read_after(mark, "echo %errorlevel%",
+                             r"shell: prompt exec 'echo (-?\d+)'")
+        if m.group(1) != "9009":
+            raise SystemExit("an unknown command left %%ERRORLEVEL%% at '%s', "
+                             "cmd says 9009" % m.group(1))
+        mark = drain(mark)
+
+        # And the two features meet: a slice of an unstored number. 9009 is
+        # re-established first, because the reader above took the level to 0 on
+        # its way out - which is what cmd does after any external command.
+        mark, _ = read_after(mark, "nosuchthing",
+                             r"shell: no program /bin/nosuchthing")
+        mark, m = read_after(mark, "echo %errorlevel:~1,3%",
+                             r"shell: prompt exec 'echo (\d+)'")
+        if m.group(1) != "009":
+            raise SystemExit("%%ERRORLEVEL:~1,3%% said '%s', want '009' "
+                             "from 9009" % m.group(1))
+        mark = drain(mark)
+
+        # The batch path, and here the async launch is the thing being tested:
+        # `save` is a program, so the level the shell holds when the script starts
+        # is the one that program just came back with - 0 - and not the 7 a `SET`
+        # wrote earlier. That makes this row a precedence claim in the batch
+        # expander as well: a script must get the real level even when the
+        # environment contains a stored impostor. The reference still has to reach
+        # the file as a reference (caret), and 18 bytes is the proof it did.
+        script_z = "echo %errorlevel%\n"
+        mark = len(read_log())
+        mon.type_text("save script z echo ^%errorlevel%\n")
+        mark, m = wait_serial_after(mark, r"save: wrote (\d+) bytes /tmp/z\.bat")
+        if int(m.group(1)) != len(script_z):
+            raise SystemExit("the level script landed as %s bytes, want %d (%r)"
+                             % (m.group(1), len(script_z), script_z))
+        mark, _ = wait_serial_after(mark, r"shell: save exited with 0")
+        mark = len(read_log())
+        mon.type_text("bat z\n")
+        mark, _ = wait_serial_after(mark, r"shell: batch exec 'echo 0'")
+        _, ran = wait_serial_after(
+            mark, r"shell: batch ran (\d+) commands from /tmp/z\.bat")
+        if int(ran.group(1)) != 1:
+            raise SystemExit("the level script ran %s commands, want 1"
+                             % ran.group(1))
     elif sc == "unzip":
         # v0.1.36: /bin/unzip unpacks a real archive the way Windows does, folder
         # names included. The archive is the single source of truth: the test
@@ -3802,6 +3924,20 @@ MARKERS = {
                   "shell: prompt exec 'echo '",
                   "save: wrote", "shell: batch set Q=0123456789",
                   "shell: batch exec 'echo 23456'", "shell: batch ran"],
+    # v0.1.52: cmd's %ERRORLEVEL%, the code the last program came back with. The
+    # exact numbers and the SET-that-must-not-win are asserted in the scenario;
+    # these are the lines the claim turns on - a zero that is a real answer, the
+    # 2 a refusal exits with, cmd's 9009 for a command that never became a
+    # process, the stored impostor that was written and then ignored, a slice of
+    # the number, and the script line that resolved at run time.
+    "errlvl":    ["shell: prompt exec 'echo 0'",
+                  "shell: prompt exec 'echo 2'",
+                  "shell: prompt exec 'echo 9009'",
+                  "shell: prompt exec 'echo 009'",
+                  "shell: no program /bin/nosuchthing",
+                  "shell: prompt set ERRORLEVEL=7",
+                  "save: wrote", "shell: batch exec 'echo 0'",
+                  "shell: batch ran"],
     # v0.1.36: a real ZIP unpacked, folder names included. The strict byte/digest
     # comparisons are in the scenario; these are the lines the claim turns on -
     # the archive read whole, each safe member out byte for byte (flat and nested,

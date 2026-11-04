@@ -15,6 +15,7 @@
 #include "usermode.h"   /* USER_* window + the argv convention */
 #include "wcabi.h"       /* WC_ECHILD / WC_EFAULT for proc_wait */
 #include "keyboard.h"    /* the ring a program's read(0) drains */
+#include "shell.h"       /* shell_set_errorlevel: cmd's %ERRORLEVEL% is the code */
 
 void panic(const char *why);
 
@@ -1238,6 +1239,11 @@ static void proc_reap_live(void)
         serial_write(" exited with ");
         serial_write_signed(p->exit_code);
         serial_write("\n");
+
+        /* And the shell remembers it, because cmd's %ERRORLEVEL% is exactly this
+         * number: the code of the last program that finished. Handing it over here
+         * is why the reference can answer on the next line typed. */
+        shell_set_errorlevel(p->exit_code);
 
         proc_free_space(p);
         p->state = PROC_FREE;

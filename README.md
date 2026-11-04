@@ -833,6 +833,22 @@ On boot the kernel:
    One implementation detail is worth naming: both halves of the grammar needed a
    keystroke no test had ever typed, `,` and `~`, and the kernel already decoded
    both — the gap was in the harness, not in the OS.
+55. **`%ERRORLEVEL%` — the code the last program came back with (v0.1.52)**. The
+   third variable cmd writes on the user's behalf, and the one a script actually
+   branches on. It is not stored: the shell remembers the exit code of the last
+   program it waited for, so `sort /tmp/ghost` leaves 2, and a command that never
+   became a process leaves 9009 — the number cmd prints for "is not recognized as
+   an internal or external command". The reaper in the scheduler hands the code up
+   the moment it logs it, so a program that exits on its own without being waited
+   for still counts. It is dynamic in exactly the way the clock is, which means
+   `SET ERRORLEVEL=7` is accepted and then ignored, and it slices like anything
+   else, so `%ERRORLEVEL:~1,3%` is `009`. Two honest limits. Built-ins would leave
+   the level alone, and this shell has no built-in `echo`: the reader is a real
+   program that comes back with 0, which is precisely what cmd does after an
+   external command — so `echo %ERRORLEVEL%` prints the level and then takes it to
+   0, and a test has to wait for that reader before establishing the next number.
+   And the level is a number, not a name: `dir` and the other shell verbs have no
+   exit code to report, so they do not move it.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently
