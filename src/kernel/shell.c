@@ -1788,6 +1788,9 @@ static int do_type(const char *line)
  *   IF [/I] [NOT] EXIST <path> <command>     true when the store or archive has it
  *   IF [/I] [NOT] <a> == <b> <command>       a text compare, /I folding the case
  *
+ * Each takes cmd's `ELSE <command>` on the same line, and the false branch then
+ * runs that one instead of nothing.
+ *
  * The line arrives here after '@' and after %expansion%, and that order is the
  * whole point: `if %x% == y` compares values, not names. On a yes the line is
  * rewritten in place to the command that follows its condition, so the caller
@@ -1795,7 +1798,10 @@ static int do_type(const char *line)
  * command alone - which is what lets `if exist /tmp/a.bat del /tmp/a.bat` reach
  * the built-ins and the programs alike. On a no the line is spent, and the
  * transcript still names the command that did not run, because a script with
- * silent holes in it is a script nobody can debug.
+ * silent holes in it is a script nobody can debug. An ELSE gives that no a
+ * command of its own, and the keyword only means something here after a
+ * condition has already answered - which is why it landed one release later
+ * than the branch itself, not with it.
  *
  * The operands are never copied out of the line: the line is the buffer, and a
  * typed line is bounded by SHELL_COLS-1 while a script line is bounded by
@@ -1805,7 +1811,7 @@ static int do_type(const char *line)
  * Not done, deliberately: cmd's numeric family (EQU, GTR, NEQ and the rest), and
  * wildcards in EXIST, which would need directories this store does not have. */
 #define IF_NONE 0        /* not an IF line: the caller carries on           */
-#define IF_YES  1        /* true, and `work` now holds the command to run   */
+#define IF_YES  1        /* a branch was chosen; `work` now holds its command */
 #define IF_NO   2        /* the condition ran; nothing else does            */
 #define IF_BAD  3        /* not a condition cmd would accept: say so, stop  */
 
@@ -1834,6 +1840,31 @@ static int ci_span(const char *a, int an, const char *b, int bn, int fold)
             return 0;
     }
     return 1;
+}
+
+/* cmd's ELSE, found the way cmd finds it: as a word, not as letters. A token is
+ * a run of non-space characters, so the word only separates two commands when
+ * something follows it - which is what keeps `if 1==1 echo else` a line that
+ * prints else rather than a branch with an empty tail. The scan starts after the
+ * condition for the same reason: the operands belong to the compare, not to the
+ * branch. Returns the address of the keyword, or NULL for the one-branch line
+ * almost every script holds. */
+static const char *else_here(const char *p)
+{
+    for (const char *q = p; *q != '\0'; ) {
+        if (is_word(q, "else")) {
+            const char *r = q + 4;
+            while (*r == ' ')
+                r++;
+            if (*r != '\0')
+                return q;           /* a real tail follows: this is a separator */
+        }
+        while (*q != '\0' && *q != ' ')
+            q++;
+        while (*q == ' ')
+            q++;
+    }
+    return NULL;
 }
 
 static int do_if(char *work, int *len, const char *who)
@@ -1937,27 +1968,77 @@ static int do_if(char *work, int *len, const char *who)
 
     while (*then == ' ')
         then++;
-    if (*then == '\0') {
+
+    /* The command the condition chose runs to the end of the line, or to cmd's
+     * ELSE when the line carries one. */
+    const char *el = else_here(then);
+    int then_n = 0;
+    if (el != NULL) {
+        then_n = (int)(el - then);
+        while (then_n > 0 && then[then_n - 1] == ' ')
+            then_n--;
+    } else {
+        while (then[then_n] != '\0')
+            then_n++;
+    }
+    if (then_n == 0) {
         if_refused(who, "no command after the condition");
         return IF_BAD;
     }
 
-    /* Shorten the line to its own tail. `then` always points ahead of `work`, so
-     * copying forward never overwrites a byte that has not been read yet. */
+    /* A second command exists only when the keyword brought one with it, and the
+     * keyword was already required to be followed by something: a trailing
+     * `else` is an argument, not a branch. The split is made whether or not this
+     * condition takes the second command, because one line has to mean the same
+     * thing on a true day and on a false one - a parser that only looked for
+     * ELSE when it was about to run something would read a script differently
+     * depending on the answer, and that is the kind of bug that shows up solely
+     * in the case nobody was testing. */
+    const char *els = NULL;
+    int els_n = 0;
+    if (el != NULL) {
+        els = el + 4;
+        while (*els == ' ')
+            els++;
+        while (els[els_n] != '\0')
+            els_n++;
+    }
+
+    /* Both rows are written before the line is rewritten, because the rewrite
+     * copies over the tail these pointers read from: the command the condition
+     * chose is still the command that did not run, and saying so after the buffer
+     * has been overwritten would be a guess. */
+    serial_write("shell: ");
+    serial_write(who);
+    serial_write(answer ? " if true '" : " if false '");
+    serial_write_len(then, (size_t)then_n);
+    serial_write("'\n");
+    if (!answer && els != NULL) {
+        serial_write("shell: ");
+        serial_write(who);
+        serial_write(" else '");
+        serial_write_len(els, (size_t)els_n);
+        serial_write("'\n");
+    }
+
+    if (!answer && els == NULL)
+        return IF_NO;                 /* the line is spent: a no runs nothing */
+
+    const char *chosen = answer ? then : els;
+    int cn = answer ? then_n : els_n;
+
+    /* Shorten the line to the command its branch chose. Both `then` and `els`
+     * point ahead of `work`, so copying forward never overwrites a byte that has
+     * not been read yet. */
     int n = 0;
-    while (then[n] != '\0') {
-        work[n] = then[n];
+    while (n < cn) {
+        work[n] = chosen[n];
         n++;
     }
     work[n] = '\0';
     *len = n;
 
-    serial_write("shell: ");
-    serial_write(who);
-    serial_write(answer ? " if true '" : " if false '");
-    serial_write(work);
-    serial_write("'\n");
-    return answer ? IF_YES : IF_NO;
+    return IF_YES;
 }
 
 /* Handle a batch line that is one of the three built-ins. `work` is the line

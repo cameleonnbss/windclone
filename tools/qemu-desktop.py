@@ -3477,8 +3477,9 @@ def scenario_actions(sc, mon, W, H):
         def barrier(mark):
             """One `echo tick`, waited for to its exit row: the far edge of the
             window a branch's launch could still be hiding in, and the one start
-            every count below subtracts."""
-            return typed(mark, "echo tick", EXIT0)
+            every count below subtracts. Returns the new offset, never the pair."""
+            mark, _ = typed(mark, "echo tick", EXIT0)
+            return mark
 
         def branch(mark, cmd, if_row, want_exec=None, runs=True):
             """Type one IF line, read what it decided, and check the count that
@@ -3612,6 +3613,178 @@ def scenario_actions(sc, mon, W, H):
         if int(ran.group(1)) != 1:
             raise SystemExit("the expanded script ran %s commands, want 1"
                              % ran.group(1))
+    elif sc == "elsebr":
+        # v0.1.54: cmd's ELSE, the other half of last release's branch. One line
+        # now carries both answers:
+        #
+        #   IF <cond> <then> ELSE <else>
+        #
+        # and the claim is not just that the false branch can do something - it
+        # is which half runs, and that the half that did not is named in the log
+        # anyway. Every step is therefore counted the way v0.1.53 counted: one
+        # barrier `echo tick` per step, and a delta of two program starts when a
+        # branch reached a program, one when it refused to.
+        #
+        # The pairs are what make the rows mean something. `== hello` true with
+        # an ELSE present starts one program and writes no else row at all, while
+        # `== world` false starts one program and writes the else row that names
+        # it - so an else row is exactly "the second command ran", never "the
+        # line carried the word". NOT is shown turning the answer into the else
+        # branch (the same condition that was true a step earlier), EXIST and
+        # ERRORLEVEL each take an ELSE the way they took a bare command, and a
+        # keyword read as a WORD is proven by the one line that cannot be read
+        # any other way: `if %x% == hello echo else` prints the word else, so
+        # that step must start a program and must not branch.
+        tw = min(TERM_W, W - 40)
+        tx, ty = W - tw - 48, H - TASKBAR_H - TERM_H - 60
+        mon.click(tx + tw // 2, ty + TITLE_H // 2)   # raise the terminal
+
+        RUN = r"shell: running 'echo' from the prompt"
+        RUN_BAT = r"shell: running 'echo' from a batch file"
+        EXIT0 = r"shell: echo exited with 0"
+        ELSE_ROW = r"shell: prompt else '"
+        ELSE_BAT = r"shell: batch else '"
+
+        def typed(mark, cmd, want):
+            mark = len(read_log())
+            mon.type_text(cmd + "\n")
+            return wait_serial_after(mark, want)
+
+        def barrier(mark):
+            mark, _ = typed(mark, "echo tick", EXIT0)
+            return mark
+
+        def branch(mark, cmd, if_row, want_exec=None, else_row=None):
+            """Type one IF...ELSE line that is expected to reach a program, and
+            check both the count and which row pair it wrote. The rows come out of
+            the shell in a fixed order - the `if` verdict, then the `else` verdict
+            when the second command is the one that was chosen, then the launch -
+            so `else_row` is waited for between the verdict and the program: None
+            for a true branch (no else row may appear anywhere) and the row itself
+            for a false one."""
+            was = count_serial(RUN)
+            had = count_serial(ELSE_ROW)
+            mark, _ = typed(mark, cmd, want_exec or if_row)
+            if want_exec:
+                mark, _ = wait_serial_after(mark, if_row)
+            if else_row:
+                mark, _ = wait_serial_after(mark, else_row)
+            mark, _ = wait_serial_after(mark, RUN)
+            mark, _ = wait_serial_after(mark, EXIT0)
+            mark = barrier(mark)
+            got = count_serial(RUN) - was
+            if got != 2:
+                raise SystemExit("%r started %d programs, want 2 (the branch "
+                                 "plus the barrier)" % (cmd, got))
+            rows = count_serial(ELSE_ROW) - had
+            if rows != (1 if else_row else 0):
+                raise SystemExit("%r wrote %d else rows, want %d"
+                                 % (cmd, rows, 1 if else_row else 0))
+            return mark
+
+        mark = len(read_log())
+        mark, _ = typed(mark, "set x=hello", r"shell: prompt set X=hello")
+
+        # A true branch with an ELSE sitting on the line does not reach it: one
+        # program starts, and no else row is written anywhere.
+        mark = branch(mark, "if %x% == hello echo y else echo n",
+                      r"shell: prompt if true 'echo y'",
+                      r"shell: prompt exec 'if hello == hello echo y else echo n'")
+
+        # The same line with one operand changed takes the second command, and
+        # the row that names it is the only thing that says WHICH one ran.
+        mark = branch(mark, "if %x% == world echo y else echo n",
+                      r"shell: prompt if false 'echo y'",
+                      r"shell: prompt exec 'if hello == world echo y else echo n'",
+                      else_row=r"shell: prompt else 'echo n'")
+
+        # NOT turns the answer around, and turns it into the other branch - the
+        # condition that was true two steps ago now falls through to the ELSE.
+        mark = branch(mark, "if not %x% == hello echo a else echo b",
+                      r"shell: prompt if false 'echo a'",
+                      r"shell: prompt exec 'if not hello == hello echo a else echo b'",
+                      else_row=r"shell: prompt else 'echo b'")
+
+        # EXIST and ERRORLEVEL each take an ELSE the way they took a bare
+        # command. One asks the store for a name it has not, and the other asks
+        # about the 9009 the line before it just left - true, so the ELSE is
+        # written but never reached.
+        mark = branch(mark, "if exist /tmp/ghost echo arch else echo gone",
+                      r"shell: prompt if false 'echo arch'",
+                      else_row=r"shell: prompt else 'echo gone'")
+        mark, _ = typed(mark, "nosuchthing",
+                        r"shell: no program /bin/nosuchthing")
+        mark = branch(mark, "if errorlevel 1 echo big else echo small",
+                      r"shell: prompt if true 'echo big'")
+
+        # The word rule, and the one line that proves it: `else` here is the
+        # argument of the command, not a separator, so the branch runs `echo
+        # else` and the log carries no else row. A parser that read letters
+        # rather than words would cut the line in half and print nothing.
+        mark = branch(mark, "if %x% == hello echo else",
+                      r"shell: prompt if true 'echo else'",
+                      r"shell: prompt exec 'if hello == hello echo else'")
+
+        # cmd's keyword is case-folded, and so is ours: this is the same false
+        # branch as above, spelled with capitals, and it must be read the same.
+        mark = branch(mark, "if %x% == world echo y ELSE echo n",
+                      r"shell: prompt if false 'echo y'",
+                      r"shell: prompt exec 'if hello == world echo y ELSE echo n'",
+                      else_row=r"shell: prompt else 'echo n'")
+
+        # An ELSE is not a licence to drop the first command: a condition with
+        # nothing after it is still refused, still runs nothing, and the barrier
+        # count says so (one start, the tick alone).
+        was = count_serial(RUN)
+        mark, _ = typed(mark, "if 1==1",
+                        r"shell: prompt if refused - no command after the condition")
+        mark = barrier(mark)
+        if count_serial(RUN) - was != 1:
+            raise SystemExit("a refused branch started %d programs, want 1"
+                             % (count_serial(RUN) - was))
+
+        # The script path, where the branch decides what `ran` counts. Two files,
+        # one true line and one false line, each reporting ONE command run: the
+        # branch that was taken is the command, and the one that was not is a row
+        # in the log rather than a start in the count.
+        for (letter, body, save, first_row, second_row) in (
+            ("e", "if exist /bin/ls echo f else echo g\n",
+             "save script e if exist /bin/ls echo f else echo g",
+             r"shell: batch if true 'echo f'", None),
+            ("f", "if exist /z echo h else echo i\n",
+             "save script f if exist /z echo h else echo i",
+             r"shell: batch if false 'echo h'",
+             r"shell: batch else 'echo i'"),
+        ):
+            mark = len(read_log())
+            mon.type_text(save + "\n")
+            mark, m = wait_serial_after(
+                mark, r"save: wrote (\d+) bytes /tmp/%s\.bat" % letter)
+            if int(m.group(1)) != len(body):
+                raise SystemExit("the else script %s landed as %s bytes, want %d"
+                                 % (letter, m.group(1), len(body)))
+            mark, _ = wait_serial_after(mark, r"shell: save exited with 0")
+
+            was = count_serial(RUN_BAT)
+            had = count_serial(ELSE_BAT)
+            mark = len(read_log())
+            mon.type_text("bat %s\n" % letter)
+            mark, _ = wait_serial_after(mark, first_row)
+            if second_row:
+                mark, _ = wait_serial_after(mark, second_row)
+            mark, _ = wait_serial_after(mark, RUN_BAT)
+            _, ran = wait_serial_after(
+                mark, r"shell: batch ran (\d+) commands from /tmp/%s\.bat" % letter)
+            if int(ran.group(1)) != 1:
+                raise SystemExit("the else script %s ran %s commands, want 1"
+                                 % (letter, ran.group(1)))
+            if count_serial(RUN_BAT) - was != 1:
+                raise SystemExit("the else script %s started %d programs, want 1"
+                                 % (letter, count_serial(RUN_BAT) - was))
+            rows = count_serial(ELSE_BAT) - had
+            if rows != (1 if second_row else 0):
+                raise SystemExit("the else script %s wrote %d else rows, want %d"
+                                 % (letter, rows, 1 if second_row else 0))
     elif sc == "unzip":
         # v0.1.36: /bin/unzip unpacks a real archive the way Windows does, folder
         # names included. The archive is the single source of truth: the test
@@ -4138,6 +4311,28 @@ MARKERS = {
                   "shell: batch if false 'echo g'",
                   "shell: batch exec 'if go == go echo y'",
                   "shell: batch if true 'echo y'"],
+    # v0.1.54: cmd's ELSE. A true branch is a row with no else after it and a
+    # false branch is the pair, so the two together are the claim: the keyword
+    # chose which command ran, not merely that a second one existed on the line.
+    # `echo else` is in here because it is the word rule made visible - a parser
+    # reading letters instead of words would branch on it and print nothing - and
+    # the last two rows are the script path, where the branch taken is the one
+    # command `ran` counts.
+    "elsebr":    ["shell: prompt exec 'if hello == hello echo y else echo n'",
+                  "shell: prompt if true 'echo y'",
+                  "shell: prompt if false 'echo y'",
+                  "shell: prompt else 'echo n'",
+                  "shell: prompt if false 'echo a'",
+                  "shell: prompt else 'echo b'",
+                  "shell: prompt if false 'echo arch'",
+                  "shell: prompt else 'echo gone'",
+                  "shell: prompt if true 'echo big'",
+                  "shell: prompt if true 'echo else'",
+                  "shell: prompt if refused - no command after the condition",
+                  "shell: batch if true 'echo f'",
+                  "shell: batch if false 'echo h'",
+                  "shell: batch else 'echo i'",
+                  "shell: batch ran 1 commands from /tmp/f.bat"],
     # v0.1.36: a real ZIP unpacked, folder names included. The strict byte/digest
     # comparisons are in the scenario; these are the lines the claim turns on -
     # the archive read whole, each safe member out byte for byte (flat and nested,

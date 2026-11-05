@@ -865,8 +865,8 @@ On boot the kernel:
    command. A condition that is not a condition (`if hello echo x`, no operator) is
    refused in the transcript and on the screen rather than guessed at, because a
    shell that infers what a broken line meant cannot be trusted with a correct one.
-   One honest limit: there is no `ELSE`, since cmd's `ELSE` only means something
-   after a statement that has already branched, and that is a rung of its own.
+   `ELSE` was left out of that release on purpose: it only means something after a
+   statement that has already branched, and it landed one rung later, in v0.1.54.
    The test's hard half is proving a *no*. Nothing happening leaves no row on a
    serial port, so every step closes on a barrier command and asserts a count of
    program starts across it — one extra for a branch that ran, none for one that
@@ -876,6 +876,35 @@ On boot the kernel:
    true against `ERRORLEVEL 9999` false on the same 9009 pins the "at least" rule,
    and the script path reports one command run for a file that holds two branch
    lines.
+57. **`IF <cond> <then> ELSE <else>` — the other half of the branch (v0.1.54)**.
+   A branch that can only say *yes* is half a branch: every real script asks what to
+   do when the condition fails. So `ELSE` came to `do_if`, on the typed line and on
+   the script line alike, and it works the way cmd's does rather than the way a
+   first guess would make it. Three rules carry that. The keyword is read as a
+   **word**, a whole token with non-space text after it, which is why
+   `if %x% == hello echo else` prints the word `else` instead of branching to an
+   empty command — a parser matching letters rather than words cuts that line in
+   half. The line is **split whether or not this condition takes the second
+   command**, because one line has to mean the same thing on a true day and on a
+   false one; a parser that only looked for `ELSE` when it was about to run
+   something would read a script differently depending on the answer, and that is
+   the bug that shows up solely in the case nobody was testing. And the keyword is
+   **case-folded**, so `ELSE`, `else` and `Else` are one keyword, as `is_word` has
+   always made cmd's keywords. On a false branch the chosen command is copied into
+   the line and the branch reports `IF_YES`, so both call sites dispatch it through
+   the same path a typed command would have used and a script still counts exactly
+   **one** command run for an `IF…ELSE` line — the branch that was taken is the
+   command, the one that was not is a row in the log rather than a start in the
+   count. The transcript grew one row, `shell: <who> else '<cmd>'`, written only
+   when the second command is the one that actually runs: it is the single thing
+   that says *which* of the two commands a line executed, because `echo y` and
+   `echo n` both come back 0 and both print a launch row that looks identical. The
+   test proves the negative half by count the way v0.1.53 did — a true branch with
+   an `ELSE` sitting on its line must start exactly one program and write no else
+   row anywhere — and proves `NOT`, `EXIST` and `ERRORLEVEL` each take an `ELSE` in
+   their own turn. What is still not here: cmd's block form, `( … ) ELSE ( … )` over
+   several lines, which needs a parser that can hold a line break, and the rest of
+   the grammar — `DEFINED`, `FOR`, redirection, pipes, labels.
 
 An unhandled exception prints a full register dump (rip/cs/rflags + all GPRs)
 plus a frame-pointer backtrace on the serial console instead of silently

@@ -1082,6 +1082,17 @@ echo '==> if (==, /I, NOT, EXIST, ERRORLEVEL, refusal) in both paths'
 python3 tools/qemu-desktop.py windclone.iso ifelse \
     || fail 'if took the wrong branch, ignored /I or NOT, or ran a command it refused'
 
+# v0.1.54: cmd's ELSE, the other half of that branch. The pairs carry the claim:
+# a true condition with an ELSE on the line starts one program and writes no else
+# row, a false one starts one program and writes the row that names which command
+# ran. NOT is shown falling through to the second command, EXIST and ERRORLEVEL
+# each take an ELSE, and `if %x% == hello echo else` proves the keyword is read as
+# a word (a parser matching letters would branch there and print nothing). Both
+# script paths report one command run, so the branch taken is what `ran` counts.
+echo '==> else (the second command, on a word, in both paths)'
+python3 tools/qemu-desktop.py windclone.iso elsebr \
+    || fail 'else ran on the wrong half of the branch, or split a command on the word'
+
 # v0.1.36: a real ZIP archive unpacked, folder names included.
 # /bin/unzip reads the committed specimen whole and extracts every safe entry
 # byte for byte - flat and nested, stored and deflated (the deflate path runs

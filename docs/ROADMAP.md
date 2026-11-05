@@ -728,12 +728,34 @@ Legend: ✅ done · 🔄 in progress · ⏳ not started
       the dispatcher a typed command would have used, so the built-ins, the
       programs, and a script's own `ran` count all see one ordinary line. A
       condition with no operator is refused on the screen and in the transcript
-      rather than guessed at. Still open in cmd's grammar, each its own rung:
-      `ELSE`, `DEFINED`, `FOR`, redirection, labels. What the test had to
+      rather than guessed at. What was left of cmd's grammar stayed left, each its
+      own rung: `ELSE` (taken the release after this one), `DEFINED`, `FOR`,
+      redirection, labels. What the test had to
       invent is the proof of a *no* — nothing happening writes no row — so every
       step closes on a barrier command and asserts a count of program starts
       across it, which is also the only thing that separates a false condition
       from a refusal that ran anyway.
+
+- [x] **`IF <cond> <then> ELSE <else>` — the branch's second command (v0.1.54).**
+      The release above let a line say yes; this one lets it say what to do on a
+      no, which is the half every real script leans on. `ELSE` is read as a *word*
+      — a whole token with non-space text after it — so `if %x% == hello echo else`
+      prints the word instead of branching to an empty tail, and it is case-folded
+      like every other cmd keyword. The decisive design point is that the split is
+      made whether or not this condition takes the second command: a line must mean
+      the same thing on a true day and on a false one, and a parser that only
+      looked for the keyword when it was about to run something would read a script
+      differently depending on the answer. On a false branch the chosen command is
+      copied into the line and the branch reports the same verdict a true one does,
+      so both call sites dispatch it unchanged and a script counts exactly one
+      command run per `IF…ELSE` line. One transcript row was added —
+      `shell: <who> else '<cmd>'`, written only when that command is the one that
+      runs — because a launch row cannot say *which* of the two commands executed:
+      `echo y` and `echo n` both return 0 and both look identical on the serial
+      port. `NOT`, `EXIST` and `ERRORLEVEL` each take the second command in their
+      own turn, and the negative half is proven by count across a barrier, the way
+      the release before established. Not here: cmd's multi-line block form,
+      `( … ) ELSE ( … )`, which needs a parser that can hold a line break.
 
 - [x] **`/bin/time` — cmd's clock, proved to be advancing (v0.1.49).**
       date's twin on the same syscall and the same two shapes: `time /t` prints
